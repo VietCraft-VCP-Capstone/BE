@@ -31,7 +31,8 @@ export function requireRole(roles: Array<'buyer' | 'seller' | 'admin'>) {
         if (!req.user) {
             return res.status(401).json({ error: 'Unauthorized: Not authenticated' });
         }
-        if (!roles.includes(req.user.role)) {
+        const userRoleLower = req.user.role.toLowerCase() as any;
+        if (!roles.includes(userRoleLower)) {
             return res.status(403).json({ error: `Forbidden: Requires one of [${roles.join(', ')}] roles` });
         }
         next();
