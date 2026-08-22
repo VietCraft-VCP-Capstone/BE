@@ -2,13 +2,25 @@ import mongoose from 'mongoose';
 import { Shop } from '../../modules/product/infrastructure/models/shop.model';
 import { Product } from '../../modules/product/infrastructure/models/product.model';
 import { ProductVariant } from '../../modules/product/infrastructure/models/product-variant.model';
+import { Coupon } from '../../modules/promotion/infrastructure/models/coupon.model';
 import { logger } from './logger';
 
 export async function seedDatabase() {
     try {
+        const couponCount = await Coupon.countDocuments();
+        if (couponCount === 0) {
+            logger.info('Seeding MongoDB initial coupons...');
+            await Coupon.create([
+                { code: 'VCP50K', discount_type: 'FIXED_AMOUNT', discount_value: mongoose.Types.Decimal128.fromString('50000'), min_order_value: mongoose.Types.Decimal128.fromString('200000'), start_date: new Date(), end_date: new Date(Date.now() + 30 * 86400000) },
+                { code: 'VCPFREE', discount_type: 'FIXED_AMOUNT', discount_value: mongoose.Types.Decimal128.fromString('30000'), min_order_value: mongoose.Types.Decimal128.fromString('0'), start_date: new Date(), end_date: new Date(Date.now() + 30 * 86400000) },
+                { code: 'VCP100K', discount_type: 'FIXED_AMOUNT', discount_value: mongoose.Types.Decimal128.fromString('100000'), min_order_value: mongoose.Types.Decimal128.fromString('1000000'), start_date: new Date(), end_date: new Date(Date.now() + 30 * 86400000) },
+                { code: 'VCP10', discount_type: 'PERCENTAGE', discount_value: mongoose.Types.Decimal128.fromString('10'), min_order_value: mongoose.Types.Decimal128.fromString('0'), start_date: new Date(), end_date: new Date(Date.now() + 30 * 86400000) },
+            ]);
+        }
+
         const shopCount = await Shop.countDocuments();
         if (shopCount > 0) {
-            logger.info('Database already has shops, skipping seeding.');
+            logger.info('Database already has shops, skipping shop seeding.');
             return;
         }
 
