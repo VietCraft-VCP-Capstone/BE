@@ -156,5 +156,49 @@ router.delete('/profile/addresses/:addressId', authenticate, requireRole(['buyer
     }
 });
 
+// GET /wishlist - get current user's wishlist product IDs
+router.get('/wishlist', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const user = await User.findById(req.user!.id).select('wishlist');
+        if (!user) { res.status(404).json({ error: 'User not found' }); return; }
+        res.json(user.wishlist || []);
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST /wishlist/:productId - add a product to wishlist
+router.post('/wishlist/:productId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const user = await User.findById(req.user!.id);
+        if (!user) { res.status(404).json({ error: 'User not found' }); return; }
+
+        const { productId } = req.params;
+        const alreadyIn = user.wishlist.some((id: any) => id.toString() === productId);
+        if (!alreadyIn) {
+            user.wishlist.push(productId as any);
+            await user.save();
+        }
+        res.json(user.wishlist);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+// DELETE /wishlist/:productId - remove a product from wishlist
+router.delete('/wishlist/:productId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const user = await User.findById(req.user!.id);
+        if (!user) { res.status(404).json({ error: 'User not found' }); return; }
+
+        const { productId } = req.params;
+        user.wishlist = user.wishlist.filter((id: any) => id.toString() !== productId) as any;
+        await user.save();
+        res.json(user.wishlist);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
 export const userRouter = router;
 export default userRouter;
