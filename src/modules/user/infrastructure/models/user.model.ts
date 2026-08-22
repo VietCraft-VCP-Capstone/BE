@@ -29,6 +29,7 @@ export interface IUser extends Document {
     tax_code?: string;
     addresses: IAddress[];
     notification_settings: INotificationSettings;
+    wishlist: mongoose.Types.ObjectId[];
     created_at: Date;
     updated_at: Date;
 }
@@ -66,6 +67,7 @@ const UserSchema = new Schema<IUser>({
     identity_card_number: { type: String },
     tax_code: { type: String },
     addresses: { type: [AddressSchema], default: [] },
+    wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: [] }],
     notification_settings: {
         type: NotificationSettingsSchema,
         default: () => ({})
