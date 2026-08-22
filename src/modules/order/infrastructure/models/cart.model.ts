@@ -2,9 +2,8 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ICartItem {
     product_id: mongoose.Types.ObjectId;
-    variant_id?: mongoose.Types.ObjectId;
+    variant_id: mongoose.Types.ObjectId;
     quantity: number;
-    is_selected: boolean;
     custom_notes?: string;
     custom_design_file?: string;
     updated_at: Date;
@@ -18,13 +17,12 @@ export interface ICart extends Document {
 
 const CartItemSchema = new Schema<ICartItem>({
     product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
-    variant_id: { type: Schema.Types.ObjectId, ref: 'ProductVariant' },
-    quantity: { type: Number, required: true, min: 1, default: 1 },
-    is_selected: { type: Boolean, default: true },
+    variant_id: { type: Schema.Types.ObjectId, ref: 'ProductVariant', required: true },
+    quantity: { type: Number, required: true, min: 1 },
     custom_notes: { type: String },
     custom_design_file: { type: String },
     updated_at: { type: Date, default: Date.now }
-}, { _id: true });
+}, { _id: false });
 
 const CartSchema = new Schema<ICart>({
     user_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true, index: true },
