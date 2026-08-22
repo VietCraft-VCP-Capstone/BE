@@ -20,6 +20,7 @@ export const config = {
     mailUser: process.env.MAIL_USER || '',
     mailPass: process.env.MAIL_PASS || '',
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
+    printerApiUrl: process.env.PRINTER_API_URL || 'http://localhost:8880',
 };
 
 if (!config.jwtSecret) {

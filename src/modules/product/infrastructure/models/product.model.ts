@@ -10,23 +10,74 @@ export interface IProduct extends Document {
     shop_id: mongoose.Types.ObjectId;
     shipping_profile_id: mongoose.Types.ObjectId;
     title: string;
+    slug: string;
     description: string;
     product_type: 'READY_TO_SHIP' | 'POD_TEMPLATE' | 'CUSTOM_DESIGN_REQUEST';
     allow_customization: boolean;
     customization_type: 'NONE' | 'ONLINE_MOCKUP' | 'DIRECT_CHAT';
     listing_status: 'DRAFT' | 'ACTIVE' | 'INACTIVE' | 'EXPIRED';
+    status: 'DRAFT' | 'PUBLISHED' | 'UNPUBLISHED';
+    unpublish_reason?: string;
     images: string[];
     tags: string[];
     categories: string[];
+    tag_ids: mongoose.Types.ObjectId[];
+    category_ids: mongoose.Types.ObjectId[];
     weight_g: number;
     dimensions_cm: IDimensions;
     stock_alert_threshold?: number;
     moderation_status: 'PENDING' | 'APPROVED' | 'REJECTED';
     rejection_reason?: string;
     is_hidden: boolean;
+    // POD: phôi in (id bên Printer) + cách đặt design lên phôi.
+    blank_id?: string;
+    design_placements?: {
+        design_id?: mongoose.Types.ObjectId;
+        print_area_key: string;
+        x: number;
+        y: number;
+        scale: number;
+        rotation: number;
+        layers?: any[];
+    }[];
     created_at: Date;
     updated_at: Date;
 }
+
+// Layer: 1 phần tử trên 1 mặt. type=image|text|shape. Toạ độ x/y/scale/rotation theo px ảnh phôi.
+const LayerSchema = new Schema({
+    type: { type: String, enum: ['image', 'text', 'shape'], required: true },
+    x: { type: Number, default: 0 },
+    y: { type: Number, default: 0 },
+    scale: { type: Number, default: 1 },
+    rotation: { type: Number, default: 0 },
+    // image
+    design_id: { type: Schema.Types.ObjectId, ref: 'Design' },
+    // text
+    text: { type: String },
+    font_family: { type: String },
+    font_size: { type: Number },
+    font_weight: { type: String },
+    color: { type: String },
+    align: { type: String },
+    // shape
+    shape: { type: String },          // rect | circle | triangle | star | heart
+    fill: { type: String },
+    stroke: { type: String },
+    stroke_width: { type: Number },
+    width: { type: Number },          // kích thước gốc của text/shape (px)
+    height: { type: Number },
+}, { _id: false });
+
+const DesignPlacementSchema = new Schema({
+    design_id: { type: Schema.Types.ObjectId, ref: 'Design' },   // legacy: 1 ảnh/mặt (giữ tương thích)
+    print_area_key: { type: String, required: true },
+    x: { type: Number, default: 0 },
+    y: { type: Number, default: 0 },
+    scale: { type: Number, default: 1 },
+    rotation: { type: Number, default: 0 },
+    layers: { type: [LayerSchema], default: [] },
+}, { _id: false });
 
 const DimensionsSchema = new Schema<IDimensions>({
     length: { type: Number, required: true },
@@ -38,6 +89,7 @@ const ProductSchema = new Schema<IProduct>({
     shop_id: { type: Schema.Types.ObjectId, ref: 'Shop', required: true, index: true },
     shipping_profile_id: { type: Schema.Types.ObjectId, ref: 'ShippingProfile', required: true },
     title: { type: String, required: true },
+    slug: { type: String, unique: true, sparse: true, index: true },
     description: { type: String, required: true },
     product_type: {
         type: String,
@@ -57,9 +109,19 @@ const ProductSchema = new Schema<IProduct>({
         enum: ['DRAFT', 'ACTIVE', 'INACTIVE', 'EXPIRED'],
         default: 'DRAFT'
     },
+    status: {
+        type: String,
+        required: true,
+        enum: ['DRAFT', 'PUBLISHED', 'UNPUBLISHED'],
+        default: 'DRAFT',
+        index: true
+    },
+    unpublish_reason: { type: String },
     images: { type: [String], default: [] },
     tags: { type: [String], index: true, default: [] },
     categories: { type: [String], default: [] },
+    tag_ids: { type: [{ type: Schema.Types.ObjectId, ref: 'Tag' }], index: true, default: [] },
+    category_ids: { type: [{ type: Schema.Types.ObjectId, ref: 'Category' }], index: true, default: [] },
     weight_g: { type: Number, required: true },
     dimensions_cm: { type: DimensionsSchema, required: true },
     stock_alert_threshold: { type: Number, default: 5 },
@@ -70,7 +132,9 @@ const ProductSchema = new Schema<IProduct>({
         default: 'PENDING'
     },
     rejection_reason: { type: String },
-    is_hidden: { type: Boolean, default: false }
+    is_hidden: { type: Boolean, default: false },
+    blank_id: { type: String, index: true },
+    design_placements: { type: [DesignPlacementSchema], default: [] }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import { config } from '../config';
 
 export interface AuthenticatedRequest extends Request {
@@ -7,6 +8,7 @@ export interface AuthenticatedRequest extends Request {
         id: string;
         email: string;
         role: 'buyer' | 'seller' | 'admin';
+        _id?: mongoose.Types.ObjectId;
     };
 }
 
@@ -31,7 +33,10 @@ export function requireRole(roles: Array<'buyer' | 'seller' | 'admin'>) {
         if (!req.user) {
             return res.status(401).json({ error: 'Unauthorized: Not authenticated' });
         }
-        if (!roles.includes(req.user.role)) {
+        // Compare case-insensitively: DB/legacy tokens store the role uppercase
+        // (e.g. 'ADMIN'), while route guards are declared lowercase ('admin').
+        const userRole = String(req.user.role || '').toLowerCase();
+        if (!roles.includes(userRole as 'buyer' | 'seller' | 'admin')) {
             return res.status(403).json({ error: `Forbidden: Requires one of [${roles.join(', ')}] roles` });
         }
         next();

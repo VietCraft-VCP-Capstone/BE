@@ -1,5 +1,5 @@
 export * from './presentation/order.router';
-export { OrderItem, OrdersService } from './application/order.service';
+export { OrdersService } from './application/order.service';
 export * from './infrastructure/models/order.model';
 export * from './infrastructure/models/cart.model';
 export * from './infrastructure/models/payout-request.model';

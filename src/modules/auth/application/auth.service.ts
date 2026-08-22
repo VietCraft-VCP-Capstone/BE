@@ -10,7 +10,9 @@ function generateOtp(): string {
 }
 
 function generateToken(payload: { id: string; email: string; role: string }) {
-    return jwt.sign(payload, config.jwtSecret, { expiresIn: '7d' });
+    // Normalize role to lowercase so it matches route guards (requireRole(['admin']))
+    const normalized = { ...payload, role: String(payload.role || '').toLowerCase() };
+    return jwt.sign(normalized, config.jwtSecret, { expiresIn: '7d' });
 }
 
 export class AuthService {
