@@ -22,6 +22,16 @@ router.get('/featured-shops', async (req, res) => {
     }
 });
 
+router.get('/:id/related', async (req, res) => {
+    try {
+        const product = await ProductsService.getById(req.params.id);
+        const related = await ProductsService.getRelated(req.params.id, product.category);
+        res.json(related);
+    } catch (error: any) {
+        res.status(404).json({ error: error.message });
+    }
+});
+
 router.get('/:id', async (req, res) => {
     try {
         const product = await ProductsService.getById(req.params.id);
@@ -30,6 +40,7 @@ router.get('/:id', async (req, res) => {
         res.status(404).json({ error: error.message });
     }
 });
+
 
 router.post('/', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
     try {

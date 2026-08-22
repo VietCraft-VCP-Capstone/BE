@@ -6,8 +6,12 @@ import { Shop } from '../infrastructure/models/shop.model';
 export interface ProductVariant {
     id: string;
     name: string;
+    color?: string;
+    size?: string;
+    material?: string;
     price: number;
     stock: number;
+    mockupImage?: string;
 }
 
 export interface ProductMockup {
@@ -16,17 +20,29 @@ export interface ProductMockup {
     description: string;
 }
 
+export interface ShopInfo {
+    id: string;
+    name: string;
+    logo?: string;
+    rating: number;
+}
+
 export interface Product {
     id: string;
     title: string;
     description: string;
     sellerId: string;
+    shopInfo?: ShopInfo;
     price: number;
     category: string;
+    tags: string[];
+    allowCustomization: boolean;
+    customizationType: string;
     variants: ProductVariant[];
     mockups: ProductMockup[];
     createdAt: Date;
     images?: string[];
+    weightG?: number;
 }
 
 export class ProductsService {
@@ -39,8 +55,12 @@ export class ProductsService {
             const pVariants: ProductVariant[] = variants.map(v => ({
                 id: v._id.toString(),
                 name: [v.color, v.size, v.material].filter(Boolean).join(' - ') || 'Standard',
+                color: v.color,
+                size: v.size,
+                material: v.material,
                 price: parseFloat(v.retail_price.toString()),
                 stock: v.stock_quantity,
+                mockupImage: v.mockup_image,
             }));
 
             const price = pVariants[0]?.price || 0;
@@ -52,6 +72,9 @@ export class ProductsService {
                 sellerId: mp.shop_id.toString(),
                 price: price,
                 category: mp.categories?.[0] || 'General',
+                tags: mp.tags || [],
+                allowCustomization: mp.allow_customization,
+                customizationType: mp.customization_type,
                 variants: pVariants,
                 mockups: mp.images.map((img, index) => ({
                     id: `m_${index}`,
@@ -59,7 +82,8 @@ export class ProductsService {
                     description: `Image ${index + 1}`
                 })),
                 createdAt: mp.created_at,
-                images: mp.images
+                images: mp.images,
+                weightG: mp.weight_g,
             });
         }
         return productsList;
@@ -72,12 +96,19 @@ export class ProductsService {
         const mp = await MongoProduct.findById(id);
         if (!mp) throw new Error('Product not found');
 
+        // Load shop info
+        const shop = await Shop.findById(mp.shop_id);
+
         const variants = await MongoVariant.find({ product_id: mp._id, is_active: true });
         const pVariants: ProductVariant[] = variants.map(v => ({
             id: v._id.toString(),
             name: [v.color, v.size, v.material].filter(Boolean).join(' - ') || 'Standard',
+            color: v.color,
+            size: v.size,
+            material: v.material,
             price: parseFloat(v.retail_price.toString()),
             stock: v.stock_quantity,
+            mockupImage: v.mockup_image,
         }));
 
         const price = pVariants[0]?.price || 0;
@@ -87,8 +118,17 @@ export class ProductsService {
             title: mp.title,
             description: mp.description,
             sellerId: mp.shop_id.toString(),
+            shopInfo: shop ? {
+                id: shop._id.toString(),
+                name: shop.shop_name,
+                logo: shop.logo,
+                rating: shop.average_rating,
+            } : undefined,
             price: price,
             category: mp.categories?.[0] || 'General',
+            tags: mp.tags || [],
+            allowCustomization: mp.allow_customization,
+            customizationType: mp.customization_type,
             variants: pVariants,
             mockups: mp.images.map((img, index) => ({
                 id: `m_${index}`,
@@ -96,7 +136,8 @@ export class ProductsService {
                 description: `Image ${index + 1}`
             })),
             createdAt: mp.created_at,
-            images: mp.images
+            images: mp.images,
+            weightG: mp.weight_g,
         };
     }
 
@@ -146,6 +187,9 @@ export class ProductsService {
             sellerId: mp.shop_id.toString(),
             price: price || 0,
             category: category || 'General',
+            tags: [],
+            allowCustomization: false,
+            customizationType: 'NONE',
             variants: [{
                 id: v._id.toString(),
                 name: 'Standard',
@@ -188,6 +232,64 @@ export class ProductsService {
         mp.listing_status = 'INACTIVE';
         await mp.save();
         return { success: true };
+    }
+
+    static async getRelated(id: string, category: string, limit = 4): Promise<Product[]> {
+        const mongoProducts = await MongoProduct.find({
+            _id: { $ne: new mongoose.Types.ObjectId(id) },
+            categories: category,
+            listing_status: 'ACTIVE',
+        }).limit(limit);
+
+        const results: Product[] = [];
+        for (const mp of mongoProducts) {
+            const variants = await MongoVariant.find({ product_id: mp._id, is_active: true }).limit(1);
+            const price = variants[0] ? parseFloat(variants[0].retail_price.toString()) : 0;
+            results.push({
+                id: mp._id.toString(),
+                title: mp.title,
+                description: mp.description,
+                sellerId: mp.shop_id.toString(),
+                price,
+                category: mp.categories?.[0] || 'General',
+                tags: mp.tags || [],
+                allowCustomization: mp.allow_customization,
+                customizationType: mp.customization_type,
+                variants: [],
+                mockups: [],
+                createdAt: mp.created_at,
+                images: mp.images,
+            });
+        }
+
+        // Fallback: return any products if category doesn't match enough
+        if (results.length < limit) {
+            const extra = await MongoProduct.find({
+                _id: { $ne: new mongoose.Types.ObjectId(id) },
+                listing_status: 'ACTIVE',
+            }).limit(limit - results.length);
+            for (const mp of extra) {
+                if (results.find(r => r.id === mp._id.toString())) continue;
+                const variants = await MongoVariant.find({ product_id: mp._id, is_active: true }).limit(1);
+                const price = variants[0] ? parseFloat(variants[0].retail_price.toString()) : 0;
+                results.push({
+                    id: mp._id.toString(),
+                    title: mp.title,
+                    description: mp.description,
+                    sellerId: mp.shop_id.toString(),
+                    price,
+                    category: mp.categories?.[0] || 'General',
+                    tags: mp.tags || [],
+                    allowCustomization: mp.allow_customization,
+                    customizationType: mp.customization_type,
+                    variants: [],
+                    mockups: [],
+                    createdAt: mp.created_at,
+                    images: mp.images,
+                });
+            }
+        }
+        return results;
     }
 
     static async getFeaturedShops() {
