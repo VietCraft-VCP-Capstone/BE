@@ -21,12 +21,18 @@ export class AuthService {
         if (existing) throw new Error('Email đã được sử dụng.');
 
         const password_hash = await bcrypt.hash(password, 12);
-        await User.create({ email, password_hash, full_name: name, role: 'BUYER' });
 
         const otp = generateOtp();
         const expired_at = new Date(Date.now() + 10 * 60 * 1000);
         await OtpVerification.deleteMany({ email, purpose: 'REGISTER' });
-        await OtpVerification.create({ email, otp_code: otp, purpose: 'REGISTER', expired_at });
+        await OtpVerification.create({
+            email,
+            otp_code: otp,
+            purpose: 'REGISTER',
+            expired_at,
+            temp_password_hash: password_hash,
+            temp_full_name: name,
+        });
 
         try {
             await sendOtpEmail(email, otp);
@@ -49,11 +55,21 @@ export class AuthService {
         });
         if (!record) throw new Error('Mã OTP không hợp lệ hoặc đã hết hạn.');
 
-        await OtpVerification.deleteMany({ email });
+        const existing = await User.findOne({ email });
+        if (existing) throw new Error('Email đã được sử dụng.');
 
-        const user = await User.findOne({ email });
-        if (!user) throw new Error('Tài khoản không tồn tại.');
-        if (user.is_locked) throw new Error('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên.');
+        if (!record.temp_password_hash || !record.temp_full_name) {
+            throw new Error('Dữ liệu đăng ký không hợp lệ.');
+        }
+
+        const user = await User.create({
+            email,
+            password_hash: record.temp_password_hash,
+            full_name: record.temp_full_name,
+            role: 'BUYER',
+        });
+
+        await OtpVerification.deleteMany({ email });
 
         const token = generateToken({ id: user._id.toString(), email: user.email, role: user.role });
         return { token, user: { id: user._id, email: user.email, name: user.full_name, role: user.role } };
@@ -63,6 +79,12 @@ export class AuthService {
         const { email, password } = payload;
         const user = await User.findOne({ email });
         if (!user) {
+            const pendingReg = await OtpVerification.findOne({ email, purpose: 'REGISTER' });
+            if (pendingReg) {
+                const err = new Error('Tài khoản chưa được xác thực. Vui lòng xác thực bằng mã OTP.') as any;
+                err.code = 'USER_NOT_VERIFIED';
+                throw err;
+            }
             const err = new Error('Email hoặc mật khẩu không đúng.') as any;
             err.code = 'USER_NOT_FOUND';
             throw err;
@@ -94,6 +116,9 @@ export class AuthService {
             user = await User.create({ email: gInfo.email, password_hash, full_name: gInfo.name || gInfo.email, avatar: gInfo.picture, role: 'BUYER' });
         }
         if (user.is_locked) throw new Error('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên.');
+
+        await OtpVerification.deleteMany({ email: gInfo.email, purpose: 'REGISTER' });
+
         const token = generateToken({ id: user._id.toString(), email: user.email, role: user.role });
         return { token, user: { id: user._id, email: user.email, name: user.full_name, role: user.role } };
     }
