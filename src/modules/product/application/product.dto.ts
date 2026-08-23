@@ -10,6 +10,24 @@ export interface InventoryTrendPointDTO {
     stock: number;
 }
 
+export interface ProductVariantDTO {
+    id: string;
+    name: string;
+    color?: string;
+    size?: string;
+    material?: string;
+    price: number;
+    stock: number;
+    mockupImage?: string;
+}
+
+export interface ShopInfoDTO {
+    id: string;
+    name: string;
+    logo?: string;
+    rating: number;
+}
+
 export interface ProductItemResponseDTO {
     id: string;
     sku: string;
@@ -28,6 +46,12 @@ export interface ProductItemResponseDTO {
     colors: ProductColorVariantDTO[];
     engagementTrend: number[];
     inventoryTrends: InventoryTrendPointDTO[];
+    variants?: ProductVariantDTO[];
+    shopInfo?: ShopInfoDTO;
+    sellerId?: string;
+    tags?: string[];
+    allowCustomization?: boolean;
+    customizationType?: string;
     createdAt: string;
     updatedAt: string;
 }

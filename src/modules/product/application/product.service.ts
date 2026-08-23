@@ -80,6 +80,17 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
 
     const location = (product.tags && product.tags[0]) || '';
 
+    const mappedVariants = variants.map(v => ({
+        id: v._id.toString(),
+        name: [v.color, v.size, v.material].filter(Boolean).join(' - ') || 'Standard',
+        color: v.color,
+        size: v.size,
+        material: v.material,
+        price: parseFloat(v.retail_price?.toString() || '0'),
+        stock: Number(v.stock_quantity) || 0,
+        mockupImage: v.mockup_image,
+    }));
+
     return {
         id: product._id.toString(),
         sku,
@@ -98,6 +109,17 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         colors: colors.length > 0 ? colors : [{ name: 'Tự nhiên', hex: '#5C4033' }],
         engagementTrend,
         inventoryTrends,
+        variants: mappedVariants,
+        shopInfo: shop ? {
+            id: shop._id.toString(),
+            name: shop.shop_name,
+            logo: shop.logo,
+            rating: shop.average_rating || 5.0,
+        } : undefined,
+        sellerId: product.shop_id ? product.shop_id.toString() : undefined,
+        tags: product.tags || [],
+        allowCustomization: Boolean(product.allow_customization),
+        customizationType: product.customization_type || 'NONE',
         createdAt: product.created_at ? new Date(product.created_at).toISOString() : new Date().toISOString(),
         updatedAt: product.updated_at ? new Date(product.updated_at).toISOString() : new Date().toISOString(),
     };
@@ -206,6 +228,54 @@ export class ProductsService {
         const variants = await MongoVariant.find({ product_id: mp._id });
         const shop = await Shop.findById(mp.shop_id);
         return mapToProductItemResponse(mp, variants, shop);
+    }
+
+    static async getRelated(id: string, category?: string, limit = 4): Promise<ProductItemResponseDTO[]> {
+        const query: any = {
+            _id: { $ne: new mongoose.Types.ObjectId(id) },
+            listing_status: 'ACTIVE',
+        };
+        if (category) {
+            query.categories = category;
+        }
+
+        let mongoProducts = await MongoProduct.find(query).limit(limit);
+
+        if (mongoProducts.length < limit) {
+            const extra = await MongoProduct.find({
+                _id: { $nin: [new mongoose.Types.ObjectId(id), ...mongoProducts.map(p => p._id)] },
+                listing_status: 'ACTIVE',
+            }).limit(limit - mongoProducts.length);
+            mongoProducts = [...mongoProducts, ...extra];
+        }
+
+        const productIds = mongoProducts.map(p => p._id);
+        const shopIds = [...new Set(mongoProducts.map(p => p.shop_id).filter(Boolean))];
+
+        const [allVariants, allShops] = await Promise.all([
+            MongoVariant.find({ product_id: { $in: productIds } }),
+            Shop.find({ _id: { $in: shopIds } })
+        ]);
+
+        const variantsByProductId = new Map<string, any[]>();
+        for (const v of allVariants) {
+            const pid = v.product_id.toString();
+            if (!variantsByProductId.has(pid)) {
+                variantsByProductId.set(pid, []);
+            }
+            variantsByProductId.get(pid)!.push(v);
+        }
+
+        const shopsById = new Map<string, any>();
+        for (const s of allShops) {
+            shopsById.set(s._id.toString(), s);
+        }
+
+        return mongoProducts.map(mp => {
+            const variants = variantsByProductId.get(mp._id.toString()) || [];
+            const shop = shopsById.get(mp.shop_id?.toString());
+            return mapToProductItemResponse(mp, variants, shop);
+        });
     }
 
     static async create(sellerId: string, payload: ProductFormDataDTO): Promise<ProductItemResponseDTO> {
@@ -413,4 +483,5 @@ export class ProductsService {
         return await Shop.find().limit(5);
     }
 }
+
 export default ProductsService;

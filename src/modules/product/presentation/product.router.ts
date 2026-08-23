@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { ProductsService } from '../application/product.service';
-import { optionalAuthenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { authenticate, optionalAuthenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 
 const router = Router();
 
@@ -33,6 +33,17 @@ router.get('/featured-shops', async (req, res) => {
         res.json(shops);
     } catch (error: any) {
         res.status(500).json({ error: error.message || 'Lỗi khi tải danh sách gian hàng.' });
+    }
+});
+
+// GET related products
+router.get('/:id/related', async (req, res) => {
+    try {
+        const product = await ProductsService.getById(req.params.id);
+        const related = await ProductsService.getRelated(req.params.id, (product as any)?.category);
+        res.json(related);
+    } catch (error: any) {
+        res.status(404).json({ error: error.message || 'Không tìm thấy sản phẩm liên quan.' });
     }
 });
 
