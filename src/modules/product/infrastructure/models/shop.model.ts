@@ -21,6 +21,7 @@ export interface IShop extends Document {
     listing_count: number;
     average_rating: number;
     product_diversity_score?: number;
+    settings?: Record<string, any>;
     created_at: Date;
     updated_at: Date;
 }
@@ -43,6 +44,7 @@ const ShopSchema = new Schema<IShop>({
     bank_info: { type: BankInfoSchema },
     average_response_time_seconds: { type: Number, default: 0 },
     performance_benchmarks: { type: Schema.Types.Mixed, default: {} },
+    settings: { type: Schema.Types.Mixed, default: {} },
     listing_count: { type: Number, default: 0 },
     average_rating: { type: Number, default: 0.0 },
     product_diversity_score: { type: Number, default: 0.0 }
