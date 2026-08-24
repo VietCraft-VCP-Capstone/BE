@@ -1,5 +1,7 @@
 import { User, IAddress } from '../infrastructure/models/user.model';
 import { Order } from '../../order/infrastructure/models/order.model';
+import { Wishlist } from '../../product/infrastructure/models/wishlist.model';
+import { ShopFollower } from '../../product/infrastructure/models/shop-follower.model';
 import mongoose from 'mongoose';
 
 export class UserService {
@@ -14,6 +16,9 @@ export class UserService {
         }
 
         const ordersCount = await Order.countDocuments({ buyer_id: userId });
+        const wishlist = await Wishlist.findOne({ user_id: userId });
+        const wishlistCount = wishlist ? wishlist.product_ids.length : 0;
+        const followingCount = await ShopFollower.countDocuments({ buyer_ids: userId });
 
         const userObj = user.toObject();
         return {
@@ -21,8 +26,8 @@ export class UserService {
             rank: 'Thành viên Bạc',
             stats: {
                 ordersCount: ordersCount,
-                collectionsCount: 5,
-                followingCount: 24
+                collectionsCount: wishlistCount,
+                followingCount: followingCount
             }
         };
     }
@@ -43,6 +48,9 @@ export class UserService {
         }
 
         const ordersCount = await Order.countDocuments({ buyer_id: userId });
+        const wishlist = await Wishlist.findOne({ user_id: userId });
+        const wishlistCount = wishlist ? wishlist.product_ids.length : 0;
+        const followingCount = await ShopFollower.countDocuments({ buyer_ids: userId });
 
         const userObj = user.toObject();
         return {
@@ -50,8 +58,8 @@ export class UserService {
             rank: 'Thành viên Bạc',
             stats: {
                 ordersCount: ordersCount,
-                collectionsCount: 5,
-                followingCount: 24
+                collectionsCount: wishlistCount,
+                followingCount: followingCount
             }
         };
     }

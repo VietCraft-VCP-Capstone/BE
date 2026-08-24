@@ -17,6 +17,13 @@ export interface INotificationSettings {
     email: boolean;
 }
 
+export interface ICartItem {
+    product_id: mongoose.Types.ObjectId;
+    variant_id?: string;
+    quantity: number;
+    checked?: boolean;
+}
+
 export interface IUser extends Document {
     email: string;
     password_hash: string;
@@ -29,9 +36,18 @@ export interface IUser extends Document {
     tax_code?: string;
     addresses: IAddress[];
     notification_settings: INotificationSettings;
+    wishlist: mongoose.Types.ObjectId[];
+    cart: ICartItem[];
     created_at: Date;
     updated_at: Date;
 }
+
+const CartItemSchema = new Schema<ICartItem>({
+    product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
+    variant_id: { type: String },
+    quantity: { type: Number, default: 1, min: 1 },
+    checked: { type: Boolean, default: true }
+}, { _id: false });
 
 const AddressSchema = new Schema<IAddress>({
     recipient_name: { type: String, required: true },
@@ -66,6 +82,8 @@ const UserSchema = new Schema<IUser>({
     identity_card_number: { type: String },
     tax_code: { type: String },
     addresses: { type: [AddressSchema], default: [] },
+    wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: [] }],
+    cart: { type: [CartItemSchema], default: [] },
     notification_settings: {
         type: NotificationSettingsSchema,
         default: () => ({})

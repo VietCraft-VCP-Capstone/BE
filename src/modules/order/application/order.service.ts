@@ -93,7 +93,7 @@ function mapDbOrderToResponse(dbOrder: any): Order {
 
 export class OrdersService {
     static async createOrder(buyerId: string, payload: any) {
-        const { items, paymentGateway, shippingProvider, shopName, shippingAddress, totalAmount, shippingFee } = payload;
+        const { items, paymentGateway, shippingProvider, shopName, shopLogo, shippingAddress, totalAmount, shippingFee } = payload;
 
         // 1. Tìm hoặc tạo Shop mẫu để làm khóa ngoại
         let shop = await Shop.findOne({ shop_name: shopName });
