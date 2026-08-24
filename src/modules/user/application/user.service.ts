@@ -1,4 +1,5 @@
 import { User, IAddress } from '../infrastructure/models/user.model';
+import { Order } from '../../order/infrastructure/models/order.model';
 import mongoose from 'mongoose';
 
 export class UserService {
@@ -12,12 +13,14 @@ export class UserService {
             throw new Error('Không tìm thấy người dùng');
         }
 
+        const ordersCount = await Order.countDocuments({ buyer_id: userId });
+
         const userObj = user.toObject();
         return {
             ...userObj,
             rank: 'Thành viên Bạc',
             stats: {
-                ordersCount: 12,
+                ordersCount: ordersCount,
                 collectionsCount: 5,
                 followingCount: 24
             }
@@ -39,12 +42,14 @@ export class UserService {
             throw new Error('Không tìm thấy người dùng');
         }
 
+        const ordersCount = await Order.countDocuments({ buyer_id: userId });
+
         const userObj = user.toObject();
         return {
             ...userObj,
             rank: 'Thành viên Bạc',
             stats: {
-                ordersCount: 12,
+                ordersCount: ordersCount,
                 collectionsCount: 5,
                 followingCount: 24
             }
