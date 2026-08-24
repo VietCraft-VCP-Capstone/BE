@@ -6,7 +6,7 @@ export interface AuthenticatedRequest extends Request {
     user?: {
         id: string;
         email: string;
-        role: 'buyer' | 'seller' | 'admin';
+        role: string;
     };
 }
 
@@ -26,12 +26,28 @@ export function authenticate(req: AuthenticatedRequest, res: Response, next: Nex
     }
 }
 
-export function requireRole(roles: Array<'buyer' | 'seller' | 'admin'>) {
+export function optionalAuthenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.split(' ')[1];
+        try {
+            const decoded = jwt.verify(token, config.jwtSecret) as any;
+            req.user = decoded;
+        } catch {
+            // Token is optional, ignore invalid token error
+        }
+    }
+    next();
+}
+
+export function requireRole(roles: Array<'buyer' | 'seller' | 'admin' | 'BUYER' | 'SELLER' | 'ADMIN'>) {
     return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
         if (!req.user) {
             return res.status(401).json({ error: 'Unauthorized: Not authenticated' });
         }
-        if (!roles.includes(req.user.role?.toLowerCase() as any)) {
+        const userRole = (req.user.role || '').toLowerCase();
+        const allowedRoles = roles.map(r => r.toLowerCase());
+        if (!allowedRoles.includes(userRole)) {
             return res.status(403).json({ error: `Forbidden: Requires one of [${roles.join(', ')}] roles` });
         }
         next();

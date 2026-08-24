@@ -2,6 +2,7 @@ export * from './presentation/product.router';
 export * from './presentation/wishlist.router';
 export { ProductsService } from './application/product.service';
 export { WishlistService } from './application/wishlist.service';
+export * from './application/product.dto';
 export * from './infrastructure/models/product.model';
 export * from './infrastructure/models/product-variant.model';
 export * from './infrastructure/models/shop.model';
