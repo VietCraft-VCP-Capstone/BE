@@ -3,12 +3,36 @@ import { Cart } from '../infrastructure/models/cart.model';
 
 export class CartService {
     static async getCart(userId: string) {
-        let cart = await Cart.findOne({ user_id: userId }).populate({
-            path: 'items.product_id',
-            select: 'title images retail_price base_cost product_type shop_id listing_status'
-        });
+        let cart = await Cart.findOne({ user_id: userId })
+            .populate({
+                path: 'items.product_id',
+                select: 'title images retail_price base_cost product_type shop_id listing_status',
+                populate: {
+                    path: 'shop_id',
+                    select: 'name logo'
+                }
+            })
+            .populate({
+                path: 'items.variant_id',
+                select: 'sku color size material retail_price base_cost stock_quantity mockup_image is_active'
+            });
+
         if (!cart) {
             cart = await Cart.create({ user_id: userId, items: [] });
+            // Populate the newly created empty cart as well
+            cart = await Cart.findById(cart._id)
+                .populate({
+                    path: 'items.product_id',
+                    select: 'title images retail_price base_cost product_type shop_id listing_status',
+                    populate: {
+                        path: 'shop_id',
+                        select: 'name logo'
+                    }
+                })
+                .populate({
+                    path: 'items.variant_id',
+                    select: 'sku color size material retail_price base_cost stock_quantity mockup_image is_active'
+                });
         }
         return cart;
     }
@@ -21,7 +45,8 @@ export class CartService {
         }
 
         const existingIndex = cart.items.findIndex(
-            item => item.product_id.toString() === productId && (variantId ? item.variant_id?.toString() === variantId : true)
+            item => item.product_id.toString() === productId &&
+                (variantId ? item.variant_id?.toString() === variantId : !item.variant_id)
         );
 
         if (existingIndex > -1) {
@@ -73,7 +98,7 @@ export class CartService {
         const cart = await Cart.findOne({ user_id: userId });
         if (!cart) throw new Error('Giỏ hàng không tồn tại');
 
-        cart.items = cart.items.filter(i => (i as any)._id?.toString() !== itemId && i.product_id.toString() !== itemId);
+        cart.items = cart.items.filter(i => (i as any)._id?.toString() !== itemId);
         await cart.save();
         return this.getCart(userId);
     }

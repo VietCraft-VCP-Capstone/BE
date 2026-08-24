@@ -1,6 +1,8 @@
 import { Router, Response } from 'express';
 import { User } from '../infrastructure/models/user.model';
 import { Order } from '../../order/infrastructure/models/order.model';
+import { Wishlist } from '../../product/infrastructure/models/wishlist.model';
+import { ShopFollower } from '../../product/infrastructure/models/shop-follower.model';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 
 const router = Router();
@@ -18,6 +20,13 @@ router.get('/profile', authenticate, requireRole(['buyer', 'seller', 'admin']), 
         // Count real orders for progress metric
         const ordersCount = await Order.countDocuments({ buyer_id: user._id });
 
+        // Count real wishlist collections
+        const wishlist = await Wishlist.findOne({ user_id: user._id });
+        const wishlistCount = wishlist ? wishlist.product_ids.length : 0;
+
+        // Count real shop followings
+        const followingCount = await ShopFollower.countDocuments({ buyer_ids: user._id });
+
         res.json({
             _id: user._id,
             email: user.email,
@@ -29,8 +38,8 @@ router.get('/profile', authenticate, requireRole(['buyer', 'seller', 'admin']), 
             rank: 'Thành viên Bạc',
             stats: {
                 ordersCount: ordersCount || 0,
-                collectionsCount: 5,
-                followingCount: 24
+                collectionsCount: wishlistCount,
+                followingCount: followingCount
             }
         });
     } catch (error: any) {
