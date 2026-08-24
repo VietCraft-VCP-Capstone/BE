@@ -27,7 +27,8 @@ router.get('/:id', authenticate, async (req: AuthenticatedRequest, res) => {
 router.get('/', authenticate, async (req: AuthenticatedRequest, res) => {
     try {
         const buyerId = req.user!.id;
-        const orders = await OrdersService.getOrdersByBuyer(buyerId);
+        const status = req.query.status as string;
+        const orders = await OrdersService.getOrdersByBuyer(buyerId, status);
         res.json(orders);
     } catch (error: any) {
         res.status(500).json({ error: error.message });
