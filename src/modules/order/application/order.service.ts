@@ -15,13 +15,15 @@ export interface Order {
     shippingProvider: 'ghn' | 'ghtk';
     shippingCode?: string;
     createdAt: Date;
+    shopName?: string;
+    shopLogo?: string;
 }
 
 const mockOrders: Order[] = [];
 
 export class OrdersService {
     static async createOrder(buyerId: string, payload: any) {
-        const { items, paymentGateway, shippingProvider } = payload;
+        const { items, paymentGateway, shippingProvider, shopName, shopLogo } = payload;
 
         let totalAmount = 0;
         for (const item of items) {
@@ -36,7 +38,9 @@ export class OrdersService {
             status: 'pending',
             paymentGateway: paymentGateway || 'vnpay',
             shippingProvider: shippingProvider || 'ghn',
-            createdAt: new Date()
+            createdAt: new Date(),
+            shopName: shopName || 'VietCraft Shop',
+            shopLogo: shopLogo || 'https://images.unsplash.com/photo-1513151233558-d860c5398176?auto=format&fit=crop&w=40'
         };
 
         mockOrders.push(newOrder);
