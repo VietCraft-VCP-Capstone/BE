@@ -1,181 +1,58 @@
 import mongoose from 'mongoose';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { Shop } from '../../product/infrastructure/models/shop.model';
-import { User } from '../../user/infrastructure/models/user.model';
 import { Notification } from '../../notification/infrastructure/models/notification.model';
-import { Category } from '../infrastructure/models/category.model';
-import { Tag } from '../infrastructure/models/tag.model';
+import { Tag } from '../../tags';
 import { ModerationAction } from '../infrastructure/models/moderation-action.model';
 import { logger } from '../../../shared/utils/logger';
+import { PageParams, Paginated, clampPage, paginate } from '../../../shared/utils/pagination';
 import { generateSlug } from '../../../shared/utils/slug';
 import { ProductsService } from '../../product/application/product.service';
-
-export interface IAdminService {
-    listCategories(filter?: string): Promise<any[]>;
-    getCategoryById(id: string): Promise<any | null>;
-    createCategory(data: any): Promise<any>;
-    updateCategory(id: string, data: any): Promise<any | null>;
-    deleteCategory(id: string): Promise<boolean>;
-    listTags(): Promise<any[]>;
-    getTagById(id: string): Promise<any | null>;
-    createTag(data: any): Promise<any>;
-    updateTag(id: string, data: any): Promise<any | null>;
-    deleteTag(id: string): Promise<boolean>;
-    listPendingTags(): Promise<any[]>;
-    approveTag(id: string): Promise<any | null>;
-    rejectTag(id: string): Promise<boolean>;
-    attachTagToProduct(tagId: string, productId: string): Promise<void>;
-    detachTagFromProduct(tagId: string, productId: string): Promise<void>;
-    listProducts(status: string | undefined, page: number, limit: number): Promise<{
-        products: any[];
-        total: number;
-        page: number;
-        limit: number;
-    }>;
-    unpublishProduct(productId: string, reviewerId: string, reason?: string): Promise<any | null>;
-    republishProduct(productId: string, reviewerId: string, notes?: string): Promise<any | null>;
-    getModerationHistory(productId: string): Promise<any[]>;
-    getModerationStats(): Promise<{ published: number; unpublished: number; draft: number; total: number }>;
-}
-
+import { IAdminService } from '../types';
 class AdminService implements IAdminService {
 
-    async listCategories(filter?: string): Promise<any[]> {
-        const query = filter
-            ? { is_active: true, name: { $regex: filter, $options: 'i' } }
-            : { is_active: true };
-        return Category.find(query).sort({ sort_order: 1 }).lean();
-    }
-
-    async getCategoryById(id: string): Promise<any | null> {
-        return Category.findById(id).lean();
-    }
-
-    async createCategory(data: any): Promise<any> {
-        const doc = new Category({
-            name: data.name || '',
-            slug: data.slug?.trim() || generateSlug(data.name || ''),
-            description: data.description,
-            parent_id: data.parent_id,
-            icon: data.icon || 'tag',
-            sort_order: data.sort_order ?? 0,
-            is_active: data.is_active ?? true,
-        });
-        return doc.save();
-    }
-
-    async updateCategory(id: string, data: any): Promise<any | null> {
-        // Keep slug in sync when the name changes and no explicit slug was given.
-        if (data.name && !data.slug) data.slug = generateSlug(data.name);
-        return Category.findByIdAndUpdate(id, data, { new: true }).lean();
-    }
-
-    async deleteCategory(id: string): Promise<boolean> {
-        const children = await Category.find({ parent_id: new mongoose.Types.ObjectId(id) });
-        if (children.length > 0) {
-            throw new Error('Cannot delete category with subcategories. Detach or reassign them first.');
-        }
-        // Block delete when products still reference this category (by id or legacy name string).
-        const cat = await Category.findById(id).lean();
-        if (cat) {
-            const inUse = await Product.countDocuments({ $or: [{ category_ids: id }, { categories: cat.name }] });
-            if (inUse > 0) {
-                throw new Error(`Cannot delete category in use by ${inUse} product(s). Reassign them first.`);
-            }
-        }
-        const result = await Category.findByIdAndDelete(id);
-        return !!result;
-    }
-
-    async listTags(): Promise<any[]> {
-        return Tag.find().sort({ name: 1 }).lean();
-    }
-
-    async getTagById(id: string): Promise<any | null> {
-        return Tag.findById(id).lean();
-    }
-
-    async createTag(data: any): Promise<any> {
-        const doc = new Tag({
-            name: data.name || '',
-            slug: data.slug?.trim() || generateSlug(data.name || ''),
-            color: data.color || '#007700',
-            product_count: 0,
-        });
-        return doc.save();
-    }
-
-    async updateTag(id: string, data: any): Promise<any | null> {
-        if (data.name && !data.slug) data.slug = generateSlug(data.name);
-        return Tag.findByIdAndUpdate(id, data, { new: true }).lean();
-    }
-
-    async deleteTag(id: string): Promise<boolean> {
-        // Guard by id AND legacy name string: product.tags stores names, not ids.
-        const tag = await Tag.findById(id).lean();
-        const inUse = await Product.countDocuments({ $or: [{ tag_ids: id }, ...(tag ? [{ tags: tag.name }] : [])] });
-        if (inUse > 0) {
-            throw new Error(`Cannot delete tag in use by ${inUse} product(s). Detach it first.`);
-        }
-        const result = await Tag.findByIdAndDelete(id);
-        return !!result;
-    }
-
-    // ---- Seller-proposed tag moderation ----
-    async listPendingTags(): Promise<any[]> {
-        return Tag.find({ status: 'pending' }).sort({ created_at: -1 }).lean();
-    }
-
-    // Approve a proposed tag → it becomes a normal active tag.
-    async approveTag(id: string): Promise<any | null> {
-        return Tag.findByIdAndUpdate(id, { status: 'active' }, { new: true }).lean();
-    }
-
-    // Reject a proposed tag → detach from every product (id + legacy name), then delete.
-    async rejectTag(id: string): Promise<boolean> {
-        const tag = await Tag.findById(id).lean();
-        if (!tag) return false;
-        await Product.updateMany(
-            { $or: [{ tag_ids: id }, { tags: tag.name }] },
-            { $pull: { tag_ids: id, tags: tag.name } }
-        );
-        const result = await Tag.findByIdAndDelete(id);
-        return !!result;
-    }
-
-    async attachTagToProduct(tagId: string, productId: string): Promise<void> {
-        const product = await Product.findById(productId);
-        if (!product) throw new Error('Product not found');
-        if (!product.tags.includes(tagId)) {
-            product.tags.push(tagId);
-            await product.save();
-            await Tag.findByIdAndUpdate(tagId, { $inc: { product_count: 1 } });
-        }
-    }
-
-    async detachTagFromProduct(tagId: string, productId: string): Promise<void> {
-        const product = await Product.findById(productId);
-        if (!product) throw new Error('Product not found');
-        product.tags = product.tags.filter((t: string) => t.toString() !== tagId);
-        await product.save();
-        await Tag.findByIdAndUpdate(tagId, { $inc: { product_count: -1 } });
-    }
-
-    async listProducts(status: string | undefined, page: number, limit: number): Promise<{
-        products: any[];
-        total: number;
-        page: number;
-        limit: number;
-    }> {
-        const skip = (page - 1) * limit;
+    async listProducts(status: string | undefined, params: PageParams): Promise<Paginated<any>> {
         const query = status ? { status } : {};
-        const [products, total] = await Promise.all([
-            Product.find(query)
-                .sort({ created_at: -1 })
-                .skip(skip)
-                .limit(limit)
-                .lean(),
-            Product.countDocuments(query),
+        // Đếm trước rồi ghim trang: gỡ sản phẩm cuối cùng của trang 3 xong, FE vẫn
+        // hỏi trang 3 — trả mảng rỗng thì màn hình báo "chưa có sản phẩm nào" trong
+        // khi dữ liệu vẫn nằm ở trang 2.
+        const total = await Product.countDocuments(query);
+        const p = clampPage(params, total);
+
+        // Sắp theo NHÓM TRẠNG THÁI trước, mới tới thời gian tạo.
+        //
+        // Chỉ sắp theo created_at thì sản phẩm vừa bị gỡ vẫn nằm nguyên hàng đầu
+        // nếu nó là sản phẩm mới nhất — admin xử lý xong rồi mà nó cứ chắn lối.
+        // Đưa nhóm đã gỡ xuống cuối: việc đã làm xong thì lùi lại, nhường chỗ cho
+        // những sản phẩm đang bán còn phải rà.
+        //
+        // Lọc theo một trạng thái cụ thể thì cả trang cùng nhóm, thứ hạng thành vô
+        // hiệu và thứ tự quay về đúng created_at giảm dần — không cần nhánh riêng.
+        const products = await Product.aggregate([
+            { $match: query },
+            {
+                $addFields: {
+                    _statusRank: {
+                        $switch: {
+                            branches: [
+                                { case: { $eq: ['$status', 'PUBLISHED'] }, then: 0 },
+                                { case: { $eq: ['$status', 'DRAFT'] }, then: 1 },
+                                { case: { $eq: ['$status', 'UNPUBLISHED'] }, then: 2 },
+                            ],
+                            // Bản ghi cũ thiếu hẳn field status: xếp cùng nhóm nháp,
+                            // đừng để chúng rơi xuống cuối như thể đã bị gỡ.
+                            default: 1,
+                        },
+                    },
+                },
+            },
+            // _id làm khoá phụ: nhiều sản phẩm seed cùng created_at, không có khoá
+            // phụ thì thứ tự giữa hai lần gọi khác nhau và một bản ghi có thể lọt
+            // qua khe giữa hai trang.
+            { $sort: { _statusRank: 1, created_at: -1, _id: -1 } },
+            { $skip: p.skip },
+            { $limit: p.limit },
+            { $project: { _statusRank: 0 } },
         ]);
 
         const shopIds = [...new Set(products.map((p: any) => p.shop_id))];
@@ -189,7 +66,7 @@ class AdminService implements IAdminService {
             seller_id: shopMap.get(p.shop_id.toString())?.owner_id?.toString() || '',
         }));
 
-        return { products: enriched, total, page, limit };
+        return paginate(enriched, total, p);
     }
 
     // Post-moderation: take a live product off the marketplace (violation handling).
@@ -219,9 +96,15 @@ class AdminService implements IAdminService {
         return product;
     }
 
-    // Post-moderation: restore a product (re-validates inside ProductsService.republish).
-    async republishProduct(productId: string, reviewerId: string, notes?: string): Promise<any | null> {
-        const product = await ProductsService.republish(productId);
+    /**
+     * Khôi phục sản phẩm đã gỡ.
+     *
+     * `warnings` là những chỗ tin đăng chưa đạt chuẩn. Trước đây chúng là LỖI và
+     * chặn hẳn thao tác, khiến admin gỡ xong không khôi phục lại được. Nay chỉ
+     * báo lên để admin biết mà nhắc người bán bổ sung.
+     */
+    async republishProduct(productId: string, reviewerId: string, notes?: string): Promise<{ product: any; warnings: string[] } | null> {
+        const { product, warnings } = await ProductsService.republish(productId);
 
         await ModerationAction.create({
             product_id: productId,
@@ -242,7 +125,7 @@ class AdminService implements IAdminService {
         }
 
         logger.info(`Product ${productId} republished by ${reviewerId}`);
-        return product;
+        return { product, warnings };
     }
 
     async getModerationHistory(productId: string): Promise<any[]> {
@@ -252,12 +135,14 @@ class AdminService implements IAdminService {
     }
 
     async getModerationStats(): Promise<{ published: number; unpublished: number; draft: number; total: number }> {
-        const [published, unpublished, draft] = await Promise.all([
+        // total đếm thật, không cộng 3 nhóm: dữ liệu cũ có thể thiếu field status.
+        const [published, unpublished, draft, total] = await Promise.all([
             Product.countDocuments({ status: 'PUBLISHED' }),
             Product.countDocuments({ status: 'UNPUBLISHED' }),
             Product.countDocuments({ status: 'DRAFT' }),
+            Product.countDocuments({}),
         ]);
-        return { published, unpublished, draft, total: published + unpublished + draft };
+        return { published, unpublished, draft, total };
     }
 }
 

@@ -34,7 +34,7 @@ router.get('/mine', authenticate, requireRole(['seller', 'admin']), async (req: 
 
 router.delete('/:id', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
     try {
-        res.json(await DesignService.deleteDesign(req.params.id, req.user!.id));
+        res.json(await DesignService.deleteDesign(req.params.id, req.user!.id, req.user!.role));
     } catch (error: any) {
         if (error instanceof ForbiddenError) return res.status(403).json({ error: error.message });
         if (error.message === 'Design not found') return res.status(404).json({ error: error.message });

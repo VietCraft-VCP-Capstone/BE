@@ -8,7 +8,8 @@ import router from './routes';
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(requestLogger);
 
 // Ảnh design/mockup lưu local (P3/P4). ponytail: static serve, đổi sang CDN sau.
@@ -19,6 +20,11 @@ app.use('/health', (req, res) => {
 });
 
 app.use('/api', router);
+
+// Route không tồn tại -> JSON 404 (mặc định Express trả HTML, FE parse lỗi).
+app.use((req, res) => {
+    res.status(404).json({ error: `Not Found: ${req.method} ${req.originalUrl}` });
+});
 
 app.use(errorHandler);
 

@@ -26,6 +26,11 @@ export interface IProduct extends Document {
     weight_g: number;
     dimensions_cm: IDimensions;
     stock_alert_threshold?: number;
+    // Seller portal: 3 field dưới trước đây bị nhét nhờ vào stock_alert_threshold /
+    // rejection_reason / tags[0] — vốn thuộc về hệ tồn kho, kiểm duyệt và hệ tag.
+    original_price?: number;
+    display_rank?: number;
+    location?: string;
     moderation_status: 'PENDING' | 'APPROVED' | 'REJECTED';
     rejection_reason?: string;
     is_hidden: boolean;
@@ -125,6 +130,9 @@ const ProductSchema = new Schema<IProduct>({
     weight_g: { type: Number, required: true },
     dimensions_cm: { type: DimensionsSchema, required: true },
     stock_alert_threshold: { type: Number, default: 5 },
+    original_price: { type: Number },
+    display_rank: { type: Number, default: 1 },
+    location: { type: String },
     moderation_status: {
         type: String,
         required: true,

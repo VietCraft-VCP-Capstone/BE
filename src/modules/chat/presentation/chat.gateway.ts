@@ -1,5 +1,19 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
+import jwt from 'jsonwebtoken';
+import { config } from '../../../app/config';
+import { AuthUser, normalizeRole } from '../../../app/middleware/auth.middleware';
 import { logger } from '../../../shared/utils/logger';
+
+/** Id phòng chat = 2 id người dùng sắp xếp rồi nối bằng '_'.
+ *  Nhờ quy ước này server tự kiểm tra được ai có quyền vào phòng mà chưa cần bảng conversations. */
+export function buildConversationId(userA: string, userB: string): string {
+    return [userA, userB].sort().join('_');
+}
+
+function isParticipant(user: AuthUser, roomId: string): boolean {
+    if (normalizeRole(user.role) === 'admin') return true;
+    return roomId.split('_').includes(user.id);
+}
 
 export class ChatGateway {
     private io: SocketIOServer;
@@ -10,21 +24,59 @@ export class ChatGateway {
     }
 
     private initialize() {
+        // Bắt buộc JWT khi connect. Trước đây socket hoàn toàn ẩn danh:
+        // bất kỳ ai cũng nối được rồi join phòng bất kỳ để đọc trộm tin nhắn người khác.
+        this.io.use((socket, next) => {
+            const raw = String(
+                socket.handshake.auth?.token
+                || socket.handshake.headers.authorization
+                || socket.handshake.query?.token
+                || ''
+            );
+            const token = raw.startsWith('Bearer ') ? raw.slice(7) : raw;
+            if (!token) return next(new Error('Unauthorized: Missing token'));
+            try {
+                const decoded = jwt.verify(token, config.jwtSecret) as any;
+                socket.data.user = { id: decoded.id, email: decoded.email, role: decoded.role } as AuthUser;
+                next();
+            } catch {
+                next(new Error('Unauthorized: Invalid token'));
+            }
+        });
+
         this.io.on('connection', (socket: Socket) => {
-            logger.info(`Client connected to Chat: ${socket.id}`);
+            const user: AuthUser = socket.data.user;
+            logger.info(`Client connected to Chat: ${socket.id} (user ${user.id})`);
 
             socket.on('join_room', (roomId: string) => {
+                if (typeof roomId !== 'string' || !roomId.trim()) {
+                    return socket.emit('error_message', { error: 'roomId không hợp lệ' });
+                }
+                if (!isParticipant(user, roomId)) {
+                    logger.warn(`Socket ${socket.id} (user ${user.id}) bị từ chối vào phòng ${roomId}`);
+                    return socket.emit('error_message', { error: 'Bạn không thuộc cuộc hội thoại này' });
+                }
                 socket.join(roomId);
                 logger.info(`Socket ${socket.id} joined room ${roomId}`);
-                socket.to(roomId).emit('user_joined', { socketId: socket.id });
+                socket.to(roomId).emit('user_joined', { userId: user.id });
             });
 
-            socket.on('send_message', (data: { roomId: string; senderId: string; message: string }) => {
-                const { roomId, senderId, message } = data;
-                logger.info(`Message in room ${roomId} by ${senderId}: ${message}`);
+            socket.on('send_message', (data: { roomId: string; message: string }) => {
+                const roomId = data?.roomId;
+                const message = data?.message;
+                if (typeof roomId !== 'string' || typeof message !== 'string' || !message.trim()) {
+                    return socket.emit('error_message', { error: 'Payload không hợp lệ' });
+                }
+                // Chỉ phát được vào phòng mình đã join (đã qua kiểm tra ở join_room).
+                if (!socket.rooms.has(roomId)) {
+                    return socket.emit('error_message', { error: 'Bạn chưa tham gia cuộc hội thoại này' });
+                }
 
+                // senderId lấy từ token, KHÔNG tin payload client (trước đây client tự khai -> giả mạo được).
+                // Không log nội dung tin nhắn (dữ liệu riêng tư của người dùng).
+                logger.info(`Message in room ${roomId} by ${user.id}`);
                 this.io.to(roomId).emit('message_received', {
-                    senderId,
+                    senderId: user.id,
                     message,
                     timestamp: new Date()
                 });

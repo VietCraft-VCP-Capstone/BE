@@ -1,10 +1,30 @@
 import { config } from '../../../app/config';
+import { logger } from '../../../shared/utils/logger';
 import { User } from '../../user/infrastructure/models/user.model';
 
 // Đẩy đơn đã thanh toán sang hệ Printer (webhook POST /api/orders). Idempotent bên Printer (dedupe order_code).
-// ponytail: fetch native + 1 lần retry. Đủ cho MVP; hàng đợi/outbox khi cần đảm bảo giao chắc.
+// fetch native + 1 lần retry cho lỗi mạng/5xx. Đủ cho MVP; hàng đợi/outbox khi cần đảm bảo giao chắc.
+
+const MAX_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 1000;
+const TIMEOUT_MS = 5000;
+
+/** Lỗi 4xx là do payload sai — retry vô ích, đánh dấu để dừng sớm. */
+class PrinterClientError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'PrinterClientError';
+    }
+}
+
 export async function dispatchToPrinter(order: any): Promise<void> {
-    const buyer = await User.findById(order.buyer_id).lean().catch(() => null);
+    if (!config.printerApiUrl) {
+        logger.warn(`[DISPATCH] PRINTER_API_URL chưa cấu hình — bỏ qua đơn ${order.order_code}.`);
+        return;
+    }
+
+    // user.model dùng `full_name` (không có `name`).
+    const buyer = await User.findById(order.buyer_id).select('full_name').lean().catch(() => null);
 
     const items = (order.items || []).map((it: any) => {
         let meta: any = {};
@@ -15,6 +35,7 @@ export async function dispatchToPrinter(order: any): Promise<void> {
             color: it.color,
             size: it.size,
             quantity: it.quantity,
+            blank_id: meta.blank_id,
             artwork_url: it.design_file_url,
             design_options: meta.design_options || { scale: 1, rotation: 0, align: 'center' },
         };
@@ -23,27 +44,34 @@ export async function dispatchToPrinter(order: any): Promise<void> {
     const payload = {
         vietcraft_order_id: order._id.toString(),
         order_code: order.order_code,
-        buyer_name: (buyer as any)?.name || 'Khách hàng',
+        buyer_name: (buyer as any)?.full_name || 'Khách hàng',
         recipient_phone: order.shipping_address?.phone || '',
         shipping_address: order.shipping_address,
         items,
     };
 
     const url = `${config.printerApiUrl}/api/orders`;
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         try {
             const res = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
-                signal: AbortSignal.timeout(5000),
+                signal: AbortSignal.timeout(TIMEOUT_MS),
             });
-            if (!res.ok) throw new Error(`Printer trả về ${res.status}`);
-            console.log(`[DISPATCH] Đã gửi đơn ${order.order_code} sang xưởng in.`);
+            if (!res.ok) {
+                const detail = await res.text().catch(() => '');
+                const message = `Printer trả về ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`;
+                if (res.status >= 400 && res.status < 500) throw new PrinterClientError(message);
+                throw new Error(message);
+            }
+            logger.info(`[DISPATCH] Đã gửi đơn ${order.order_code} sang xưởng in.`);
             return;
         } catch (err: any) {
-            if (attempt === 2) throw err;
-            await new Promise(r => setTimeout(r, 1000));
+            // 4xx: payload sai, retry cũng hỏng → ném luôn.
+            if (err instanceof PrinterClientError || attempt === MAX_ATTEMPTS) throw err;
+            logger.warn(`[DISPATCH] Gửi đơn ${order.order_code} lỗi (lần ${attempt}/${MAX_ATTEMPTS}): ${err?.message || err}. Thử lại...`);
+            await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
         }
     }
 }

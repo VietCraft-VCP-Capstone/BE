@@ -21,6 +21,19 @@ export const config = {
     mailPass: process.env.MAIL_PASS || '',
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
     printerApiUrl: process.env.PRINTER_API_URL || 'http://localhost:8880',
+    // Lưu trữ ảnh seller upload. Thiếu credential -> tự fallback về đĩa local (BE/uploads).
+    // Chỉ cần MỘT trong hai: cặp apiKey+apiSecret (signed) hoặc uploadPreset (unsigned).
+    cloudinary: {
+        cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
+        uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || '',
+        apiKey: process.env.CLOUDINARY_API_KEY || '',
+        apiSecret: process.env.CLOUDINARY_API_SECRET || '',
+        folder: process.env.CLOUDINARY_FOLDER || 'vietcraft/designs',
+        // Chỉ đổi khi chạy test hoặc đi qua proxy nội bộ. Bỏ trống = gọi thẳng Cloudinary.
+        apiBase: process.env.CLOUDINARY_API_BASE || 'https://api.cloudinary.com',
+    },
+    // Shared secret cổng thanh toán dùng để ký webhook POST /orders/callback/:id.
+    paymentCallbackSecret: process.env.PAYMENT_CALLBACK_SECRET || '',
 };
 
 if (!config.jwtSecret) {
