@@ -1,273 +1,279 @@
-import mongoose from 'mongoose';
-import { Order, IOrder } from '../infrastructure/models/order.model';
-import { Shop } from '../../product/infrastructure/models/shop.model';
-
-export interface OrderItem {
-    productId: string;
-    variantId: string;
-    quantity: number;
-    price: number;
-    title?: string;
-    color?: string;
-    size?: string;
-    image?: string;
-}
-
-export interface Order {
-    id: string;
-    buyerId: string;
-    items: OrderItem[];
-    totalAmount: number;
-    status: 'pending' | 'paid' | 'shipping' | 'completed' | 'cancelled';
-    paymentGateway: 'vnpay' | 'momo' | 'cod';
-    shippingProvider: 'ghn' | 'ghtk';
-    shippingCode?: string;
-    createdAt: Date;
-    shopName?: string;
-    shopLogo?: string;
-    shippingFee?: number;
-    paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
-    shippingAddress?: {
-        recipient_name: string;
-        phone: string;
-        address_detail: string;
-    };
-}
-
-function mapDbOrderToResponse(dbOrder: any): Order {
-    const subtotal = dbOrder.financial_breakdown?.subtotal ? Number(dbOrder.financial_breakdown.subtotal.toString()) : 0;
-    const shippingFee = dbOrder.financial_breakdown?.shipping_fee ? Number(dbOrder.financial_breakdown.shipping_fee.toString()) : 0;
-    const discount = dbOrder.financial_breakdown?.coupon_discount ? Number(dbOrder.financial_breakdown.coupon_discount.toString()) : 0;
-    const totalAmount = subtotal + shippingFee - discount;
-
-    let feStatus: 'pending' | 'paid' | 'shipping' | 'completed' | 'cancelled' = 'pending';
-    switch (dbOrder.order_status) {
-        case 'ORDERED':
-        case 'PENDING_DESIGN':
-            feStatus = 'pending';
-            break;
-        case 'PROCESSING':
-            feStatus = 'paid';
-            break;
-        case 'SHIPPING':
-            feStatus = 'shipping';
-            break;
-        case 'DELIVERED':
-            feStatus = 'completed';
-            break;
-        case 'CANCELLED':
-            feStatus = 'cancelled';
-            break;
-    }
-
-    return {
-        id: dbOrder.order_code,
-        buyerId: dbOrder.buyer_id?.toString() || '',
-        shopName: dbOrder.shop_id?.shop_name || 'VietCraft Shop',
-        shopLogo: dbOrder.shop_id?.logo || 'https://images.unsplash.com/photo-1513519245088-0e12902e5a38?auto=format&fit=crop&w=80',
-        items: (dbOrder.items || []).map((it: any) => ({
-            productId: it.product_id?.toString() || '',
-            variantId: it.variant_id?.toString() || '',
-            title: it.title,
-            color: it.color,
-            size: it.size,
-            quantity: it.quantity,
-            price: it.retail_price ? Number(it.retail_price.toString()) : 0,
-            image: it.image || 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=200'
-        })),
-        totalAmount: totalAmount,
-        shippingFee: shippingFee,
-        status: feStatus,
-        paymentGateway: dbOrder.payment_method?.toLowerCase() || 'vnpay',
-        shippingProvider: dbOrder.shipping_details?.carrier?.toLowerCase() || 'ghn',
-        shippingCode: dbOrder.shipping_details?.tracking_number,
-        paymentStatus: dbOrder.payment_status,
-        createdAt: dbOrder.created_at || dbOrder.createdAt || new Date(),
-        shippingAddress: {
-            recipient_name: dbOrder.shipping_address?.recipient_name || '',
-            phone: dbOrder.shipping_address?.phone || '',
-            address_detail: dbOrder.shipping_address?.address_detail || ''
-        }
-    };
-}
+import mongoose from "mongoose";
+import { Order as OrderModel } from "../infrastructure/models/order.model";
+import { Product } from "../../product/infrastructure/models/product.model";
+import { ProductVariant } from "../../product/infrastructure/models/product-variant.model";
+import { Design } from "../../design/infrastructure/models/design.model";
+import { dispatchToPrinter } from "./printer-dispatch.service";
+import { OrderResponse, DEFAULT_SHIPPING_FEE, PLATFORM_FEE_RATE, PAYMENT_METHODS, SHIPPING_CARRIERS,  } from "../types";
+import { mapDbOrderToResponse} from "../infrastructure/dto/order.dto";
+import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
 
 export class OrdersService {
-    static async createOrder(buyerId: string, payload: any) {
-        const { items, paymentGateway, shippingProvider, shopName, shopLogo, shippingAddress, totalAmount, shippingFee } = payload;
+  /**
+   * Tạo order từ payload FE: [{ productId, variantId, quantity }].
+   * Giá, shop, thông tin POD đều đọc từ DB; `price`/`totalAmount`/`discount` do client gửi bị bỏ qua.
+   */
+  static async createOrder(
+    buyerId: string,
+    payload: any,
+  ): Promise<OrderResponse> {
+    const buyerObjectId = toBuyerObjectId(buyerId);
 
-        // 1. Tìm hoặc tạo Shop mẫu để làm khóa ngoại
-        let shop = await Shop.findOne({ shop_name: shopName });
-        if (!shop) {
-            shop = await Shop.findOne();
-        }
-        if (!shop) {
-            shop = await Shop.create({
-                owner_id: new mongoose.Types.ObjectId(),
-                shop_name: shopName || 'Xưởng In Sài Gòn',
-                slug: 'xuong-in-sai-gon-' + Date.now(),
-                logo: 'https://images.unsplash.com/photo-1579783902614-a3fb3927b6a5?auto=format&fit=crop&w=80',
-                wallet_balance: mongoose.Types.Decimal128.fromString('0'),
-                listing_count: 0,
-                average_rating: 0
-            });
-        }
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (items.length === 0) throw new Error("Order phải có ít nhất 1 sản phẩm");
 
-        // 2. Tính toán tài chính
-        const computedSubtotal = items.reduce((acc: number, it: any) => acc + (it.price * it.quantity), 0);
-        const computedShippingFee = shippingFee || 30000;
-        const discount = payload.discount || 0;
+    const address = payload.shippingAddress || payload.shipping_address;
+    if (
+      !address?.recipient_name ||
+      !address?.phone ||
+      !address?.address_detail
+    ) {
+      throw new Error("Thiếu địa chỉ giao hàng");
+    }
 
-        const orderCode = `LMN-${Math.floor(Math.random() * 90000) + 10000}`;
-        const now = new Date();
-        const orderHourOfWeek = now.getDay() * 24 + now.getHours();
+    let shopId: mongoose.Types.ObjectId | null = null;
+    const orderItems: any[] = [];
+    let subtotal = 0;
+    // Đơn có hàng in theo yêu cầu hay không — quyết định phương thức thanh toán hợp lệ.
+    let hasPodItem = false;
 
-        // Chuyển sang ObjectId hợp lệ
-        const toValidObjectId = (idStr: string) => {
-            return mongoose.Types.ObjectId.isValid(idStr) ? new mongoose.Types.ObjectId(idStr) : new mongoose.Types.ObjectId();
-        };
+    for (const it of items) {
+      if (!mongoose.Types.ObjectId.isValid(it.productId)) {
+        throw new Error(`Sản phẩm ${it.productId} không hợp lệ`);
+      }
+      const product = await Product.findById(it.productId);
+      if (!product) throw new Error(`Sản phẩm ${it.productId} không tồn tại`);
+      if (
+        product.listing_status === "INACTIVE" ||
+        product.listing_status === "EXPIRED"
+      ) {
+        throw new Error(`Sản phẩm "${product.title}" hiện không bán`);
+      }
 
-        const newOrder = new Order({
-            buyer_id: toValidObjectId(buyerId),
-            shop_id: shop._id,
-            order_code: orderCode,
-            payment_method: (paymentGateway || 'COD').toUpperCase(),
-            payment_status: paymentGateway === 'cod' ? 'PENDING' : 'PAID',
-            order_status: 'ORDERED',
-            shipping_address: {
-                recipient_name: shippingAddress?.recipient_name || 'Người nhận',
-                phone: shippingAddress?.phone || '0900000000',
-                address_detail: shippingAddress?.address_detail || 'Địa chỉ giao hàng',
-                province_id: shippingAddress?.province_id || '79',
-                district_id: shippingAddress?.district_id || '760',
-                ward_code: shippingAddress?.ward_code || '26734'
-            },
-            shipping_details: {
-                carrier: shippingProvider || 'ghn',
-                tracking_number: '',
-                shipping_fee: mongoose.Types.Decimal128.fromString(computedShippingFee.toString())
-            },
-            items: items.map((it: any) => ({
-                product_id: toValidObjectId(it.productId),
-                variant_id: toValidObjectId(it.variantId),
-                title: it.title || 'Sản phẩm mới',
-                color: it.color || 'Mặc định',
-                size: it.size || '',
-                quantity: it.quantity,
-                base_cost: mongoose.Types.Decimal128.fromString((it.price * 0.7).toFixed(0)),
-                retail_price: mongoose.Types.Decimal128.fromString(it.price.toString()),
-                image: it.image
-            })),
-            financial_breakdown: {
-                subtotal: mongoose.Types.Decimal128.fromString(computedSubtotal.toString()),
-                shipping_fee: mongoose.Types.Decimal128.fromString(computedShippingFee.toString()),
-                coupon_discount: mongoose.Types.Decimal128.fromString(discount.toString()),
-                platform_fee: mongoose.Types.Decimal128.fromString((computedSubtotal * 0.05).toFixed(0)),
-                seller_payout_amount: mongoose.Types.Decimal128.fromString((computedSubtotal * 0.95).toFixed(0))
-            },
-            status_history: [
-                {
-                    status: 'ORDERED',
-                    changed_at: new Date(),
-                    note: 'Đơn hàng đã được tạo thành công'
-                }
-            ],
-            order_hour_of_week: orderHourOfWeek
+      // Biến thể: theo variantId nếu client gửi, không thì lấy biến thể đang bán đầu tiên
+      // (giỏ hàng cho phép item không có variant_id).
+      let variant = null;
+      if (it.variantId && mongoose.Types.ObjectId.isValid(it.variantId)) {
+        variant = await ProductVariant.findOne({
+          _id: it.variantId,
+          product_id: product._id,
         });
+        if (!variant)
+          throw new Error(
+            `Biến thể ${it.variantId} không thuộc sản phẩm "${product.title}"`,
+          );
+      } else {
+        variant = await ProductVariant.findOne({
+          product_id: product._id,
+          is_active: true,
+        });
+      }
+      if (!variant)
+        throw new Error(`Sản phẩm "${product.title}" chưa có biến thể để bán`);
+      if (variant.is_active === false)
+        throw new Error(`Biến thể của "${product.title}" đã ngừng bán`);
 
-        await newOrder.save();
+      const qty = Math.max(1, Number(it.quantity) || 1);
+      if (
+        typeof variant.stock_quantity === "number" &&
+        variant.stock_quantity < qty
+      ) {
+        throw new Error(
+          `Sản phẩm "${product.title}" chỉ còn ${variant.stock_quantity} sản phẩm`,
+        );
+      }
 
-        const populatedOrder = await Order.findById(newOrder._id).populate('shop_id');
-        return mapDbOrderToResponse(populatedOrder);
+      // 1 order = 1 shop: shop lấy từ product trong DB, không lấy theo shop_name client gửi.
+      if (shopId && shopId.toString() !== product.shop_id.toString()) {
+        throw new Error(
+          "Đơn hàng chỉ hỗ trợ 1 shop mỗi lần (MVP). Vui lòng tách đơn theo shop.",
+        );
+      }
+      shopId = product.shop_id;
+      if (product.product_type === "POD_TEMPLATE") hasPodItem = true;
+
+      // Giá LẤY TỪ DB — không bao giờ dùng it.price của client.
+      subtotal += num(variant.retail_price) * qty;
+
+      // POD: gắn design + options để Printer in. Lấy từ design_placement đầu tiên.
+      const placement = product.design_placements?.[0];
+      let designUrl: string | undefined;
+      if (placement?.design_id) {
+        const design = await Design.findById(placement.design_id).lean();
+        designUrl = design?.file_url;
+      }
+
+      orderItems.push({
+        product_id: product._id,
+        variant_id: variant._id,
+        title: product.title,
+        color: variant.color,
+        size: variant.size,
+        quantity: qty,
+        base_cost: variant.base_cost,
+        retail_price: variant.retail_price,
+        image: variant.mockup_image || product.images?.[0],
+        design_file_url: designUrl,
+        // giữ tạm meta phôi + placement để dispatch (không đổi schema).
+        custom_notes: JSON.stringify({
+          sku: variant.sku,
+          blank_id: product.blank_id,
+          design_options: placement
+            ? {
+                scale: placement.scale,
+                rotation: placement.rotation,
+                align: "center",
+              }
+            : undefined,
+        }),
+      });
+    }
+    const shippingFee = DEFAULT_SHIPPING_FEE;
+    const discount = 0; // TODO: validate coupon qua promotion module rồi mới trừ.
+    const platformFee = subtotal * PLATFORM_FEE_RATE;
+    const gateway = String(
+      payload.paymentGateway || payload.payment_method || "COD",
+    ).toUpperCase();
+    const paymentMethod = PAYMENT_METHODS.includes(gateway) ? gateway : "COD";
+
+    // Hàng POD chỉ được sản xuất sau khi tiền đã về: xưởng in cắt/in xong là không bán
+    // lại được cho ai khác, nên rủi ro khách từ chối nhận rơi hết vào seller.
+    // Chốt chặn phải nằm ở đây vì dispatchToPrinter chỉ chạy từ callback thanh toán —
+    // một đơn POD trả COD sẽ nằm PENDING vĩnh viễn và không bao giờ tới xưởng in.
+    if (hasPodItem && paymentMethod === "COD") {
+      throw new Error(
+        "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc MOMO.",
+      );
     }
 
-    static async getOrder(id: string, buyerId: string) {
-        const query: any = {
-            $or: [
-                { order_code: id },
-                { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
-            ]
-        };
+    const carrierInput = String(
+      payload.shippingProvider || "ghn",
+    ).toLowerCase();
+    const carrier = SHIPPING_CARRIERS.includes(carrierInput)
+      ? carrierInput
+      : "ghn";
 
-        if (mongoose.Types.ObjectId.isValid(buyerId)) {
-            query.buyer_id = new mongoose.Types.ObjectId(buyerId);
-        }
+    const now = new Date();
+    const order = await OrderModel.create({
+      buyer_id: buyerObjectId,
+      shop_id: shopId,
+      order_code: `VC-${Date.now()}-${Math.floor(Math.random() * 9000 + 1000)}`,
+      payment_method: paymentMethod,
+      // Mọi đơn đều bắt đầu PENDING; chỉ callback của cổng thanh toán mới được set PAID.
+      payment_status: "PENDING",
+      order_status: "ORDERED",
+      shipping_address: {
+        recipient_name: address.recipient_name,
+        phone: address.phone,
+        address_detail: address.address_detail,
+        province_id: address.province_id || "79",
+        district_id: address.district_id || "760",
+        ward_code: address.ward_code || "26734",
+      },
+      shipping_details: {
+        carrier,
+        tracking_number: "",
+        shipping_fee: dec(shippingFee),
+      },
+      items: orderItems,
+      financial_breakdown: {
+        subtotal: dec(subtotal),
+        shipping_fee: dec(shippingFee),
+        coupon_discount: dec(discount),
+        platform_fee: dec(platformFee),
+        seller_payout_amount: dec(subtotal - platformFee),
+      },
+      status_history: [
+        { status: "ORDERED", changed_at: now, note: "Đơn được tạo" },
+      ],
+      order_hour_of_week: now.getDay() * 24 + now.getHours(),
+    });
 
-        const order = await Order.findOne(query).populate('shop_id');
-        if (!order) throw new Error('Không tìm thấy đơn hàng');
+    const populated = await OrderModel.findById(order._id).populate("shop_id");
+    return mapDbOrderToResponse(populated || order);
+  }
 
-        return mapDbOrderToResponse(order);
+  /** Nhận cả order_code lẫn _id, nhưng luôn giới hạn trong đơn của chính buyer. */
+  static async getOrder(id: string, buyerId: string): Promise<OrderResponse> {
+    const query: any = byCodeOrId(id);
+    query.buyer_id = toBuyerObjectId(buyerId);
+
+    const order = await OrderModel.findOne(query).populate("shop_id");
+    if (!order) throw new Error("Không tìm thấy đơn hàng");
+    return mapDbOrderToResponse(order);
+  }
+
+  static async getOrdersByBuyer(
+    buyerId: string,
+    status?: string,
+  ): Promise<OrderResponse[]> {
+    const query: any = { buyer_id: toBuyerObjectId(buyerId) };
+
+    if (status && status.toLowerCase() !== "all") {
+      switch (status.toLowerCase()) {
+        case "pending":
+          query.order_status = { $in: ["ORDERED", "PENDING_DESIGN"] };
+          break;
+        case "paid":
+          query.order_status = "PROCESSING";
+          break;
+        case "shipping":
+          query.order_status = "SHIPPING";
+          break;
+        case "completed":
+          query.order_status = "DELIVERED";
+          break;
+        case "cancelled":
+          query.order_status = "CANCELLED";
+          break;
+      }
     }
 
-    static async getOrdersByBuyer(buyerId: string, status?: string) {
-        const query: any = {};
-        
-        if (mongoose.Types.ObjectId.isValid(buyerId)) {
-            query.buyer_id = new mongoose.Types.ObjectId(buyerId);
-        }
+    const orders = await OrderModel.find(query)
+      .populate("shop_id")
+      .sort({ created_at: -1 });
+    return orders.map(mapDbOrderToResponse);
+  }
 
-        if (status && status !== 'all' && status !== 'ALL') {
-            switch (status.toLowerCase()) {
-                case 'pending':
-                    query.order_status = { $in: ['ORDERED', 'PENDING_DESIGN'] };
-                    break;
-                case 'paid':
-                    query.order_status = 'PROCESSING';
-                    break;
-                case 'shipping':
-                    query.order_status = 'SHIPPING';
-                    break;
-                case 'completed':
-                    query.order_status = 'DELIVERED';
-                    break;
-                case 'cancelled':
-                    query.order_status = 'CANCELLED';
-                    break;
-            }
-        }
+  /**
+   * Cổng thanh toán callback (nhận order_code hoặc _id):
+   * 'success' → PAID + PROCESSING rồi đẩy đơn sang xưởng in; ngược lại → CANCELLED.
+   */
+  static async processPaymentCallback(
+    id: string,
+    gatewayStatus: string,
+  ): Promise<OrderResponse> {
+    const order = await OrderModel.findOne(byCodeOrId(id)).populate("shop_id");
+    if (!order) throw new Error("Không tìm thấy đơn hàng");
 
-        const orders = await Order.find(query).populate('shop_id').sort({ created_at: -1 });
-        return orders.map(mapDbOrderToResponse);
+    if (gatewayStatus === "success") {
+      order.payment_status = "PAID";
+      order.order_status = "PROCESSING";
+      order.status_history.push({
+        status: "PROCESSING",
+        changed_at: new Date(),
+        note: "Thanh toán thành công. Đơn hàng chuyển sang sản xuất.",
+      });
+      await order.save();
+      // Đẩy sang xưởng in (không chặn phản hồi thanh toán nếu Printer lỗi).
+      dispatchToPrinter(order).catch((err: any) =>
+        console.error(
+          "[DISPATCH] lỗi gửi đơn sang Printer:",
+          err?.message || err,
+        ),
+      );
+    } else {
+      order.payment_status = "PENDING";
+      order.order_status = "CANCELLED";
+      order.status_history.push({
+        status: "CANCELLED",
+        changed_at: new Date(),
+        note: "Thanh toán thất bại. Đơn hàng tự động hủy.",
+      });
+      await order.save();
     }
 
-    static async processPaymentCallback(id: string, gatewayStatus: string) {
-        const query: any = {
-            $or: [
-                { order_code: id },
-                { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
-            ]
-        };
-
-        const order = await Order.findOne(query).populate('shop_id');
-        if (!order) throw new Error('Không tìm thấy đơn hàng');
-
-        if (gatewayStatus === 'success') {
-            order.payment_status = 'PAID';
-            order.order_status = 'SHIPPING';
-            const carrier = order.shipping_details?.carrier || 'ghn';
-            const trackingCode = `${carrier.toUpperCase()}${Math.floor(Math.random() * 100000000)}`;
-            
-            order.shipping_details = {
-                carrier,
-                tracking_number: trackingCode,
-                shipping_fee: order.shipping_details?.shipping_fee || mongoose.Types.Decimal128.fromString('30000')
-            };
-
-            order.status_history.push({
-                status: 'SHIPPING',
-                changed_at: new Date(),
-                note: 'Thanh toán thành công. Đơn hàng chuyển sang vận chuyển.'
-            });
-        } else {
-            order.order_status = 'CANCELLED';
-            order.status_history.push({
-                status: 'CANCELLED',
-                changed_at: new Date(),
-                note: 'Thanh toán thất bại. Đơn hàng tự động hủy.'
-            });
-        }
-
-        await order.save();
-        return mapDbOrderToResponse(order);
-    }
+    return mapDbOrderToResponse(order);
+  }
 }
 export default OrdersService;

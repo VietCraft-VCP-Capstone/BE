@@ -1,53 +1,6 @@
-import mongoose, { Schema, Document } from 'mongoose';
+import mongoose, { Schema } from 'mongoose';
+import { IAddress, INotificationSettings, IUser } from '../../types';
 
-export interface IAddress {
-    id?: mongoose.Types.ObjectId;
-    recipient_name: string;
-    phone: string;
-    address_detail: string;
-    province_id: string;
-    district_id: string;
-    ward_code: string;
-    is_default: boolean;
-}
-
-export interface INotificationSettings {
-    in_app: boolean;
-    push: boolean;
-    email: boolean;
-}
-
-export interface ICartItem {
-    product_id: mongoose.Types.ObjectId;
-    variant_id?: string;
-    quantity: number;
-    checked?: boolean;
-}
-
-export interface IUser extends Document {
-    email: string;
-    password_hash: string;
-    role: 'BUYER' | 'SELLER' | 'ADMIN';
-    is_locked: boolean;
-    full_name: string;
-    avatar?: string;
-    phone?: string;
-    identity_card_number?: string;
-    tax_code?: string;
-    addresses: IAddress[];
-    notification_settings: INotificationSettings;
-    wishlist: mongoose.Types.ObjectId[];
-    cart: ICartItem[];
-    created_at: Date;
-    updated_at: Date;
-}
-
-const CartItemSchema = new Schema<ICartItem>({
-    product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
-    variant_id: { type: String },
-    quantity: { type: Number, default: 1, min: 1 },
-    checked: { type: Boolean, default: true }
-}, { _id: false });
 
 const AddressSchema = new Schema<IAddress>({
     recipient_name: { type: String, required: true },
@@ -82,8 +35,9 @@ const UserSchema = new Schema<IUser>({
     identity_card_number: { type: String },
     tax_code: { type: String },
     addresses: { type: [AddressSchema], default: [] },
+    // @deprecated - giữ nguyên field để không mất dữ liệu cũ, nhưng KHÔNG đọc/ghi nữa.
+    // Wishlist thật nằm ở collection `wishlists` (WishlistService).
     wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: [] }],
-    cart: { type: [CartItemSchema], default: [] },
     notification_settings: {
         type: NotificationSettingsSchema,
         default: () => ({})

@@ -24,6 +24,7 @@ export interface IOrderItem {
     quantity: number;
     base_cost: mongoose.Types.Decimal128;
     retail_price: mongoose.Types.Decimal128;
+    image?: string;
     design_file_url?: string;
     custom_notes?: string;
 }
@@ -83,6 +84,7 @@ const OrderItemSchema = new Schema<IOrderItem>({
     quantity: { type: Number, required: true, min: 1 },
     base_cost: { type: Schema.Types.Decimal128, required: true },
     retail_price: { type: Schema.Types.Decimal128, required: true },
+    image: { type: String },
     design_file_url: { type: String },
     custom_notes: { type: String }
 }, { _id: false });

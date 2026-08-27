@@ -1,8 +1,26 @@
-import { User, IAddress } from '../infrastructure/models/user.model';
+import { User } from '../infrastructure/models/user.model';
+import { IAddress } from '../types';
 import { Order } from '../../order/infrastructure/models/order.model';
 import { Wishlist } from '../../product/infrastructure/models/wishlist.model';
 import { ShopFollower } from '../../product/infrastructure/models/shop-follower.model';
 import mongoose from 'mongoose';
+
+// Whitelist field người dùng được tự sửa. KHÔNG bao giờ để lọt `role`, `is_locked`,
+// `password_hash`, `email`, `wishlist`, `cart` — nhận thẳng req.body vào $set là
+// leo thang đặc quyền (tự đặt role: 'ADMIN' / tự mở khoá tài khoản).
+const EDITABLE_PROFILE_FIELDS = ['full_name', 'phone', 'avatar', 'identity_card_number', 'tax_code', 'notification_settings'] as const;
+
+// Địa chỉ cũng phải lọc: cho `_id` đi qua Object.assign sẽ làm hỏng subdocument.
+const EDITABLE_ADDRESS_FIELDS = ['recipient_name', 'phone', 'address_detail', 'province_id', 'district_id', 'ward_code', 'is_default'] as const;
+
+function pick<T extends object>(source: any, fields: readonly string[]): T {
+    const out: any = {};
+    if (!source || typeof source !== 'object') return out;
+    for (const field of fields) {
+        if (source[field] !== undefined) out[field] = source[field];
+    }
+    return out as T;
+}
 
 export class UserService {
     static async getProfile(userId: string) {
@@ -32,15 +50,17 @@ export class UserService {
         };
     }
 
-    static async updateProfile(userId: string, payload: { full_name?: string; phone?: string; avatar?: string }) {
+    static async updateProfile(userId: string, payload: Record<string, any>) {
         if (!mongoose.Types.ObjectId.isValid(userId)) {
             throw new Error('ID người dùng không hợp lệ');
         }
 
+        const safePayload = pick<Record<string, any>>(payload, EDITABLE_PROFILE_FIELDS);
+
         const user = await User.findByIdAndUpdate(
             userId,
-            { $set: payload },
-            { new: true }
+            { $set: safePayload },
+            { new: true, runValidators: true }
         ).select('-password_hash');
 
         if (!user) {
@@ -73,7 +93,7 @@ export class UserService {
         if (!user) throw new Error('Không tìm thấy người dùng');
 
         const newAddress = {
-            ...addressData,
+            ...pick<Partial<IAddress>>(addressData, EDITABLE_ADDRESS_FIELDS),
             is_default: addressData.is_default || false
         } as IAddress;
 
@@ -106,8 +126,8 @@ export class UserService {
             });
         }
 
-        // Cập nhật các trường
-        Object.assign(address, addressData);
+        // Cập nhật các trường (chỉ những field được phép, tránh ghi đè _id)
+        Object.assign(address, pick<Partial<IAddress>>(addressData, EDITABLE_ADDRESS_FIELDS));
 
         await user.save();
         return user.addresses;

@@ -1,20 +1,6 @@
-import mongoose, { Schema, Document } from 'mongoose';
+import mongoose, { Schema } from 'mongoose';
+import { ICartItem, ICart } from '../../types';
 
-export interface ICartItem {
-    product_id: mongoose.Types.ObjectId;
-    variant_id?: mongoose.Types.ObjectId;
-    quantity: number;
-    is_selected: boolean;
-    custom_notes?: string;
-    custom_design_file?: string;
-    updated_at: Date;
-}
-
-export interface ICart extends Document {
-    user_id: mongoose.Types.ObjectId;
-    items: ICartItem[];
-    updated_at: Date;
-}
 
 const CartItemSchema = new Schema<ICartItem>({
     product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true },

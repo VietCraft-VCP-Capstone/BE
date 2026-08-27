@@ -9,6 +9,7 @@ import {
     SellerNotificationSettingsDTO
 } from './seller-settings.dto';
 import { logger } from '../../../shared/utils/logger';
+import { generateSlug } from '../../../shared/utils/slug';
 
 const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
     brand: {
@@ -74,6 +75,24 @@ const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
     updatedAt: new Date().toISOString()
 };
 
+/** `Shop.owner_id` là unique -> mỗi seller đúng một shop. Mọi truy vấn ở đây đều
+ *  khoá theo owner_id lấy từ token, nên seller không thể chạm vào shop của người khác. */
+
+/** Slug shop là unique index: phải chuẩn hoá và né trùng, nếu không PUT settings
+ *  sẽ ném E11000 hoặc một seller có thể chiếm slug của seller khác. */
+async function resolveUniqueSlug(desired: string, ownerId: mongoose.Types.ObjectId, seed: string): Promise<string> {
+    let base = generateSlug(desired || '');
+    if (!base || base === 'untitled') base = `shop-${seed}`;
+
+    let candidate = base;
+    for (let i = 1; i <= 50; i++) {
+        const clash = await Shop.findOne({ slug: candidate, owner_id: { $ne: ownerId } }).select('_id');
+        if (!clash) return candidate;
+        candidate = `${base}-${i}`;
+    }
+    return `${base}-${Date.now()}`;
+}
+
 export class SellerSettingsService {
     static async getSettings(sellerId: string): Promise<SellerSettingsResponseDTO> {
         if (!mongoose.Types.ObjectId.isValid(sellerId)) {
@@ -88,7 +107,7 @@ export class SellerSettingsService {
             shop = await Shop.create({
                 owner_id: ownerId,
                 shop_name: user?.full_name ? `${user.full_name}'s Shop` : DEFAULT_SETTINGS.brand.storeName,
-                slug: `shop-${sellerId.substring(18)}`,
+                slug: await resolveUniqueSlug('', ownerId, sellerId.substring(18)),
                 description: DEFAULT_SETTINGS.brand.description,
                 logo: user?.avatar || DEFAULT_SETTINGS.brand.logoUrl,
                 banner: DEFAULT_SETTINGS.brand.bannerUrl,
@@ -152,7 +171,7 @@ export class SellerSettingsService {
             shop = await Shop.create({
                 owner_id: ownerId,
                 shop_name: payload.brand?.storeName || 'My Shop',
-                slug: payload.brand?.slug || `shop-${sellerId.substring(18)}`,
+                slug: await resolveUniqueSlug(payload.brand?.slug || '', ownerId, sellerId.substring(18)),
                 settings: {}
             });
         }
@@ -166,7 +185,9 @@ export class SellerSettingsService {
                 ...payload.brand
             };
             if (payload.brand.storeName) shop.shop_name = payload.brand.storeName;
-            if (payload.brand.slug) shop.slug = payload.brand.slug;
+            if (payload.brand.slug) {
+                shop.slug = await resolveUniqueSlug(payload.brand.slug, ownerId, sellerId.substring(18));
+            }
             if (payload.brand.description) shop.description = payload.brand.description;
             if (payload.brand.logoUrl) shop.logo = payload.brand.logoUrl;
             if (payload.brand.bannerUrl) shop.banner = payload.brand.bannerUrl;

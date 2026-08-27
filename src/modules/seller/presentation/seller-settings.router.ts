@@ -1,29 +1,31 @@
-import { Router } from 'express';
+import { Router, Response } from 'express';
 import { SellerSettingsService } from '../application/seller-settings.service';
-import { optionalAuthenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 
 const router = Router();
 
-// GET seller settings for authenticated seller
-router.get('/', optionalAuthenticate, async (req: AuthenticatedRequest, res) => {
+// Cài đặt gian hàng luôn thuộc về chính người đang đăng nhập.
+// sellerId BẮT BUỘC lấy từ token (req.user.id): nếu nhận từ query/body thì bất kỳ ai
+// cũng đọc/ghi đè được settings gian hàng của người khác.
+// GET cài đặt gian hàng của seller đang đăng nhập
+router.get('/', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
-        const sellerId = req.user?.id || (req.query.sellerId as string) || '6a89d3441809bf8480ee0ba1';
-        const settings = await SellerSettingsService.getSettings(sellerId);
+        const settings = await SellerSettingsService.getSettings(req.user!.id);
         res.json(settings);
     } catch (error: any) {
         res.status(500).json({ error: error.message || 'Lỗi khi tải cài đặt gian hàng.' });
     }
 });
 
-// PUT update seller settings
-router.put('/', optionalAuthenticate, async (req: AuthenticatedRequest, res) => {
+// PUT cập nhật cài đặt gian hàng của seller đang đăng nhập
+router.put('/', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
-        const sellerId = req.user?.id || (req.body.sellerId as string) || '6a89d3441809bf8480ee0ba1';
-        const updated = await SellerSettingsService.updateSettings(sellerId, req.body);
+        const updated = await SellerSettingsService.updateSettings(req.user!.id, req.body);
         res.json(updated);
     } catch (error: any) {
         res.status(400).json({ error: error.message || 'Lỗi khi lưu cài đặt gian hàng.' });
     }
 });
 
+export const sellerSettingsRouter = router;
 export default router;
