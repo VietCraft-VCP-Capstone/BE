@@ -33,11 +33,8 @@ router.get('/stats', authenticate, requireRole(['admin']), async (_req: Authenti
     }
 });
 
-// Seller-proposed tag moderation (declared before '/:id' so 'pending' isn't captured as an id).
 router.get('/pending', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
-        // Hàng chờ là một khối phụ nằm trên bảng chính nên trang để nhỏ; xem sâu
-        // hơn thì bấm sang trang chứ không đổ hết vài trăm đề xuất vào màn hình.
         const params = parsePageParams(req.query as Record<string, unknown>, { defaultLimit: 8, maxLimit: 50 });
         res.json({ success: true, data: await tagsService.listPendingTags(params) });
     } catch (err: any) {
@@ -133,3 +130,4 @@ router.post('/:tagId/detach/:productId', authenticate, requireRole(['admin']), a
 });
 
 export { router as tagsRouter };
+

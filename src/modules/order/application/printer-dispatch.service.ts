@@ -2,14 +2,11 @@ import { config } from '../../../app/config';
 import { logger } from '../../../shared/utils/logger';
 import { User } from '../../user/infrastructure/models/user.model';
 
-// Đẩy đơn đã thanh toán sang hệ Printer (webhook POST /api/orders). Idempotent bên Printer (dedupe order_code).
-// fetch native + 1 lần retry cho lỗi mạng/5xx. Đủ cho MVP; hàng đợi/outbox khi cần đảm bảo giao chắc.
 
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1000;
 const TIMEOUT_MS = 5000;
 
-/** Lỗi 4xx là do payload sai — retry vô ích, đánh dấu để dừng sớm. */
 class PrinterClientError extends Error {
     constructor(message: string) {
         super(message);
@@ -23,7 +20,6 @@ export async function dispatchToPrinter(order: any): Promise<void> {
         return;
     }
 
-    // user.model dùng `full_name` (không có `name`).
     const buyer = await User.findById(order.buyer_id).select('full_name').lean().catch(() => null);
 
     const items = (order.items || []).map((it: any) => {

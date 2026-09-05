@@ -65,8 +65,6 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
 
     const thumbnail = images[0];
 
-    // original_price / display_rank / location là field thật; hai nhánh cũ từng mượn tạm
-    // rejection_reason / stock_alert_threshold / tags[0] nên vẫn đọc fallback cho dữ liệu cũ.
     const legacyOriginal = product.rejection_reason && !isNaN(Number(product.rejection_reason))
         ? Number(product.rejection_reason)
         : undefined;
@@ -141,7 +139,6 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
 }
 
 
-/** A validation failure carrying every broken rule, surfaced to the client as 400. */
 export class ValidationError extends Error {
     errors: string[];
     constructor(errors: string[]) {
@@ -151,7 +148,6 @@ export class ValidationError extends Error {
     }
 }
 
-/** A permission failure (wrong owner / role). Surfaced as 403. */
 export class ForbiddenError extends Error {
     constructor(message: string) {
         super(message);
@@ -167,7 +163,6 @@ interface VariantInput {
     price?: number;
     base_cost?: number;
     stock?: number;
-    /** Mã màu hex do seller chọn, hoặc URL mockup ở luồng POD. */
     mockup_image?: string;
 }
 
@@ -180,28 +175,21 @@ interface ValidatedProductData {
     newTagNames: string[];
     variants: VariantInput[];
     usesPrintify: boolean;
-    // POD
     isPod: boolean;
     blank?: Blank;
     podVariants?: { sku: string; markup: number; stock: number }[];
     designPlacements?: { design_id: string; print_area_key: string; x: number; y: number; scale: number; rotation: number }[];
 }
 
-/** Ai đang thao tác — dùng cho mọi kiểm tra quyền sở hữu. */
 export interface ProductActor {
     id: string;
     role: string;
 }
 
-/** Chỉ marketplace công khai mới lọc theo cờ này. Seller xem hàng của chính mình thì không. */
 const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
 
 export class ProductsService {
-    /**
-     * Central validation for the publish spec. Collects ALL errors before throwing
-     * so the client sees every problem at once. Used by both create and update.
-     * ponytail: one validator, both call sites route through it — no duplicated rules.
-     */
+
     static async validate(payload: any, opts: { partial?: boolean } = {}): Promise<ValidatedProductData> {
         const errors: string[] = [];
         const partial = opts.partial === true;
@@ -216,7 +204,6 @@ export class ProductsService {
             if (!description || description.length < 10) errors.push('description must be at least 10 characters');
         }
 
-        // categoryId must exist AND be active. Seller may only pick, never create.
         let category: any = null;
         if (!partial || payload.categoryId !== undefined) {
             const categoryId = payload.categoryId;
@@ -229,8 +216,6 @@ export class ProductsService {
             }
         }
 
-        // Existing tags must all exist in the system. Seller may only pick existing tags here;
-        // brand-new tag names arrive via `newTagNames` and become pending proposals (handled in create/update).
         let tagDocs: any[] = [];
         if (payload.tagIds !== undefined) {
             const tagIds = Array.isArray(payload.tagIds) ? payload.tagIds : [];
@@ -244,21 +229,17 @@ export class ProductsService {
             ? payload.newTagNames.map((n: any) => String(n || '').trim()).filter(Boolean)
             : [];
 
-        // POD mode: seller đè design lên phôi. Ảnh sinh từ mockup (không nhập tay), variant tính từ giá phôi + markup.
         const isPod = payload.blankId !== undefined && payload.blankId !== null && payload.blankId !== '';
 
-        // Images / mockups are mandatory for a non-POD publishable product. POD sinh ảnh từ mockup nên bỏ qua.
         const images: string[] = Array.isArray(payload.images) ? payload.images.filter((i: any) => typeof i === 'string' && i.trim()) : [];
         if (!isPod && (!partial || payload.images !== undefined)) {
             if (images.length === 0) errors.push('at least one image/mockup is required');
         }
 
-        // Variants — Printify-style: each needs a positive price and non-negative stock.
         const usesPrintify = payload.product_type === 'POD_TEMPLATE' || !!payload.printify;
         let variants: VariantInput[] = Array.isArray(payload.variants) ? payload.variants : [];
         if (!isPod && (!partial || payload.variants !== undefined || payload.price !== undefined)) {
             if (variants.length === 0) {
-                // Back-compat: a single flat `price` becomes one "Standard" variant.
                 if (typeof payload.price === 'number') {
                     variants = [{ price: payload.price, stock: payload.stock ?? 100 }];
                 } else {
@@ -268,15 +249,12 @@ export class ProductsService {
             variants.forEach((v, i) => {
                 if (typeof v.price !== 'number' || v.price <= 0) errors.push(`variant[${i}].price must be > 0`);
                 if (v.stock !== undefined && (typeof v.stock !== 'number' || v.stock < 0)) errors.push(`variant[${i}].stock must be >= 0`);
-                // ponytail: real Printify would validate print_provider/blueprint/variant_id against
-                // the Printify API here. No integration exists in this repo, so we only require the
-                // Printify variant to carry a sku. Upgrade path: call Printify API when wired.
+
+
                 if (usesPrintify && !v.sku) errors.push(`variant[${i}] from Printify must have a sku`);
             });
         }
 
-        // POD validation: phôi phải tồn tại + active; mỗi variant map tới sku hợp lệ của phôi + markup ≥ 0;
-        // mỗi design_placement trỏ design thuộc seller. Ảnh sản phẩm = mockup sinh ở create.
         let blank: Blank | undefined;
         let podVariants: { sku: string; markup: number; stock: number }[] | undefined;
         let designPlacements: any[] | undefined;
@@ -308,7 +286,6 @@ export class ProductsService {
             const rawPl = Array.isArray(payload.designPlacements) ? payload.designPlacements : [];
             if (rawPl.length === 0) errors.push('cần ít nhất 1 thiết kế đặt lên phôi (designPlacements)');
             designPlacements = [];
-            // Chỉ cache design theo id để check ownership 1 lần.
             const ownDesign = async (id: string): Promise<boolean> => {
                 if (!id || !mongoose.Types.ObjectId.isValid(id)) return false;
                 const d = await Design.findById(id).lean();
@@ -323,7 +300,6 @@ export class ProductsService {
                 const rawLayers = Array.isArray(p.layers) ? p.layers : null;
 
                 if (rawLayers) {
-                    // Layer-based: image | text | shape
                     const layers: any[] = [];
                     for (let j = 0; j < rawLayers.length; j++) {
                         const l = rawLayers[j];
@@ -360,7 +336,6 @@ export class ProductsService {
                     }
                     if (layers.length) designPlacements.push({ print_area_key: key, x: 0, y: 0, scale: 1, rotation: 0, layers });
                 } else {
-                    // Legacy: 1 ảnh/mặt
                     if (!(await ownDesign(p.design_id))) { errors.push(`designPlacements[${i}] thiết kế không tồn tại hoặc không thuộc về bạn`); continue; }
                     const scale = Number(p.scale ?? 1);
                     if (!Number.isFinite(scale) || scale <= 0) { errors.push(`designPlacements[${i}].scale phải > 0`); continue; }
@@ -394,13 +369,10 @@ export class ProductsService {
         };
     }
 
-    /** Generate a unique slug from title: base, then base-2, base-3... on collision. */
     static async uniqueSlug(title: string, excludeId?: string): Promise<string> {
         const base = generateSlug(title);
         let slug = base;
         let n = 1;
-        // ponytail: linear probe; fine for expected volume. Upgrade to a counter/suffix
-        // strategy only if slug churn ever makes this a hotspot.
         while (true) {
             const clash: any = await MongoProduct.findOne({ slug }).select('_id').lean();
             if (!clash || (excludeId && clash._id.toString() === excludeId)) return slug;
@@ -426,12 +398,6 @@ export class ProductsService {
         await MongoVariant.insertMany(docs);
     }
 
-    /**
-     * Turn seller-proposed tag names into tag docs. Existing tag (by slug) is reused;
-     * a genuinely new name is created as a 'pending' proposal for admin review.
-     * Returns the tag docs to attach, and how many were newly proposed.
-     * ponytail: upsert by slug is the whole dedupe story — no separate "requests" collection.
-     */
     static async resolveProposedTags(names: string[], sellerId: string): Promise<{ docs: { _id: mongoose.Types.ObjectId; name: string }[]; proposed: number }> {
         const docs: { _id: mongoose.Types.ObjectId; name: string }[] = [];
         let proposed = 0;
@@ -449,12 +415,10 @@ export class ProductsService {
     }
 
 
-    /** Shop mà user sở hữu; tạo mới ở lần đăng sản phẩm đầu tiên. */
     private static async resolveShop(sellerId: string) {
         const ownerId = new mongoose.Types.ObjectId(sellerId);
         let shop = await Shop.findOne({ owner_id: ownerId });
         if (!shop) {
-            // Lấy tên thật của seller để shop không mang tên là chuỗi id.
             const owner: any = await User.findById(ownerId).select('full_name email').lean();
             const displayName = owner?.full_name || owner?.email?.split('@')[0] || 'Gian hàng mới';
             shop = await Shop.create({
@@ -468,7 +432,6 @@ export class ProductsService {
         return shop;
     }
 
-    /** Shop.slug là unique — dò hậu tố cho tới khi trống. */
     private static async uniqueShopSlug(name: string, sellerId: string): Promise<string> {
         const base = generateSlug(name) || `shop-${sellerId.slice(-6)}`;
         let slug = base;
@@ -480,7 +443,6 @@ export class ProductsService {
         return slug;
     }
 
-    /** Chủ sở hữu = user sở hữu shop chứa sản phẩm. Admin bỏ qua kiểm tra. */
     private static async assertOwnership(mp: any, actor: ProductActor) {
         if (normalizeRole(actor.role) === 'admin') return;
         const shop = await Shop.findById(mp.shop_id).lean();
@@ -489,12 +451,10 @@ export class ProductsService {
         }
     }
 
-    /** Ghép điều kiện lọc của FE (search/category/status) lên một query nền cho trước. */
     private static buildQuery(base: any, filter?: ProductFilterQueryDTO): any {
         const query: any = { ...base };
 
         if (filter?.status && filter.status !== 'ALL') {
-            // OUT_OF_STOCK không phải trạng thái lưu trong DB — nó suy ra từ tồn kho.
             query.listing_status = filter.status === 'OUT_OF_STOCK' ? 'ACTIVE' : filter.status;
         }
 
@@ -515,10 +475,6 @@ export class ProductsService {
         return query;
     }
 
-    /**
-     * Phân trang + map sang DTO. Sắp xếp theo giá/tồn kho phải đi qua aggregate vì hai
-     * đại lượng đó nằm ở collection variant, không nằm trên product.
-     */
     private static async page(query: any, filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
         const total = await MongoProduct.countDocuments(query);
         const page = Math.max(1, Number(filter?.page) || 1);
@@ -561,8 +517,6 @@ export class ProductsService {
         const items = await ProductsService.mapMany(docs);
         return { items, total, page, limit, totalPages };
     }
-
-    /** Nạp variant + shop cho một lô product bằng 2 truy vấn, tránh N+1. */
     private static async mapMany(docs: any[]): Promise<ProductItemResponseDTO[]> {
         if (docs.length === 0) return [];
 
@@ -591,11 +545,9 @@ export class ProductsService {
         ));
     }
 
-    /** Marketplace công khai — chỉ hàng đã PUBLISHED và chưa bị ẩn. */
     static async getAll(filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
         const base: any = { ...PUBLIC_QUERY };
 
-        // Xem gian hàng của một seller cụ thể (vẫn chỉ thấy hàng công khai).
         if (filter?.sellerId && mongoose.Types.ObjectId.isValid(filter.sellerId)) {
             const sellerShop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(filter.sellerId) }).lean();
             if (!sellerShop) return { items: [], total: 0, page: 1, limit: Number(filter?.limit || filter?.pageSize) || 6, totalPages: 0 };
@@ -607,14 +559,10 @@ export class ProductsService {
         return ProductsService.page(ProductsService.buildQuery(base, filter), filter);
     }
 
-    /**
-     * Hàng của chính seller đang đăng nhập — kể cả bản chưa PUBLISHED hoặc đã bị admin gỡ,
-     * để seller còn thấy và sửa. Thay cho cơ chế cũ dựa vào optionalAuthenticate.
-     */
+
     static async getMine(actor: ProductActor, filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
         const limit = Number(filter?.limit || filter?.pageSize) || 6;
 
-        // Admin xem được tất cả; seller chỉ thấy shop của mình.
         const base: any = { is_hidden: { $ne: true } };
         if (normalizeRole(actor.role) !== 'admin') {
             const shop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(actor.id) }).lean();
@@ -625,10 +573,6 @@ export class ProductsService {
         return ProductsService.page(ProductsService.buildQuery(base, filter), filter);
     }
 
-    /**
-     * Chi tiết sản phẩm. Mặc định chỉ trả hàng công khai; `includeHidden` dành cho các
-     * luồng nội bộ (create/update/moderation) cần đọc lại bản ghi vừa ghi.
-     */
     static async getById(id: string, opts: { includeHidden?: boolean } = {}): Promise<ProductItemResponseDTO> {
         if (!mongoose.Types.ObjectId.isValid(id)) throw new Error('Không tìm thấy sản phẩm.');
 
@@ -646,7 +590,6 @@ export class ProductsService {
         return mapToProductItemResponse(mp, variants, shop);
     }
 
-    /** Gợi ý sản phẩm liên quan — chỉ lấy hàng công khai. */
     static async getRelated(id: string, category?: string, limit = 4): Promise<ProductItemResponseDTO[]> {
         if (!mongoose.Types.ObjectId.isValid(id)) return [];
         const self = new mongoose.Types.ObjectId(id);
@@ -655,7 +598,6 @@ export class ProductsService {
         let docs = await MongoProduct.find(category ? { ...base, categories: category } : base)
             .limit(limit).lean();
 
-        // Không đủ cùng danh mục thì bù bằng hàng công khai khác.
         if (docs.length < limit) {
             const extra = await MongoProduct.find({
                 ...base,
@@ -667,23 +609,19 @@ export class ProductsService {
         return ProductsService.mapMany(docs);
     }
 
-    /** Gian hàng nổi bật cho trang chủ — ưu tiên shop có điểm đánh giá cao. */
     static async getFeaturedShops(): Promise<any[]> {
         return Shop.find().sort({ average_rating: -1, listing_count: -1 }).limit(5).lean();
     }
 
     private static async createStructured(sellerId: string, payload: any): Promise<ProductItemResponseDTO> {
-        // Seller → Create → Validate → Publish (no pre-moderation).
-        // _sellerId: cho validate check design ownership trong POD.
+
         const data = await ProductsService.validate({ ...payload, _sellerId: sellerId });
         const shop = await ProductsService.resolveShop(sellerId);
         const slug = await ProductsService.uniqueSlug(data.title);
 
-        // Proposed tag names become pending tags; product still publishes immediately.
         const proposed = await ProductsService.resolveProposedTags(data.newTagNames, sellerId);
         const allTags = [...data.tagDocs, ...proposed.docs];
 
-        // POD: sinh mockup + variant từ phôi. Non-POD: giữ nguyên luồng cũ.
         let images = data.images;
         let variantsToWrite: VariantInput[] = data.variants;
         let podFields: any = {};
@@ -721,13 +659,12 @@ export class ProductsService {
             weight_g: payload.weight_g ?? 500,
             dimensions_cm: payload.dimensions_cm ?? { length: 10, width: 10, height: 10 },
             status: 'PUBLISHED',
-            listing_status: 'ACTIVE',       // keep legacy field in sync
-            moderation_status: 'APPROVED',  // no pre-moderation
+            listing_status: 'ACTIVE',
+            moderation_status: 'APPROVED',
             ...podFields,
         });
 
         await ProductsService.writeVariants(mp._id, variantsToWrite);
-        // Keep tag usage counters accurate.
         if (allTags.length) {
             await Tag.updateMany({ _id: { $in: allTags.map(t => t._id) } }, { $inc: { product_count: 1 } });
         }
@@ -736,17 +673,7 @@ export class ProductsService {
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
 
-    /**
-     * Danh mục + thẻ cho form phẳng của seller portal.
-     *
-     * Tách khỏi validate(): validate() là bộ luật của luồng POD/structured nên còn ép
-     * description >= 10 ký tự, ảnh và variant — form phẳng không có những ràng buộc đó.
-     * Ở đây chỉ kiểm đúng hai thứ form phẳng thật sự gửi lên.
-     *
-     * `required` = true khi tạo mới: sản phẩm không gắn được vào danh mục admin thì
-     * người mua duyệt theo danh mục sẽ không bao giờ thấy nó. Khi sửa thì để false,
-     * payload không nhắc tới danh mục/thẻ nghĩa là "giữ nguyên".
-     */
+
     private static async resolveFlatCatalog(
         payload: { categoryId?: string; tagIds?: string[]; newTagNames?: string[] },
         sellerId: string,
@@ -784,9 +711,7 @@ export class ProductsService {
                 : { docs: [], proposed: 0 };
 
             const all = [...docs.map((t: any) => ({ _id: t._id, name: t.name })), ...proposed.docs];
-            // Không phân biệt tạo hay sửa: đã đụng tới thẻ thì phải còn ít nhất 1.
-            // `required` chỉ quyết định payload ĐƯỢC PHÉP im lặng hay không — gửi
-            // tagIds: [] là chủ động gỡ sạch, và điều đó phá cam kết mọi sản phẩm đều có thẻ.
+
             if (all.length === 0) errors.push('Vui lòng chọn ít nhất 1 thẻ');
             out.tags = all;
         }
@@ -795,10 +720,7 @@ export class ProductsService {
         return out;
     }
 
-    /**
-     * Đường tạo nhanh của seller portal: form phẳng (category là tên, giá/tồn/màu nhập tay).
-     * Khác với createStructured — vốn dành cho luồng POD chọn phôi + đặt design.
-     */
+
     private static async createSimple(sellerId: string, payload: ProductFormDataDTO): Promise<ProductItemResponseDTO> {
         const title = String(payload.title || '').trim();
         if (!title) throw new ValidationError(['Tên sản phẩm là bắt buộc']);
@@ -808,8 +730,6 @@ export class ProductsService {
 
         const totalStock = Number(payload.stock) || 0;
         if (totalStock < 0) throw new ValidationError(['Tồn kho không được âm']);
-
-        // Bắt buộc khi tạo mới — không cho sản phẩm ra đời mà không thuộc danh mục nào.
         const catalog = await ProductsService.resolveFlatCatalog(payload, sellerId, { required: true });
         const tags = catalog.tags || [];
 
@@ -854,10 +774,7 @@ export class ProductsService {
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
 
-    /**
-     * Trải danh sách màu của form seller thành variant, chia đều tồn kho (dư dồn cho màu cuối).
-     * Không có màu nào thì tạo một variant mặc định.
-     */
+
     private static colorsToVariants(
         colors: ProductColorVariantDTO[] | undefined,
         baseSku: string,
@@ -887,17 +804,9 @@ export class ProductsService {
         }));
     }
 
-    /**
-     * Hai FE form cùng gọi POST /products với hai payload khác nhau:
-     *  - form POD (CreateProductPage) gửi categoryId/blankId/variants/designPlacements
-     *  - form seller portal gửi category (tên) + price/stock/colors phẳng
-     * Phân nhánh theo payload thay vì bắt một bên phải đổi.
-     */
+
     static async create(sellerId: string, payload: any): Promise<ProductItemResponseDTO> {
-        // Dấu hiệu structured phải là thứ CHỈ luồng POD gửi. categoryId từng nằm ở đây,
-        // nhưng nay form phẳng cũng gửi categoryId (danh mục admin) — nếu vẫn nhận nó làm
-        // dấu hiệu thì form phẳng bị đẩy sang createStructured và mất sạch colors,
-        // location, rank, sku, originalPrice, status vốn chỉ createSimple xử lý.
+
         const isStructured = payload?.blankId !== undefined
             || Array.isArray(payload?.designPlacements)
             || Array.isArray(payload?.variants);
@@ -906,17 +815,12 @@ export class ProductsService {
             : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO);
     }
 
-    /**
-     * POD: từ phôi + markup + placements → sinh mockup cho mỗi biến thể màu, và variant với
-     * base_cost = giá phôi, retail_price = base_cost + markup. Ảnh sản phẩm = các mockup sinh ra.
-     * ponytail: 1 mockup / màu (ảnh phôi hiện là default_image dùng chung); nâng cấp ảnh phôi theo màu khi Printer hỗ trợ.
-     */
     private static async buildPodArtifacts(
         blank: Blank,
         podVariants: { sku: string; markup: number; stock: number }[],
         placements: any[]
     ): Promise<{ images: string[]; variants: VariantInput[] }> {
-        // Gom mọi design_id (kể cả trong layers) để resolve URL.
+
         const ids = new Set<string>();
         for (const p of placements) {
             if (p.design_id) ids.add(String(p.design_id));
@@ -925,20 +829,18 @@ export class ProductsService {
         const designs = await Design.find({ _id: { $in: [...ids].map(id => new mongoose.Types.ObjectId(id)) } }).lean();
         const designUrl = (id: string) => designs.find(d => d._id.toString() === String(id))?.file_url;
 
-        // 1 mockup / mặt — ghép lên ảnh ĐÚNG mặt (front/back).
         const mockups: string[] = [];
         for (const p of placements) {
             const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
             const blankImage = (area && (area as any).image) || blank.default_image;
 
             if (Array.isArray(p.layers) && p.layers.length) {
-                // Layer-based: chuyển sang Layer[] cho mockup engine.
+
                 const layers = p.layers.map((l: any) => l.type === 'image'
                     ? { ...l, designUrl: designUrl(l.design_id) }
                     : l
                 ).filter((l: any) => l.type !== 'image' || l.designUrl);
                 if (area && (area as any).surface === 'wrap') {
-                    // Cốc/bình: trải phẳng dieline → cuộn cong → dán lên ảnh phôi.
                     mockups.push(await generateWrapMockup(blankImage, layers, {
                         x: area.x, y: area.y, width: area.width, height: area.height,
                         template_w: (area as any).template_w || 2475, template_h: (area as any).template_h || 1155,
@@ -948,7 +850,7 @@ export class ProductsService {
                     mockups.push(await generateMockupLayers(blankImage, layers));
                 }
             } else if (p.design_id) {
-                // Legacy: 1 ảnh/mặt.
+
                 const url = designUrl(p.design_id);
                 if (!url) continue;
                 mockups.push(await generateMockup(blankImage, url, area, { x: p.x, y: p.y, scale: p.scale, rotation: p.rotation }));
@@ -956,7 +858,6 @@ export class ProductsService {
         }
         const images = mockups.length ? mockups : [blank.default_image];
 
-        // Variant: base_cost từ phôi, retail = base_cost + markup.
         const variants: VariantInput[] = podVariants.map(pv => {
             const vari = blank.variations.find(v => v.sku === pv.sku)!;
             return {
@@ -965,23 +866,19 @@ export class ProductsService {
                 size: vari.size,
                 material: vari.material,
                 base_cost: vari.base_cost,
-                price: vari.base_cost + pv.markup, // retail
+                price: vari.base_cost + pv.markup,
                 stock: pv.stock,
             };
         });
         return { images, variants };
     }
 
-    /**
-     * Preview mockups (không lưu SP): validate quyền + render mockup cho từng mặt.
-     * Dùng cho bước "Xem trước" ở FE — trả về ảnh mockup thật (gồm wrap cốc).
-     */
     static async previewMockups(sellerId: string, blankId: string, designPlacements: any[]): Promise<string[]> {
         if (!blankId) throw new ValidationError(['thiếu blankId']);
         const blank = await BlankClient.getBlank(blankId);
         if (!blank) throw new ValidationError(['phôi không tồn tại']);
 
-        // resolve design URLs + check ownership.
+
         const ids = new Set<string>();
         for (const p of (designPlacements || [])) {
             if (p.design_id) ids.add(String(p.design_id));
@@ -991,7 +888,7 @@ export class ProductsService {
         const ownedUrl = (id: string) => {
             const d = designs.find(x => x._id.toString() === String(id));
             if (!d) return undefined;
-            if (d.seller_id.toString() !== String(sellerId)) return undefined; // chỉ ảnh của mình
+            if (d.seller_id.toString() !== String(sellerId)) return undefined;
             return d.file_url;
         };
 
@@ -1016,14 +913,9 @@ export class ProductsService {
         return out;
     }
 
-    /**
-     * Cập nhật theo payload có cấu trúc (POD / chọn categoryId / tagIds).
-     * Validate từng field CÓ MẶT trong payload (partial), quyền sở hữu đã check ở update().
-     */
+
     private static async updateStructured(mp: any, actor: ProductActor, payload: any): Promise<ProductItemResponseDTO> {
         const id = mp._id.toString();
-
-        // Security: ownership/status fields can never be set through a normal update.
         for (const forbidden of ['sellerId', 'shop_id', 'shopId', 'status', 'owner_id']) {
             if (payload[forbidden] !== undefined) {
                 throw new ForbiddenError(`Field "${forbidden}" cannot be changed via update`);
@@ -1049,7 +941,6 @@ export class ProductsService {
             const newIds = allTags.map(t => t._id.toString());
             mp.tags = allTags.map(t => t.name);
             mp.tag_ids = allTags.map(t => t._id) as any;
-            // adjust product_count deltas
             const added = newIds.filter(x => !oldIds.includes(x));
             const removed = oldIds.filter((x: string) => !newIds.includes(x));
             if (added.length) await Tag.updateMany({ _id: { $in: added } }, { $inc: { product_count: 1 } });
@@ -1063,9 +954,7 @@ export class ProductsService {
         return ProductsService.getById(id, { includeHidden: true });
     }
 
-    /** Cập nhật theo form phẳng của seller portal. Quyền sở hữu đã check ở update(). */
     private static async updateSimple(mp: any, actor: ProductActor, payload: Partial<ProductFormDataDTO>): Promise<ProductItemResponseDTO> {
-        // Sửa thì không bắt buộc: payload không nhắc tới danh mục/thẻ = giữ nguyên.
         const catalog = await ProductsService.resolveFlatCatalog(payload, actor.id, { required: false });
 
         if (catalog.category) {
@@ -1077,7 +966,6 @@ export class ProductsService {
             const newIds = catalog.tags.map(t => t._id.toString());
             mp.tags = catalog.tags.map(t => t.name);
             mp.tag_ids = catalog.tags.map(t => t._id) as any;
-            // product_count phải bù trừ hai chiều, nếu không nó trôi dần khỏi số thật.
             const added = newIds.filter(x => !oldIds.includes(x));
             const removed = oldIds.filter((x: string) => !newIds.includes(x));
             if (added.length) await Tag.updateMany({ _id: { $in: added } }, { $inc: { product_count: 1 } });
@@ -1089,14 +977,11 @@ export class ProductsService {
             mp.slug = await ProductsService.uniqueSlug(payload.title, mp._id.toString());
         }
         if (payload.description !== undefined) mp.description = payload.description;
-        // Tên danh mục chỉ dùng khi client cũ không gửi categoryId.
         if (!catalog.category && payload.category !== undefined) mp.categories = [payload.category];
         if (payload.location !== undefined) mp.location = payload.location;
         if (payload.rank !== undefined) mp.display_rank = payload.rank;
         if (payload.originalPrice !== undefined) mp.original_price = payload.originalPrice;
         if (payload.status !== undefined) {
-            // Đây là trạng thái BÁN của seller (listing_status), không phải cờ kiểm duyệt
-            // `status` — seller không được tự gỡ/khôi phục bài viết của mình bằng đường này.
             mp.listing_status = payload.status === 'OUT_OF_STOCK' ? 'ACTIVE' : payload.status;
         }
         if (payload.images && payload.images.length > 0) {
@@ -1107,7 +992,6 @@ export class ProductsService {
         await mp.save();
 
         if (payload.colors && payload.colors.length > 0) {
-            // Đổi bộ màu = viết lại toàn bộ variant.
             const existing = await MongoVariant.find({ product_id: mp._id }).lean();
             const baseSku = payload.sku || existing[0]?.sku?.replace(/-\d+$/, '') || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
             const basePrice = payload.price !== undefined
@@ -1135,14 +1019,12 @@ export class ProductsService {
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
 
-    /** Cùng lý do phân nhánh như create(): hai FE form, hai dạng payload. */
     static async update(id: string, actor: ProductActor, payload: any): Promise<ProductItemResponseDTO> {
         if (!mongoose.Types.ObjectId.isValid(id)) throw new Error('Không tìm thấy sản phẩm cần cập nhật.');
         const mp = await MongoProduct.findById(id);
         if (!mp) throw new Error('Không tìm thấy sản phẩm cần cập nhật.');
         await ProductsService.assertOwnership(mp, actor);
 
-        // Cùng lý do như create(): updateSimple nay tự xử lý categoryId/tagIds.
         const isStructured = payload?.blankId !== undefined
             || Array.isArray(payload?.designPlacements)
             || Array.isArray(payload?.variants);
@@ -1152,10 +1034,6 @@ export class ProductsService {
             : ProductsService.updateSimple(mp, actor, payload as Partial<ProductFormDataDTO>);
     }
 
-    /**
-     * Xoá mềm. Sản phẩm đã nằm trong đơn hàng / giỏ hàng nên xoá cứng sẽ làm hỏng
-     * tham chiếu ở những nơi đó — đánh dấu is_hidden và rút khỏi mọi truy vấn thay vì xoá thật.
-     */
     static async delete(id: string, actor: ProductActor): Promise<{ success: boolean; message: string }> {
         if (!mongoose.Types.ObjectId.isValid(id)) throw new Error('Không tìm thấy sản phẩm cần xóa.');
         const mp = await MongoProduct.findById(id);
@@ -1173,7 +1051,6 @@ export class ProductsService {
         return { success: true, message: 'Đã xóa sản phẩm thành công.' };
     }
 
-    /** Xoá mềm hàng loạt. Chỉ đụng tới sản phẩm mà actor thực sự sở hữu. */
     static async batchDelete(ids: string[], actor: ProductActor): Promise<{ success: boolean; count: number }> {
         const scoped = await ProductsService.scopeIdsToActor(ids, actor);
         if (scoped.length === 0) return { success: true, count: 0 };
@@ -1188,7 +1065,6 @@ export class ProductsService {
         return { success: true, count: result.modifiedCount };
     }
 
-    /** Bật/tắt bán hàng loạt. Chỉ đụng tới sản phẩm mà actor thực sự sở hữu. */
     static async updateStatus(ids: string[], status: ProductStatus, actor: ProductActor): Promise<{ success: boolean; count: number }> {
         const scoped = await ProductsService.scopeIdsToActor(ids, actor);
         if (scoped.length === 0) return { success: true, count: 0 };
@@ -1203,10 +1079,6 @@ export class ProductsService {
         return { success: true, count: result.modifiedCount };
     }
 
-    /**
-     * Lọc danh sách id xuống còn những sản phẩm actor được phép đụng vào.
-     * Không có bước này thì thao tác hàng loạt cho phép seller xoá hàng của shop khác.
-     */
     private static async scopeIdsToActor(ids: string[], actor: ProductActor): Promise<mongoose.Types.ObjectId[]> {
         if (!Array.isArray(ids) || ids.length === 0) return [];
         const validIds = ids
@@ -1226,7 +1098,6 @@ export class ProductsService {
         return owned.map(p => p._id);
     }
 
-    /** Admin post-moderation: take a live product off the marketplace. */
     static async unpublish(id: string, reason?: string) {
         const mp = await MongoProduct.findById(id);
         if (!mp) throw new Error('Product not found');
@@ -1237,10 +1108,6 @@ export class ProductsService {
         return ProductsService.getById(id, { includeHidden: true });
     }
 
-    /**
-     * Liệt kê những chỗ tin đăng chưa đạt chuẩn, KHÔNG ném lỗi.
-     * Dùng để báo cho admin biết, chứ không dùng để chặn thao tác.
-     */
     private static async listingIssues(mp: any): Promise<string[]> {
         const variants = await MongoVariant.find({ product_id: mp._id });
         try {
@@ -1259,20 +1126,6 @@ export class ProductsService {
         }
     }
 
-    /**
-     * Admin: khôi phục sản phẩm đã gỡ.
-     *
-     * Khôi phục là phép ĐẢO NGƯỢC thao tác gỡ của chính admin, nên không được
-     * chặn: sản phẩm vốn đã ở trên sàn ngay trước đó. Bản cũ chạy validate rồi
-     * ném lỗi khi không đạt, mà bộ luật ấy chưa bao giờ được áp dụng lúc tạo —
-     * createSimple (form seller portal) đặt thẳng status PUBLISHED và chỉ kiểm
-     * tra title/price/stock, không hề gán category_ids. Hệ quả: mọi sản phẩm
-     * trong hệ thống đều gỡ được nhưng không khôi phục lại được, nút "Gỡ khỏi
-     * sàn" thành cửa một chiều.
-     *
-     * Vẫn chạy validate, nhưng để BÁO cho admin biết tin đăng còn thiếu gì.
-     * Chỗ đúng để chặn là lúc người bán đăng, không phải lúc admin sửa sai.
-     */
     static async republish(id: string): Promise<{ product: any; warnings: string[] }> {
         const mp = await MongoProduct.findById(id);
         if (!mp) throw new Error('Product not found');
@@ -1288,12 +1141,10 @@ export class ProductsService {
         return { product: await ProductsService.getById(id, { includeHidden: true }), warnings };
     }
 
-    /** Danh mục công khai cho form seller — truy vấn thuộc module category. */
     static async listActiveCategories() {
         return categoryService.listActive();
     }
 
-    /** Thẻ công khai cho form seller — truy vấn thuộc module tags. */
     static async listTags() {
         return tagsService.listApproved();
     }

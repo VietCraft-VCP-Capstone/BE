@@ -4,15 +4,12 @@ import { Product } from "../../product/infrastructure/models/product.model";
 import { ProductVariant } from "../../product/infrastructure/models/product-variant.model";
 import { Design } from "../../design/infrastructure/models/design.model";
 import { dispatchToPrinter } from "./printer-dispatch.service";
-import { OrderResponse, DEFAULT_SHIPPING_FEE, PLATFORM_FEE_RATE, PAYMENT_METHODS, SHIPPING_CARRIERS,  } from "../types";
-import { mapDbOrderToResponse} from "../infrastructure/dto/order.dto";
+import { OrderResponse, DEFAULT_SHIPPING_FEE, PLATFORM_FEE_RATE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
+import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
 import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
 
 export class OrdersService {
-  /**
-   * Tạo order từ payload FE: [{ productId, variantId, quantity }].
-   * Giá, shop, thông tin POD đều đọc từ DB; `price`/`totalAmount`/`discount` do client gửi bị bỏ qua.
-   */
+
   static async createOrder(
     buyerId: string,
     payload: any,
@@ -34,7 +31,6 @@ export class OrdersService {
     let shopId: mongoose.Types.ObjectId | null = null;
     const orderItems: any[] = [];
     let subtotal = 0;
-    // Đơn có hàng in theo yêu cầu hay không — quyết định phương thức thanh toán hợp lệ.
     let hasPodItem = false;
 
     for (const it of items) {
@@ -50,8 +46,6 @@ export class OrdersService {
         throw new Error(`Sản phẩm "${product.title}" hiện không bán`);
       }
 
-      // Biến thể: theo variantId nếu client gửi, không thì lấy biến thể đang bán đầu tiên
-      // (giỏ hàng cho phép item không có variant_id).
       let variant = null;
       if (it.variantId && mongoose.Types.ObjectId.isValid(it.variantId)) {
         variant = await ProductVariant.findOne({
@@ -83,7 +77,6 @@ export class OrdersService {
         );
       }
 
-      // 1 order = 1 shop: shop lấy từ product trong DB, không lấy theo shop_name client gửi.
       if (shopId && shopId.toString() !== product.shop_id.toString()) {
         throw new Error(
           "Đơn hàng chỉ hỗ trợ 1 shop mỗi lần (MVP). Vui lòng tách đơn theo shop.",
@@ -92,10 +85,8 @@ export class OrdersService {
       shopId = product.shop_id;
       if (product.product_type === "POD_TEMPLATE") hasPodItem = true;
 
-      // Giá LẤY TỪ DB — không bao giờ dùng it.price của client.
       subtotal += num(variant.retail_price) * qty;
 
-      // POD: gắn design + options để Printer in. Lấy từ design_placement đầu tiên.
       const placement = product.design_placements?.[0];
       let designUrl: string | undefined;
       if (placement?.design_id) {
@@ -114,32 +105,27 @@ export class OrdersService {
         retail_price: variant.retail_price,
         image: variant.mockup_image || product.images?.[0],
         design_file_url: designUrl,
-        // giữ tạm meta phôi + placement để dispatch (không đổi schema).
         custom_notes: JSON.stringify({
           sku: variant.sku,
           blank_id: product.blank_id,
           design_options: placement
             ? {
-                scale: placement.scale,
-                rotation: placement.rotation,
-                align: "center",
-              }
+              scale: placement.scale,
+              rotation: placement.rotation,
+              align: "center",
+            }
             : undefined,
         }),
       });
     }
     const shippingFee = DEFAULT_SHIPPING_FEE;
-    const discount = 0; // TODO: validate coupon qua promotion module rồi mới trừ.
+    const discount = 0;
     const platformFee = subtotal * PLATFORM_FEE_RATE;
     const gateway = String(
       payload.paymentGateway || payload.payment_method || "COD",
     ).toUpperCase();
     const paymentMethod = PAYMENT_METHODS.includes(gateway) ? gateway : "COD";
 
-    // Hàng POD chỉ được sản xuất sau khi tiền đã về: xưởng in cắt/in xong là không bán
-    // lại được cho ai khác, nên rủi ro khách từ chối nhận rơi hết vào seller.
-    // Chốt chặn phải nằm ở đây vì dispatchToPrinter chỉ chạy từ callback thanh toán —
-    // một đơn POD trả COD sẽ nằm PENDING vĩnh viễn và không bao giờ tới xưởng in.
     if (hasPodItem && paymentMethod === "COD") {
       throw new Error(
         "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc MOMO.",
@@ -159,7 +145,6 @@ export class OrdersService {
       shop_id: shopId,
       order_code: `VC-${Date.now()}-${Math.floor(Math.random() * 9000 + 1000)}`,
       payment_method: paymentMethod,
-      // Mọi đơn đều bắt đầu PENDING; chỉ callback của cổng thanh toán mới được set PAID.
       payment_status: "PENDING",
       order_status: "ORDERED",
       shipping_address: {
@@ -193,7 +178,6 @@ export class OrdersService {
     return mapDbOrderToResponse(populated || order);
   }
 
-  /** Nhận cả order_code lẫn _id, nhưng luôn giới hạn trong đơn của chính buyer. */
   static async getOrder(id: string, buyerId: string): Promise<OrderResponse> {
     const query: any = byCodeOrId(id);
     query.buyer_id = toBuyerObjectId(buyerId);
@@ -235,8 +219,8 @@ export class OrdersService {
     return orders.map(mapDbOrderToResponse);
   }
 
-  /**
-   * Cổng thanh toán callback (nhận order_code hoặc _id):
+  /*
+   * Cổng thanh toán callback 
    * 'success' → PAID + PROCESSING rồi đẩy đơn sang xưởng in; ngược lại → CANCELLED.
    */
   static async processPaymentCallback(
@@ -255,7 +239,6 @@ export class OrdersService {
         note: "Thanh toán thành công. Đơn hàng chuyển sang sản xuất.",
       });
       await order.save();
-      // Đẩy sang xưởng in (không chặn phản hồi thanh toán nếu Printer lỗi).
       dispatchToPrinter(order).catch((err: any) =>
         console.error(
           "[DISPATCH] lỗi gửi đơn sang Printer:",

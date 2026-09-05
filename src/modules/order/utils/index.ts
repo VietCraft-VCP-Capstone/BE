@@ -2,7 +2,6 @@ import mongoose from "mongoose";
 
 export const dec = (n: number) => mongoose.Types.Decimal128.fromString(Math.round(n || 0).toString());
 export const num = (v: any) => (v ? Number(v.toString()) : 0);
-/** Chỉ khớp order_code hoặc _id — dùng chung cho getOrder/callback. */
 export function byCodeOrId(id: string) {
   return {
     $or: [

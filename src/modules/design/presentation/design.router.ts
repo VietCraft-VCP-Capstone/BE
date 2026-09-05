@@ -5,7 +5,6 @@ import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/mi
 
 const router = Router();
 
-// Bọc multer: lỗi file (sai type / quá lớn) → 400 rõ ràng thay vì rơi vào error handler chung (500).
 const handleUpload = (req: Request, res: Response, next: NextFunction) => {
     uploadDesign.single('file')(req, res, (err: any) => {
         if (err) return res.status(400).json({ error: err.message === 'File too large' ? 'File vượt quá 10MB.' : err.message });
@@ -13,7 +12,6 @@ const handleUpload = (req: Request, res: Response, next: NextFunction) => {
     });
 };
 
-// Upload 1 artwork (multipart field 'file').
 router.post('/', authenticate, requireRole(['seller', 'admin']), handleUpload, async (req: AuthenticatedRequest, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'Thiếu file thiết kế.' });

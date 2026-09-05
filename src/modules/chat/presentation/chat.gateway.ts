@@ -4,8 +4,6 @@ import { config } from '../../../app/config';
 import { AuthUser, normalizeRole } from '../../../app/middleware/auth.middleware';
 import { logger } from '../../../shared/utils/logger';
 
-/** Id phòng chat = 2 id người dùng sắp xếp rồi nối bằng '_'.
- *  Nhờ quy ước này server tự kiểm tra được ai có quyền vào phòng mà chưa cần bảng conversations. */
 export function buildConversationId(userA: string, userB: string): string {
     return [userA, userB].sort().join('_');
 }
@@ -24,8 +22,6 @@ export class ChatGateway {
     }
 
     private initialize() {
-        // Bắt buộc JWT khi connect. Trước đây socket hoàn toàn ẩn danh:
-        // bất kỳ ai cũng nối được rồi join phòng bất kỳ để đọc trộm tin nhắn người khác.
         this.io.use((socket, next) => {
             const raw = String(
                 socket.handshake.auth?.token
@@ -67,13 +63,10 @@ export class ChatGateway {
                 if (typeof roomId !== 'string' || typeof message !== 'string' || !message.trim()) {
                     return socket.emit('error_message', { error: 'Payload không hợp lệ' });
                 }
-                // Chỉ phát được vào phòng mình đã join (đã qua kiểm tra ở join_room).
                 if (!socket.rooms.has(roomId)) {
                     return socket.emit('error_message', { error: 'Bạn chưa tham gia cuộc hội thoại này' });
                 }
 
-                // senderId lấy từ token, KHÔNG tin payload client (trước đây client tự khai -> giả mạo được).
-                // Không log nội dung tin nhắn (dữ liệu riêng tư của người dùng).
                 logger.info(`Message in room ${roomId} by ${user.id}`);
                 this.io.to(roomId).emit('message_received', {
                     senderId: user.id,

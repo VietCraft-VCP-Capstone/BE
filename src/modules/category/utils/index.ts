@@ -24,8 +24,6 @@ export function buildCategoryTree(categories: any[]): CategoryNode[] {
             if (parent) {
                 parent.children.push(node);
             } else {
-                // Mồ côi: cha đã bị xoá hoặc nằm ngoài tập dữ liệu. Đưa lên gốc còn
-                // hơn để nó biến mất khỏi màn hình quản trị mà không ai hay.
                 roots.push(node);
             }
         } else {
@@ -42,12 +40,6 @@ function sortNodes(nodes: CategoryNode[]): void {
     for (const n of nodes) sortNodes(n.children);
 }
 
-/**
- * Lọc cây nhưng GIỮ LẠI tổ tiên của mọi nút khớp.
- *
- * Nếu chỉ giữ đúng nút khớp thì kết quả tìm kiếm mất ngữ cảnh phân cấp: người
- * dùng thấy "Ly sứ" nhưng không biết nó nằm dưới "Gốm sứ" hay "Quà tặng".
- */
 export function filterCategoryTree(
     nodes: CategoryNode[],
     match: (node: CategoryNode) => boolean
@@ -59,7 +51,6 @@ export function filterCategoryTree(
     }, []);
 }
 
-/** Đếm mọi nút trong rừng cây, không chỉ nút gốc. */
 export function countCategoryNodes(nodes: CategoryNode[]): number {
     return nodes.reduce((sum, node) => sum + 1 + countCategoryNodes(node.children), 0);
 }

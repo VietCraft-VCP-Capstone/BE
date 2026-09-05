@@ -16,8 +16,6 @@ const TagSchema = new Schema<ITag>({
     slug: { type: String, required: true, unique: true, index: true },
     color: { type: String, default: '#007700' },
     product_count: { type: Number, default: 0 },
-    // Seller-proposed tags land as 'pending' until an admin approves them.
-    // ponytail: legacy tags have no status field; queries treat missing as active via {$ne:'pending'}.
     status: { type: String, enum: ['active', 'pending'], default: 'active', index: true },
     proposed_by: { type: Schema.Types.ObjectId, ref: 'User' },
 }, {
@@ -25,3 +23,4 @@ const TagSchema = new Schema<ITag>({
 });
 
 export const Tag = mongoose.model<ITag>('Tag', TagSchema, 'tags');
+

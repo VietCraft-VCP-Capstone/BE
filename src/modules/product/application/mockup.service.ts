@@ -5,14 +5,13 @@ import { config } from '../../../app/config';
 import { MOCKUP_DIR, UPLOAD_ROOT, publicUrl } from '../../../shared/upload/upload.middleware';
 
 export interface Placement {
-    x: number;         // toạ độ góc trên-trái vùng đặt design, px trên ảnh phôi
+    x: number;
     y: number;
-    scale?: number;    // 0..1+ so với print_area width; mặc định fit theo area
-    rotation?: number; // độ
+    scale?: number;
+    rotation?: number;
 }
 export interface PrintArea { key: string; x: number; y: number; width: number; height: number }
 
-// Lấy bytes ảnh từ URL (phôi ở Printer) hoặc file local (/uploads/...).
 async function loadImage(url: string): Promise<Buffer> {
     if (url.startsWith('/uploads/')) {
         const abs = path.join(UPLOAD_ROOT, url.replace('/uploads/', ''));
@@ -24,11 +23,7 @@ async function loadImage(url: string): Promise<Buffer> {
     return Buffer.from(await res.arrayBuffer());
 }
 
-/**
- * Ghép 1 design lên ảnh phôi trong 1 print_area → trả URL mockup đã lưu.
- * ponytail: composite 2D phẳng (không warp theo nếp vải). Đủ cho preview; nâng cấp warp/displacement map nếu cần thực tế hơn.
- * Nếu không có print_area → canh giữa toàn ảnh phôi.
- */
+
 export async function generateMockup(
     blankImageUrl: string,
     designUrl: string,
@@ -42,7 +37,6 @@ export async function generateMockup(
     const canvasW = meta.width || 800;
     const canvasH = meta.height || 800;
 
-    // Vùng đặt: print_area nếu có, else khối giữa 60% ảnh.
     const box = area ?? { x: canvasW * 0.2, y: canvasH * 0.2, width: canvasW * 0.6, height: canvasH * 0.6, key: 'auto' };
     const targetW = Math.max(1, Math.round(box.width * (placement.scale ?? 1)));
 
@@ -51,7 +45,6 @@ export async function generateMockup(
     const designPng = await design.png().toBuffer();
     const dMeta = await sharp(designPng).metadata();
 
-    // Toạ độ dán: box gốc + offset placement, kẹp trong canvas.
     const left = Math.round(Math.max(0, Math.min(canvasW - (dMeta.width || 1), box.x + (placement.x || 0))));
     const top = Math.round(Math.max(0, Math.min(canvasH - (dMeta.height || 1), box.y + (placement.y || 0))));
 
@@ -61,21 +54,19 @@ export async function generateMockup(
     return publicUrl(outAbs);
 }
 
-// ---- Layer-based mockup (image + text + shape) ----
 export interface Layer {
     type: 'image' | 'text' | 'shape';
     x: number; y: number; scale?: number; rotation?: number;
-    // image
+
     designUrl?: string;
-    // text
+
     text?: string; font_family?: string; font_size?: number; font_weight?: string; color?: string;
-    // shape
+
     shape?: string; fill?: string; stroke?: string; stroke_width?: number; width?: number; height?: number;
 }
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-// SVG cho 1 shape trong bounding box wxh (đã tính scale).
 function shapeSvg(shape: string, w: number, h: number, fill: string, stroke: string, sw: number): string {
     const s = Math.max(0, sw);
     const inset = s / 2;
@@ -134,10 +125,6 @@ async function layerToPng(layer: Layer): Promise<{ buf: Buffer; w: number; h: nu
     return null;
 }
 
-/**
- * Mockup từ nhiều layer (image/text/shape) — giữ z-order theo thứ tự mảng.
- * ponytail: mỗi layer render riêng thành PNG rồi composite; đủ cho preview 2D.
- */
 export async function generateMockupLayers(blankImageUrl: string, layers: Layer[]): Promise<string> {
     const blankBuf = await loadImage(blankImageUrl);
     const blank = sharp(blankBuf);
@@ -158,13 +145,11 @@ export async function generateMockupLayers(blankImageUrl: string, layers: Layer[
     return publicUrl(outAbs);
 }
 
-// ---- Wrap (cốc/bình): render dieline phẳng → cuộn cong → dán lên ảnh phôi ----
 export interface WrapArea {
     x: number; y: number; width: number; height: number;
     template_w: number; template_h: number; arc?: number;
 }
 
-/** Ghép layers lên canvas dieline phẳng (nền trong suốt), trả PNG buffer kích thước template_w×template_h. */
 async function renderDieline(layers: Layer[], tW: number, tH: number): Promise<Buffer> {
     const base = sharp({ create: { width: tW, height: tH, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 0 } } });
     const ops: { input: Buffer; left: number; top: number }[] = [];
@@ -176,25 +161,22 @@ async function renderDieline(layers: Layer[], tW: number, tH: number): Promise<B
     return base.composite(ops).png().toBuffer();
 }
 
-/**
- * Cuộn ảnh dieline phẳng quanh trụ: cắt thành N dải dọc, mỗi dải dịch/thu chiều cao theo cos
- * để giả phối cảnh trụ tròn (giữa phình, hai mép co). ponytail: warp xấp xỉ đủ cho preview.
- */
+
 async function cylinderWarp(flat: Buffer, boxW: number, boxH: number, arc: number): Promise<Buffer> {
     const STRIPS = 60;
     const meta = await sharp(flat).metadata();
     const fW = meta.width || boxW, fH = meta.height || boxH;
     const half = arc / 2;
-    const sxOf = (u: number) => (Math.sin(-half + u * arc) / Math.sin(half) + 1) / 2; // 0..1 ngang trên box
+    const sxOf = (u: number) => (Math.sin(-half + u * arc) / Math.sin(half) + 1) / 2;
 
     const strips: { input: Buffer; left: number; top: number }[] = [];
     for (let i = 0; i < STRIPS; i++) {
         const u0 = i / STRIPS, u1 = (i + 1) / STRIPS;
         const left = Math.round(sxOf(u0) * boxW);
         const right = Math.round(sxOf(u1) * boxW);
-        const w = Math.max(1, right - left + 1);          // +1: overlap chống hở
+        const w = Math.max(1, right - left + 1);
         const thetaMid = -half + ((u0 + u1) / 2) * arc;
-        const scaleH = 0.80 + 0.20 * Math.cos(thetaMid);  // co chiều cao ở mép (foreshortening)
+        const scaleH = 0.80 + 0.20 * Math.cos(thetaMid);
         const h = Math.max(1, Math.round(boxH * scaleH));
         const top = Math.round((boxH - h) / 2);
         const cropLeft = Math.min(Math.round(u0 * fW), fW - 1);
@@ -209,7 +191,6 @@ async function cylinderWarp(flat: Buffer, boxW: number, boxH: number, arc: numbe
         .composite(strips).png().toBuffer();
 }
 
-/** Mockup cho bề mặt WRAP: layers → dieline phẳng → cuộn cong → dán vào wrap-box trên ảnh cốc. */
 export async function generateWrapMockup(blankImageUrl: string, layers: Layer[], area: WrapArea): Promise<string> {
     const blankBuf = await loadImage(blankImageUrl);
     const dieline = await renderDieline(layers, area.template_w, area.template_h);
@@ -222,10 +203,8 @@ export async function generateWrapMockup(blankImageUrl: string, layers: Layer[],
     return publicUrl(outAbs);
 }
 
-/** Chỉ render dieline phẳng ra file (cho preview tấm phẳng). */
 export async function generateFlatDieline(layers: Layer[], tW: number, tH: number): Promise<string> {
     const buf = await renderDieline(layers, tW, tH);
-    // đặt trên nền trắng để nhìn rõ.
     const outName = `${crypto.randomUUID()}.png`;
     const outAbs = path.join(MOCKUP_DIR, outName);
     await sharp({ create: { width: tW, height: tH, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })

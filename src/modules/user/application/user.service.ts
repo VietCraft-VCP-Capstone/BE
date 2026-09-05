@@ -5,12 +5,8 @@ import { Wishlist } from '../../product/infrastructure/models/wishlist.model';
 import { ShopFollower } from '../../product/infrastructure/models/shop-follower.model';
 import mongoose from 'mongoose';
 
-// Whitelist field người dùng được tự sửa. KHÔNG bao giờ để lọt `role`, `is_locked`,
-// `password_hash`, `email`, `wishlist`, `cart` — nhận thẳng req.body vào $set là
-// leo thang đặc quyền (tự đặt role: 'ADMIN' / tự mở khoá tài khoản).
 const EDITABLE_PROFILE_FIELDS = ['full_name', 'phone', 'avatar', 'identity_card_number', 'tax_code', 'notification_settings'] as const;
 
-// Địa chỉ cũng phải lọc: cho `_id` đi qua Object.assign sẽ làm hỏng subdocument.
 const EDITABLE_ADDRESS_FIELDS = ['recipient_name', 'phone', 'address_detail', 'province_id', 'district_id', 'ward_code', 'is_default'] as const;
 
 function pick<T extends object>(source: any, fields: readonly string[]): T {
@@ -98,7 +94,6 @@ export class UserService {
         } as IAddress;
 
         if (newAddress.is_default) {
-            // Đặt tất cả địa chỉ khác thành không mặc định
             user.addresses.forEach(addr => {
                 addr.is_default = false;
             });
@@ -126,7 +121,6 @@ export class UserService {
             });
         }
 
-        // Cập nhật các trường (chỉ những field được phép, tránh ghi đè _id)
         Object.assign(address, pick<Partial<IAddress>>(addressData, EDITABLE_ADDRESS_FIELDS));
 
         await user.save();
@@ -146,3 +140,4 @@ export class UserService {
         return user.addresses;
     }
 }
+

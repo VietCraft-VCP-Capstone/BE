@@ -4,10 +4,6 @@ import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/mi
 
 const router = Router();
 
-// Cài đặt gian hàng luôn thuộc về chính người đang đăng nhập.
-// sellerId BẮT BUỘC lấy từ token (req.user.id): nếu nhận từ query/body thì bất kỳ ai
-// cũng đọc/ghi đè được settings gian hàng của người khác.
-// GET cài đặt gian hàng của seller đang đăng nhập
 router.get('/', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const settings = await SellerSettingsService.getSettings(req.user!.id);
@@ -17,7 +13,6 @@ router.get('/', authenticate, requireRole(['seller', 'admin']), async (req: Auth
     }
 });
 
-// PUT cập nhật cài đặt gian hàng của seller đang đăng nhập
 router.put('/', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const updated = await SellerSettingsService.updateSettings(req.user!.id, req.body);
@@ -29,3 +24,4 @@ router.put('/', authenticate, requireRole(['seller', 'admin']), async (req: Auth
 
 export const sellerSettingsRouter = router;
 export default router;
+

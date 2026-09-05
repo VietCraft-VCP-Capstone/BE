@@ -5,7 +5,6 @@ import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/mi
 
 const router = Router();
 
-/** Map lỗi tầng service sang mã HTTP. Dùng chung cho mọi route ghi. */
 function handleError(res: Response, error: any) {
     if (error instanceof ValidationError) {
         return res.status(400).json({ error: 'Dữ liệu không hợp lệ', errors: error.errors });
@@ -19,12 +18,10 @@ function handleError(res: Response, error: any) {
     return res.status(400).json({ error: error.message });
 }
 
-/** Danh tính người thao tác. Chỉ gọi sau `authenticate` nên req.user luôn có. */
 function actorOf(req: AuthenticatedRequest): ProductActor {
     return { id: req.user!.id, role: req.user!.role };
 }
 
-/** Query string luôn là string — chuẩn hoá về đúng kiểu cho service. */
 function filterOf(req: AuthenticatedRequest) {
     const { search, category, status, sort, page, pageSize, limit, sellerId, shopId } = req.query;
     const str = (v: any) => (typeof v === 'string' && v.trim() !== '' ? v : undefined);
@@ -42,8 +39,6 @@ function filterOf(req: AuthenticatedRequest) {
     };
 }
 
-// ==================== ĐỌC CÔNG KHAI ====================
-// Marketplace: chỉ hàng đã PUBLISHED và chưa bị ẩn.
 
 router.get('/', async (req: AuthenticatedRequest, res) => {
     try {
@@ -61,7 +56,6 @@ router.get('/featured-shops', async (req, res) => {
     }
 });
 
-// Dữ liệu tham chiếu cho form seller. Phải khai báo trước '/:id'.
 router.get('/meta/categories', async (req, res) => {
     try {
         res.json(await ProductsService.listActiveCategories());
@@ -80,8 +74,6 @@ router.get('/meta/tags', async (req, res) => {
 
 // ==================== SELLER ====================
 
-// Hàng của chính seller đang đăng nhập — kể cả bản chưa công khai.
-// Thay cho cơ chế cũ dựa vào optionalAuthenticate đọc lén token ở GET '/'.
 router.get('/mine', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
     try {
         res.json(await ProductsService.getMine(actorOf(req), filterOf(req)));
@@ -90,7 +82,6 @@ router.get('/mine', authenticate, requireRole(['seller', 'admin']), async (req: 
     }
 });
 
-// Phôi in lấy từ hệ Printer (seller chọn phôi để đè thiết kế).
 router.get('/meta/blanks', authenticate, requireRole(['seller', 'admin']), async (req, res) => {
     try {
         res.json(await BlankClient.listBlanks());
@@ -99,7 +90,6 @@ router.get('/meta/blanks', authenticate, requireRole(['seller', 'admin']), async
     }
 });
 
-// Preview mockup (không lưu SP) — render ảnh thật gồm wrap cốc, cho bước "Xem trước".
 router.post('/preview-mockup', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
     try {
         const images = await ProductsService.previewMockups(
@@ -112,8 +102,6 @@ router.post('/preview-mockup', authenticate, requireRole(['seller', 'admin']), a
         handleError(res, error);
     }
 });
-
-// Thao tác hàng loạt — khai báo trước '/:id' để không bị nuốt bởi route tham số.
 router.post('/batch-delete', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
     try {
         res.json(await ProductsService.batchDelete(req.body?.ids, actorOf(req)));

@@ -35,8 +35,6 @@ const UserSchema = new Schema<IUser>({
     identity_card_number: { type: String },
     tax_code: { type: String },
     addresses: { type: [AddressSchema], default: [] },
-    // @deprecated - giữ nguyên field để không mất dữ liệu cũ, nhưng KHÔNG đọc/ghi nữa.
-    // Wishlist thật nằm ở collection `wishlists` (WishlistService).
     wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: [] }],
     notification_settings: {
         type: NotificationSettingsSchema,
@@ -47,3 +45,4 @@ const UserSchema = new Schema<IUser>({
 });
 
 export const User = mongoose.model<IUser>('User', UserSchema, 'users');
+

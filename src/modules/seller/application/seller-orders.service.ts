@@ -1,13 +1,3 @@
-/**
- * Đơn hàng nhìn từ phía NGƯỜI BÁN.
- *
- * Trước module này, BE chỉ có `GET /orders` lọc theo `buyer_id`, nghĩa là tài khoản
- * seller gọi vào chỉ thấy đơn họ ĐI MUA chứ không thấy đơn bán được. Ở đây mọi truy
- * vấn đều khoá theo `shop_id` của shop mà chính người đang đăng nhập sở hữu
- * (`Shop.owner_id` là unique -> mỗi seller đúng một shop), nên không có đường nào để
- * seller đọc hay sửa đơn của gian hàng khác.
- */
-
 import mongoose from 'mongoose';
 import { Order } from '../../order/infrastructure/models/order.model';
 import { Shop } from '../../product/infrastructure/models/shop.model';
@@ -21,16 +11,8 @@ import {
 } from './seller-orders.dto';
 
 const DEFAULT_PAGE_SIZE = 20;
-/** Trần cứng: chặn client xin cả chục nghìn đơn trong một lượt. */
 const MAX_PAGE_SIZE = 100;
 
-/**
- * Trạng thái người bán được phép chuyển sang, theo trạng thái hiện tại.
- *
- * Cố ý KHÔNG cho seller tự đặt PAID hay quay ngược trạng thái: tiền chỉ được đánh dấu
- * đã trả bởi callback của cổng thanh toán, còn lùi trạng thái sẽ làm nhật ký đơn hàng
- * mất ý nghĩa đối soát.
- */
 const ALLOWED_TRANSITIONS: Record<SellerOrderStatus, SellerOrderStatus[]> = {
     ORDERED: ['PROCESSING', 'CANCELLED'],
     PENDING_DESIGN: ['PROCESSING', 'CANCELLED'],
@@ -40,16 +22,8 @@ const ALLOWED_TRANSITIONS: Record<SellerOrderStatus, SellerOrderStatus[]> = {
     CANCELLED: []
 };
 
-/** Đơn coi như đã đóng — tiền không còn treo, không còn việc gì để làm. */
 const CLOSED_STATUSES: SellerOrderStatus[] = ['DELIVERED', 'CANCELLED'];
 
-/**
- * Nhóm lọc 'TODO': mọi đơn còn nằm trong tay người bán.
- *
- * Không phải một trạng thái trong DB mà là câu hỏi "hôm nay tôi phải làm gì" — ba
- * trạng thái này khác nhau ở bước tiếp theo, nhưng giống nhau ở chỗ đơn sẽ đứng im
- * cho tới khi người bán động vào.
- */
 const TODO_STATUSES: SellerOrderStatus[] = ['ORDERED', 'PENDING_DESIGN', 'PROCESSING'];
 
 export interface SellerOrderListQuery {
@@ -57,7 +31,6 @@ export interface SellerOrderListQuery {
     search?: string;
     page?: number;
     pageSize?: number;
-    /** 'newest' (mặc định) | 'oldest' | 'highest' | 'lowest' theo giá trị đơn. */
     sort?: string;
 }
 
@@ -68,7 +41,6 @@ export interface SellerOrderStatusUpdate {
     note?: string;
 }
 
-/** Người dùng nhập gì cũng chỉ là chữ cần tìm, không phải cú pháp regex. */
 function escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -85,10 +57,6 @@ const SORTS: Record<string, Record<string, 1 | -1>> = {
 };
 
 export class SellerOrdersService {
-    /**
-     * Shop của người đang đăng nhập. Trả null khi seller chưa từng thiết lập gian hàng —
-     * đó là trạng thái hợp lệ (danh sách đơn rỗng), không phải lỗi.
-     */
     private static async findShopId(ownerId: string): Promise<mongoose.Types.ObjectId | null> {
         if (!mongoose.Types.ObjectId.isValid(ownerId)) {
             throw new Error('Phiên đăng nhập không hợp lệ');
@@ -113,9 +81,6 @@ export class SellerOrdersService {
             };
         }
 
-        // Điều kiện nền: shop + từ khoá. Bộ lọc trạng thái KHÔNG nằm ở đây vì phần đếm
-        // theo trạng thái phải tính trên toàn bộ kết quả tìm kiếm, không thì mọi tab
-        // đều hiện đúng con số của tab đang mở.
         const baseMatch: Record<string, any> = { shop_id: shopId };
         const search = String(query.search || '').trim();
         if (search) {
@@ -178,7 +143,6 @@ export class SellerOrdersService {
         };
     }
 
-    /** Nhận order_code hoặc _id, nhưng luôn giới hạn trong shop của chính seller. */
     static async getOrder(ownerId: string, id: string): Promise<SellerOrderDTO> {
         const shopId = await this.findShopId(ownerId);
         if (!shopId) throw new Error('Không tìm thấy đơn hàng');
@@ -226,9 +190,6 @@ export class SellerOrdersService {
             );
         }
 
-        // Nhận đơn vào sản xuất khi tiền chưa về là seller tự gánh rủi ro: hàng POD in
-        // xong không bán lại được cho ai khác. COD là ngoại lệ duy nhất — theo thiết kế
-        // thì đơn COD chỉ thu tiền lúc giao, nên không bao giờ PAID trước.
         if (next === 'PROCESSING' && order.payment_status !== 'PAID' && order.payment_method !== 'COD') {
             throw new Error('Đơn chưa thanh toán. Chỉ nhận sản xuất sau khi tiền đã về.');
         }
@@ -243,8 +204,6 @@ export class SellerOrdersService {
             order.shipping_details.tracking_number = tracking;
         }
 
-        // Đơn COD chỉ thu được tiền lúc giao tận tay, nên đây là chỗ duy nhất
-        // payment_status của đơn COD được chuyển sang PAID.
         if (next === 'DELIVERED' && order.payment_method === 'COD' && order.payment_status === 'PENDING') {
             order.payment_status = 'PAID';
         }
@@ -263,3 +222,4 @@ export class SellerOrdersService {
 }
 
 export default SellerOrdersService;
+

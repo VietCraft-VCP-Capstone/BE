@@ -7,9 +7,7 @@ export interface IOtpVerification extends Document {
     expired_at: Date;
     temp_password_hash?: string;
     temp_full_name?: string;
-    /** Role mong muốn khi đăng ký (BUYER|SELLER). ADMIN không bao giờ được tự đăng ký. */
     temp_role?: 'BUYER' | 'SELLER';
-    /** Số lần nhập sai mã — quá ngưỡng thì huỷ mã, chặn dò 6 chữ số. */
     attempts: number;
 }
 
@@ -24,7 +22,7 @@ const OtpVerificationSchema = new Schema<IOtpVerification>({
     expired_at: {
         type: Date,
         required: true,
-        index: { expires: 0 } // Document expires at the specific expired_at date
+        index: { expires: 0 }
     },
     temp_password_hash: { type: String },
     temp_full_name: { type: String },
