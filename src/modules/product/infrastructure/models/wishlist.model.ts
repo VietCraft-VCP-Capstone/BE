@@ -6,8 +6,6 @@ export interface IWishlist extends Document {
 }
 
 const WishlistSchema = new Schema<IWishlist>({
-    // unique: mỗi user đúng 1 document wishlist. Thiếu ràng buộc này thì hai request
-    // song song của cùng user có thể tạo ra 2 wishlist và một nửa mục yêu thích biến mất.
     user_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true, index: true },
     product_ids: [{ type: Schema.Types.ObjectId, ref: 'Product', default: [] }]
 }, {
@@ -15,3 +13,4 @@ const WishlistSchema = new Schema<IWishlist>({
 });
 
 export const Wishlist = mongoose.model<IWishlist>('Wishlist', WishlistSchema, 'wishlists');
+

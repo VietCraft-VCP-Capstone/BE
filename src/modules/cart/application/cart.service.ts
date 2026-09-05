@@ -5,15 +5,7 @@ import { ProductVariant } from '../../product/infrastructure/models/product-vari
 import { PRODUCT_POPULATE, toUserObjectId, VARIANT_POPULATE } from '../utils';
 
 export class CartService {
-    /**
-     * Mỗi user có ĐÚNG MỘT giỏ: `user_id` là unique index ở tầng DB.
-     * Giỏ được tạo ở lần chạm đầu tiên và thuộc về user vĩnh viễn — không nơi nào xoá
-     * document này, "xóa giỏ hàng" chỉ làm rỗng `items`.
-     *
-     * Phải upsert nguyên tử. Kiểu findOne-rồi-create là race: hai request của cùng user
-     * chạy song song (FE mở trang thường gọi GET /cart và POST /cart/items gần như cùng
-     * lúc) sẽ cùng thấy giỏ chưa tồn tại, cùng create, và cái thứ hai chết vì trùng key.
-     */
+
     private static async ensureCart(ownerId: mongoose.Types.ObjectId) {
         try {
             const cart = await Cart.findOneAndUpdate(
@@ -23,7 +15,6 @@ export class CartService {
             );
             if (cart) return cart;
         } catch (err: any) {
-            // Hai upsert vẫn có thể va nhau đúng khoảnh khắc ghi index entry.
             if (err?.code !== 11000) throw err;
         }
         const existing = await Cart.findOne({ user_id: ownerId });
@@ -44,7 +35,6 @@ export class CartService {
         const { productId, variantId, customNotes } = payload;
         const quantity = Math.max(1, Number(payload.quantity) || 1);
 
-        // Sản phẩm phải tồn tại và còn đang bán.
         if (!mongoose.Types.ObjectId.isValid(productId)) throw new Error('Sản phẩm không hợp lệ');
         const product = await Product.findById(productId).select('title listing_status');
         if (!product) throw new Error('Sản phẩm không tồn tại');
@@ -52,7 +42,6 @@ export class CartService {
             throw new Error(`Sản phẩm "${product.title}" hiện không bán`);
         }
 
-        // Biến thể (nếu có) phải thuộc đúng sản phẩm, còn bán và đủ tồn kho.
         let variant = null;
         if (variantId) {
             if (!mongoose.Types.ObjectId.isValid(variantId)) throw new Error('Biến thể không hợp lệ');
@@ -92,7 +81,6 @@ export class CartService {
         return this.getCart(userId);
     }
 
-    /** Tìm item trong giỏ của chính user; không thấy thì báo lỗi thay vì im lặng bỏ qua. */
     private static findItemOrThrow(cart: any, itemId: string) {
         const item = cart.items.find(
             (i: any) => i._id?.toString() === itemId || i.product_id.toString() === itemId
@@ -107,8 +95,6 @@ export class CartService {
         if (!Number.isFinite(qty) || qty < 1) throw new Error('Số lượng phải lớn hơn 0');
 
         const cart = await Cart.findOne({ user_id: ownerId });
-        // Chưa có giỏ thì cũng đồng nghĩa món này không nằm trong giỏ. Không gọi
-        // ensureCart ở đây: tạo giỏ như tác dụng phụ của một thao tác đang thất bại là sai.
         if (!cart) throw new Error('Sản phẩm không có trong giỏ hàng');
 
         const item = this.findItemOrThrow(cart, itemId);
@@ -129,8 +115,6 @@ export class CartService {
     static async toggleSelect(userId: string, itemId: string, isSelected: boolean) {
         const ownerId = toUserObjectId(userId);
         const cart = await Cart.findOne({ user_id: ownerId });
-        // Chưa có giỏ thì cũng đồng nghĩa món này không nằm trong giỏ. Không gọi
-        // ensureCart ở đây: tạo giỏ như tác dụng phụ của một thao tác đang thất bại là sai.
         if (!cart) throw new Error('Sản phẩm không có trong giỏ hàng');
 
         const item = this.findItemOrThrow(cart, itemId);
@@ -143,8 +127,6 @@ export class CartService {
     static async removeItem(userId: string, itemId: string) {
         const ownerId = toUserObjectId(userId);
         const cart = await Cart.findOne({ user_id: ownerId });
-        // Chưa có giỏ thì cũng đồng nghĩa món này không nằm trong giỏ. Không gọi
-        // ensureCart ở đây: tạo giỏ như tác dụng phụ của một thao tác đang thất bại là sai.
         if (!cart) throw new Error('Sản phẩm không có trong giỏ hàng');
 
         const before = cart.items.length;

@@ -4,11 +4,6 @@ import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/mi
 
 const router = Router();
 
-// Cùng nguyên tắc với seller-settings.router: shop LUÔN suy ra từ req.user.id trong
-// token. Không route nào ở đây nhận shopId/sellerId từ query hay body — nếu nhận thì
-// bất kỳ ai cũng đọc và đổi được trạng thái đơn của gian hàng khác.
-
-// GET /seller/orders — danh sách đơn của gian hàng, kèm số đếm theo trạng thái.
 router.get('/', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const data = await SellerOrdersService.listOrders(req.user!.id, {
@@ -24,7 +19,6 @@ router.get('/', authenticate, requireRole(['seller', 'admin']), async (req: Auth
     }
 });
 
-// GET /seller/orders/:id — chi tiết một đơn (nhận order_code hoặc _id).
 router.get('/:id', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const order = await SellerOrdersService.getOrder(req.user!.id, req.params.id);
@@ -34,8 +28,6 @@ router.get('/:id', authenticate, requireRole(['seller', 'admin']), async (req: A
     }
 });
 
-// PATCH /seller/orders/:id/status — người bán đẩy đơn sang bước tiếp theo.
-// Bước chuyển hợp lệ do service quyết định, không tin trạng thái client gửi lên.
 router.patch('/:id/status', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const order = await SellerOrdersService.updateStatus(req.user!.id, req.params.id, req.body || {});
@@ -47,3 +39,4 @@ router.patch('/:id/status', authenticate, requireRole(['seller', 'admin']), asyn
 
 export const sellerOrdersRouter = router;
 export default router;
+

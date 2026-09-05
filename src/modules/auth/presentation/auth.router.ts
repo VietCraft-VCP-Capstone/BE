@@ -17,7 +17,6 @@ function friendlyError(err: any): string {
 
 router.post('/signup', async (req, res) => {
     try {
-        // role tuỳ chọn, chỉ nhận 'BUYER' | 'SELLER' (service tự chặn ADMIN), mặc định BUYER.
         const { email, password, name, role } = req.body || {};
         const result = await AuthService.register({ email, password, name, role });
         res.status(201).json(result);
@@ -90,8 +89,7 @@ router.post('/reset-password', async (req, res) => {
 });
 
 // --- Quản trị người dùng: chỉ admin ---
-// Trước đây hai route này để trần: bất kỳ ai cũng đọc được toàn bộ danh sách user
-// và khoá/mở khoá tài khoản người khác.
+
 router.get('/users', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const users = await AuthService.getAllUsers();
@@ -104,7 +102,7 @@ router.get('/users', authenticate, requireRole(['admin']), async (req: Authentic
 router.patch('/users/:id/toggle-lock', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { id } = req.params;
-        // Chặn admin tự khoá chính mình (dễ mất hoàn toàn quyền truy cập hệ thống)
+        // Chặn admin tự khoá chính mình 
         if (id === req.user!.id) {
             res.status(400).json({ error: 'Không thể tự khoá tài khoản của chính mình.' });
             return;

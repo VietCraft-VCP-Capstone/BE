@@ -17,7 +17,7 @@ const UserSessionSchema = new Schema<IUserSession>({
     expires_at: {
         type: Date,
         required: true,
-        index: { expires: 0 } // Document expires at the specific expires_at date
+        index: { expires: 0 }
     },
     is_revoked: { type: Boolean, default: false }
 }, {

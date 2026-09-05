@@ -5,11 +5,9 @@ import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/mi
 
 const router = Router();
 
-// All routes require authentication + admin role
 router.use(authenticate);
 router.use(requireRole(['admin']));
 
-// ==================== MODERATION ====================
 
 router.get('/moderation/products', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
@@ -37,8 +35,7 @@ router.post('/moderation/:id/republish', async (req: AuthenticatedRequest, res: 
     try {
         const result = await adminService.republishProduct(req.params.id, req.user!.id, req.body.notes);
         if (!result) return res.status(404).json({ success: false, error: 'Sản phẩm không tồn tại' });
-        // warnings KHÔNG phải lỗi: sản phẩm đã được khôi phục thành công, đây chỉ
-        // là danh sách chỗ tin đăng còn thiếu để admin nhắc người bán bổ sung.
+
         res.json({ success: true, data: result.product, warnings: result.warnings, message: 'Đã khôi phục sản phẩm' });
     } catch (err: any) {
         if (err.message === 'Product not found') return res.status(404).json({ success: false, error: 'Sản phẩm không tồn tại' });

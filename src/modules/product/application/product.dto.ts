@@ -58,13 +58,9 @@ export interface ProductItemResponseDTO {
 
 export interface ProductFormDataDTO {
     title: string;
-    /** Tên danh mục (legacy, chỉ để hiển thị). Nguồn sự thật là categoryId. */
     category: string;
-    /** Danh mục do admin quản lý — bắt buộc khi tạo mới. */
     categoryId?: string;
-    /** Thẻ đã được admin duyệt. Bắt buộc ít nhất 1 khi tạo mới. */
     tagIds?: string[];
-    /** Thẻ seller tự đề xuất, sẽ ở trạng thái pending chờ admin duyệt. */
     newTagNames?: string[];
     price: number;
     originalPrice?: number;

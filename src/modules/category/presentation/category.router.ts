@@ -8,7 +8,6 @@ const router = Router();
 
 const STATUS_VALUES: CategoryStatusFilter[] = ['all', 'active', 'hidden'];
 
-/** Đọc bộ lọc từ query. `filter` là tên cũ của `search`, giữ lại để link cũ không gãy. */
 function readListOptions(req: AuthenticatedRequest): CategoryListOptions {
     const raw = (req.query.status as string | undefined) ?? 'all';
     const status = STATUS_VALUES.includes(raw as CategoryStatusFilter) ? (raw as CategoryStatusFilter) : 'all';
@@ -28,11 +27,8 @@ router.get('/', authenticate, requireRole(['admin']), async (req: AuthenticatedR
     }
 });
 
-// Mọi đường dẫn tĩnh phải khai báo TRƯỚC '/:id', nếu không 'tree' bị bắt làm id.
 router.get('/tree', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
-        // Một trang = một số nút gốc kèm ĐỦ nhánh con, nên trần mặc định để thấp:
-        // 20 gốc mỗi gốc vài chục con vẫn là một phản hồi rất nặng.
         const params = parsePageParams(req.query as Record<string, unknown>, { defaultLimit: 15, maxLimit: 50 });
         const result = await categoryService.listCategoryTree(readListOptions(req), params);
         res.json({ success: true, data: result });
@@ -49,8 +45,6 @@ router.get('/stats', authenticate, requireRole(['admin']), async (_req: Authenti
     }
 });
 
-// Không cắt trang: đây là nguồn cho ô chọn danh mục cha, thiếu một mục là không
-// gán được cha cho mục đó nữa.
 router.get('/options', authenticate, requireRole(['admin']), async (_req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         res.json({ success: true, data: await categoryService.listOptions() });

@@ -5,7 +5,6 @@ import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/mi
 
 const router = Router();
 
-// Lấy thông tin cá nhân
 router.get('/profile', authenticate, requireRole(['buyer', 'seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -16,7 +15,6 @@ router.get('/profile', authenticate, requireRole(['buyer', 'seller', 'admin']), 
     }
 });
 
-// Cập nhật thông tin cá nhân
 router.put('/profile', authenticate, requireRole(['buyer', 'seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -27,7 +25,6 @@ router.put('/profile', authenticate, requireRole(['buyer', 'seller', 'admin']), 
     }
 });
 
-// Thêm địa chỉ mới
 router.post('/profile/addresses', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -38,7 +35,6 @@ router.post('/profile/addresses', authenticate, async (req: AuthenticatedRequest
     }
 });
 
-// Sửa địa chỉ
 router.put('/profile/addresses/:addressId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -50,7 +46,6 @@ router.put('/profile/addresses/:addressId', authenticate, async (req: Authentica
     }
 });
 
-// Xóa địa chỉ
 router.delete('/profile/addresses/:addressId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -62,14 +57,6 @@ router.delete('/profile/addresses/:addressId', authenticate, async (req: Authent
     }
 });
 
-// ---------------------------------------------------------------------------
-// Wishlist: ủy quyền hoàn toàn cho WishlistService (collection `wishlists`).
-// Trước đây route này đọc/ghi mảng `users.wishlist` nên /users/wishlist và
-// /favorites lưu ở hai nơi khác nhau và không bao giờ đồng bộ.
-// Giữ nguyên shape FE đang dùng: mảng product id (string[]).
-// ---------------------------------------------------------------------------
-
-// GET /users/wishlist - danh sách product id đang yêu thích
 router.get('/wishlist', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const ids = await WishlistService.getProductIds(req.user!.id);
@@ -79,7 +66,6 @@ router.get('/wishlist', authenticate, async (req: AuthenticatedRequest, res: Res
     }
 });
 
-// POST /users/wishlist/:productId - thêm, trả về mảng id sau khi thêm
 router.post('/wishlist/:productId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         await WishlistService.addFavorite(req.user!.id, req.params.productId);
@@ -90,7 +76,6 @@ router.post('/wishlist/:productId', authenticate, async (req: AuthenticatedReque
     }
 });
 
-// DELETE /users/wishlist/:productId - xoá, trả về mảng id sau khi xoá
 router.delete('/wishlist/:productId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         await WishlistService.removeFavorite(req.user!.id, req.params.productId);
@@ -103,3 +88,4 @@ router.delete('/wishlist/:productId', authenticate, async (req: AuthenticatedReq
 
 export const userRouter = router;
 export default userRouter;
+

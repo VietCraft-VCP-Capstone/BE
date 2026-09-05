@@ -7,11 +7,7 @@ import { logger } from '../../../shared/utils/logger';
 
 const router = Router();
 
-/**
- * Webhook cổng thanh toán không có JWT nên phải xác thực bằng shared secret
- * (header `x-payment-callback-secret`, khớp PAYMENT_CALLBACK_SECRET).
- * Chưa cấu hình: dev chỉ cảnh báo, production chặn thẳng.
- */
+
 function verifyPaymentCallback(req: Request, res: Response, next: NextFunction) {
     const expected = config.paymentCallbackSecret;
     if (!expected) {

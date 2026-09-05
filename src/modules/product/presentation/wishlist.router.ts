@@ -4,7 +4,6 @@ import { authenticate, AuthenticatedRequest } from '../../../app/middleware/auth
 
 const router = Router();
 
-// GET /favorites — wishlist đầy đủ (đã populate sản phẩm)
 router.get('/', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const wishlist = await WishlistService.getWishlist(req.user!.id);
@@ -14,7 +13,6 @@ router.get('/', authenticate, async (req: AuthenticatedRequest, res: Response) =
     }
 });
 
-// POST /favorites/toggle — bật/tắt yêu thích
 router.post('/toggle', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { productId } = req.body || {};
@@ -26,7 +24,6 @@ router.post('/toggle', authenticate, async (req: AuthenticatedRequest, res: Resp
     }
 });
 
-// POST /favorites/:productId — thêm (idempotent, KHÔNG toggle: bấm 2 lần không tự xoá)
 router.post('/:productId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const wishlist = await WishlistService.addFavorite(req.user!.id, req.params.productId);
@@ -36,7 +33,6 @@ router.post('/:productId', authenticate, async (req: AuthenticatedRequest, res: 
     }
 });
 
-// DELETE /favorites/:productId — bỏ yêu thích
 router.delete('/:productId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const wishlist = await WishlistService.removeFavorite(req.user!.id, req.params.productId);
@@ -48,3 +44,4 @@ router.delete('/:productId', authenticate, async (req: AuthenticatedRequest, res
 
 export const wishlistRouter = router;
 export default wishlistRouter;
+

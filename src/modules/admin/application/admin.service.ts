@@ -13,21 +13,8 @@ class AdminService implements IAdminService {
 
     async listProducts(status: string | undefined, params: PageParams): Promise<Paginated<any>> {
         const query = status ? { status } : {};
-        // Đếm trước rồi ghim trang: gỡ sản phẩm cuối cùng của trang 3 xong, FE vẫn
-        // hỏi trang 3 — trả mảng rỗng thì màn hình báo "chưa có sản phẩm nào" trong
-        // khi dữ liệu vẫn nằm ở trang 2.
         const total = await Product.countDocuments(query);
         const p = clampPage(params, total);
-
-        // Sắp theo NHÓM TRẠNG THÁI trước, mới tới thời gian tạo.
-        //
-        // Chỉ sắp theo created_at thì sản phẩm vừa bị gỡ vẫn nằm nguyên hàng đầu
-        // nếu nó là sản phẩm mới nhất — admin xử lý xong rồi mà nó cứ chắn lối.
-        // Đưa nhóm đã gỡ xuống cuối: việc đã làm xong thì lùi lại, nhường chỗ cho
-        // những sản phẩm đang bán còn phải rà.
-        //
-        // Lọc theo một trạng thái cụ thể thì cả trang cùng nhóm, thứ hạng thành vô
-        // hiệu và thứ tự quay về đúng created_at giảm dần — không cần nhánh riêng.
         const products = await Product.aggregate([
             { $match: query },
             {
@@ -39,16 +26,11 @@ class AdminService implements IAdminService {
                                 { case: { $eq: ['$status', 'DRAFT'] }, then: 1 },
                                 { case: { $eq: ['$status', 'UNPUBLISHED'] }, then: 2 },
                             ],
-                            // Bản ghi cũ thiếu hẳn field status: xếp cùng nhóm nháp,
-                            // đừng để chúng rơi xuống cuối như thể đã bị gỡ.
                             default: 1,
                         },
                     },
                 },
             },
-            // _id làm khoá phụ: nhiều sản phẩm seed cùng created_at, không có khoá
-            // phụ thì thứ tự giữa hai lần gọi khác nhau và một bản ghi có thể lọt
-            // qua khe giữa hai trang.
             { $sort: { _statusRank: 1, created_at: -1, _id: -1 } },
             { $skip: p.skip },
             { $limit: p.limit },
@@ -69,7 +51,6 @@ class AdminService implements IAdminService {
         return paginate(enriched, total, p);
     }
 
-    // Post-moderation: take a live product off the marketplace (violation handling).
     async unpublishProduct(productId: string, reviewerId: string, reason?: string): Promise<any | null> {
         const product = await ProductsService.unpublish(productId, reason);
 
@@ -96,13 +77,6 @@ class AdminService implements IAdminService {
         return product;
     }
 
-    /**
-     * Khôi phục sản phẩm đã gỡ.
-     *
-     * `warnings` là những chỗ tin đăng chưa đạt chuẩn. Trước đây chúng là LỖI và
-     * chặn hẳn thao tác, khiến admin gỡ xong không khôi phục lại được. Nay chỉ
-     * báo lên để admin biết mà nhắc người bán bổ sung.
-     */
     async republishProduct(productId: string, reviewerId: string, notes?: string): Promise<{ product: any; warnings: string[] } | null> {
         const { product, warnings } = await ProductsService.republish(productId);
 
@@ -135,7 +109,7 @@ class AdminService implements IAdminService {
     }
 
     async getModerationStats(): Promise<{ published: number; unpublished: number; draft: number; total: number }> {
-        // total đếm thật, không cộng 3 nhóm: dữ liệu cũ có thể thiếu field status.
+
         const [published, unpublished, draft, total] = await Promise.all([
             Product.countDocuments({ status: 'PUBLISHED' }),
             Product.countDocuments({ status: 'UNPUBLISHED' }),

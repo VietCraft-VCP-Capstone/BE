@@ -75,11 +75,6 @@ const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
     updatedAt: new Date().toISOString()
 };
 
-/** `Shop.owner_id` là unique -> mỗi seller đúng một shop. Mọi truy vấn ở đây đều
- *  khoá theo owner_id lấy từ token, nên seller không thể chạm vào shop của người khác. */
-
-/** Slug shop là unique index: phải chuẩn hoá và né trùng, nếu không PUT settings
- *  sẽ ném E11000 hoặc một seller có thể chiếm slug của seller khác. */
 async function resolveUniqueSlug(desired: string, ownerId: mongoose.Types.ObjectId, seed: string): Promise<string> {
     let base = generateSlug(desired || '');
     if (!base || base === 'untitled') base = `shop-${seed}`;
@@ -119,7 +114,6 @@ export class SellerSettingsService {
 
         const customSettings = shop.settings || {};
 
-        // Merge custom settings with schema defaults
         const brand: SellerBrandSettingsDTO = {
             ...DEFAULT_SETTINGS.brand,
             ...(customSettings.brand || {}),
@@ -134,7 +128,6 @@ export class SellerSettingsService {
         const shipping: SellerShippingSettingsDTO = {
             ...DEFAULT_SETTINGS.shipping,
             ...(customSettings.shipping || {}),
-            // Ensure no Viettel Post exists in carriers
             carriers: (customSettings.shipping?.carriers || DEFAULT_SETTINGS.shipping.carriers).filter(
                 (c: any) => c && c.id !== 'viettelpost' && c.id !== 'vtp' && !c.name?.toLowerCase().includes('viettel')
             )
@@ -178,7 +171,6 @@ export class SellerSettingsService {
 
         const currentSettings = shop.settings || {};
 
-        // 1. Update Brand
         if (payload.brand) {
             currentSettings.brand = {
                 ...(currentSettings.brand || {}),
@@ -193,7 +185,6 @@ export class SellerSettingsService {
             if (payload.brand.bannerUrl) shop.banner = payload.brand.bannerUrl;
         }
 
-        // 2. Update Shipping (strictly exclude Viettel Post)
         if (payload.shipping) {
             const cleanCarriers = (payload.shipping.carriers || []).filter(
                 (c: any) => c && c.id !== 'viettelpost' && c.id !== 'vtp' && !c.name?.toLowerCase().includes('viettel')
@@ -205,7 +196,6 @@ export class SellerSettingsService {
             };
         }
 
-        // 3. Update Payment
         if (payload.payment) {
             const minPayout = Number(payload.payment.minPayoutAmount);
             if (!isNaN(minPayout) && minPayout < 50000) {
@@ -217,7 +207,6 @@ export class SellerSettingsService {
                 ...payload.payment,
                 minPayoutAmount: !isNaN(minPayout) ? Math.max(50000, minPayout) : 50000
             };
-            // Sync default bank info to shop.bank_info
             const defaultBank = payload.payment.bankAccounts?.find(b => b.isDefault) || payload.payment.bankAccounts?.[0];
             if (defaultBank) {
                 shop.bank_info = {
@@ -228,7 +217,6 @@ export class SellerSettingsService {
             }
         }
 
-        // 4. Update Notifications
         if (payload.notifications) {
             currentSettings.notifications = {
                 ...(currentSettings.notifications || {}),
@@ -244,3 +232,4 @@ export class SellerSettingsService {
         return this.getSettings(sellerId);
     }
 }
+
