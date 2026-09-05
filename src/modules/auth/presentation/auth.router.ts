@@ -1,5 +1,6 @@
-import { Router } from 'express';
+import { Router, Response } from 'express';
 import { AuthService } from '../application/auth.service';
+import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 
 const router = Router();
 
@@ -16,7 +17,8 @@ function friendlyError(err: any): string {
 
 router.post('/signup', async (req, res) => {
     try {
-        const result = await AuthService.register(req.body);
+        const { email, password, name, role } = req.body || {};
+        const result = await AuthService.register({ email, password, name, role });
         res.status(201).json(result);
     } catch (error: any) {
         res.status(400).json({ error: friendlyError(error) });
@@ -86,7 +88,9 @@ router.post('/reset-password', async (req, res) => {
     }
 });
 
-router.get('/users', async (req, res) => {
+// --- Quản trị người dùng: chỉ admin ---
+
+router.get('/users', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const users = await AuthService.getAllUsers();
         res.status(200).json(users);
@@ -95,9 +99,14 @@ router.get('/users', async (req, res) => {
     }
 });
 
-router.patch('/users/:id/toggle-lock', async (req, res) => {
+router.patch('/users/:id/toggle-lock', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { id } = req.params;
+        // Chặn admin tự khoá chính mình 
+        if (id === req.user!.id) {
+            res.status(400).json({ error: 'Không thể tự khoá tài khoản của chính mình.' });
+            return;
+        }
         const result = await AuthService.toggleLockUser(id);
         res.status(200).json(result);
     } catch (error: any) {

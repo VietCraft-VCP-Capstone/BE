@@ -61,3 +61,6 @@ desktop.ini
 # pg_data/
 # mongo_data/
 # redis_data/
+
+# POD uploaded designs/mockups (local storage)
+uploads/

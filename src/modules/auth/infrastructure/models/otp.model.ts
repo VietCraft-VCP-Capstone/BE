@@ -5,6 +5,10 @@ export interface IOtpVerification extends Document {
     otp_code: string;
     purpose: 'REGISTER' | 'FORGOT_PASSWORD';
     expired_at: Date;
+    temp_password_hash?: string;
+    temp_full_name?: string;
+    temp_role?: 'BUYER' | 'SELLER';
+    attempts: number;
 }
 
 const OtpVerificationSchema = new Schema<IOtpVerification>({
@@ -18,8 +22,12 @@ const OtpVerificationSchema = new Schema<IOtpVerification>({
     expired_at: {
         type: Date,
         required: true,
-        index: { expires: 0 } // Document expires at the specific expired_at date
-    }
+        index: { expires: 0 }
+    },
+    temp_password_hash: { type: String },
+    temp_full_name: { type: String },
+    temp_role: { type: String, enum: ['BUYER', 'SELLER'], default: 'BUYER' },
+    attempts: { type: Number, default: 0 }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
