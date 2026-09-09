@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { Shop } from '../../product/infrastructure/models/shop.model';
-import { Notification } from '../../notification/infrastructure/models/notification.model';
+import { notificationService } from '../../notification';
 import { Tag } from '../../tags';
 import { ModerationAction } from '../infrastructure/models/moderation-action.model';
 import { logger } from '../../../shared/utils/logger';
@@ -65,11 +65,13 @@ class AdminService implements IAdminService {
         const mp = await Product.findById(productId);
         const shop = mp && await Shop.findById(mp.shop_id);
         if (shop) {
-            await Notification.create({
-                user_id: shop.owner_id,
+            await notificationService.createNotification({
+                user_id: shop.owner_id.toString(),
                 type: 'PRODUCT_UNPUBLISHED',
                 title: 'Sản phẩm của bạn đã bị gỡ',
                 content: `Sản phẩm "${mp!.title}" đã bị gỡ khỏi marketplace${reason ? `: ${reason}` : ''}.`,
+                link: `/seller/products`,
+                metadata: { productId }
             });
         }
 
@@ -90,11 +92,13 @@ class AdminService implements IAdminService {
         const mp = await Product.findById(productId);
         const shop = mp && await Shop.findById(mp.shop_id);
         if (shop) {
-            await Notification.create({
-                user_id: shop.owner_id,
+            await notificationService.createNotification({
+                user_id: shop.owner_id.toString(),
                 type: 'PRODUCT_REPUBLISHED',
                 title: 'Sản phẩm của bạn đã được khôi phục',
                 content: `Sản phẩm "${mp!.title}" đã được khôi phục và hiển thị lại trên marketplace.`,
+                link: `/seller/products`,
+                metadata: { productId }
             });
         }
 

@@ -15,7 +15,7 @@ import { promotionRouter } from '../modules/promotion';
 import { analyticsRouter } from '../modules/analytics';
 import { designsRouter } from '../modules/design/presentation/design.router';
 import { chatRouter } from '../modules/chat';
-
+import { notificationRouter } from '../modules/notification';
 
 const router = Router();
 
@@ -42,5 +42,6 @@ router.use('/promotions', promotionRouter);
 
 router.use('/designs', designsRouter);
 router.use('/chat', chatRouter);
+router.use('/notifications', notificationRouter);
 
 export default router;

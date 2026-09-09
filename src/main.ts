@@ -4,6 +4,7 @@ import app from './app/app';
 import { config, initializeDatabases } from './app/config';
 import { logger } from './shared/utils/logger';
 import { ChatGateway } from './modules/chat';
+import { NotificationGateway } from './modules/notification';
 
 async function bootstrap() {
     const server = http.createServer(app);
@@ -15,6 +16,7 @@ async function bootstrap() {
     });
 
     new ChatGateway(io);
+    NotificationGateway.setIO(io);
 
     await initializeDatabases();
 
