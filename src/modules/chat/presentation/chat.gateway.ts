@@ -3,10 +3,9 @@ import jwt from 'jsonwebtoken';
 import { config } from '../../../app/config';
 import { AuthUser, normalizeRole } from '../../../app/middleware/auth.middleware';
 import { logger } from '../../../shared/utils/logger';
+import { chatService, buildConversationId } from '../application/chat.service';
 
-export function buildConversationId(userA: string, userB: string): string {
-    return [userA, userB].sort().join('_');
-}
+export { buildConversationId };
 
 function isParticipant(user: AuthUser, roomId: string): boolean {
     if (normalizeRole(user.role) === 'admin') return true;
@@ -22,6 +21,7 @@ export class ChatGateway {
     }
 
     private initialize() {
+        // Middleware xác thực JWT cho kết nối WebSocket
         this.io.use((socket, next) => {
             const raw = String(
                 socket.handshake.auth?.token
@@ -42,8 +42,12 @@ export class ChatGateway {
 
         this.io.on('connection', (socket: Socket) => {
             const user: AuthUser = socket.data.user;
-            logger.info(`Client connected to Chat: ${socket.id} (user ${user.id})`);
+            logger.info(`Client kết nối Chat: ${socket.id} (user ${user.id})`);
 
+            // Tự động tham gia phòng thông báo cá nhân để nhận notification / badge unread
+            socket.join(`user_${user.id}`);
+
+            // Tham gia một phòng hội thoại cụ thể
             socket.on('join_room', (roomId: string) => {
                 if (typeof roomId !== 'string' || !roomId.trim()) {
                     return socket.emit('error_message', { error: 'roomId không hợp lệ' });
@@ -53,32 +57,133 @@ export class ChatGateway {
                     return socket.emit('error_message', { error: 'Bạn không thuộc cuộc hội thoại này' });
                 }
                 socket.join(roomId);
-                logger.info(`Socket ${socket.id} joined room ${roomId}`);
+                logger.info(`Socket ${socket.id} (user ${user.id}) joined room ${roomId}`);
                 socket.to(roomId).emit('user_joined', { userId: user.id });
             });
 
-            socket.on('send_message', (data: { roomId: string; message: string }) => {
-                const roomId = data?.roomId;
-                const message = data?.message;
-                if (typeof roomId !== 'string' || typeof message !== 'string' || !message.trim()) {
-                    return socket.emit('error_message', { error: 'Payload không hợp lệ' });
+            // Rời khỏi phòng hội thoại
+            socket.on('leave_room', (roomId: string) => {
+                if (typeof roomId === 'string' && roomId.trim()) {
+                    socket.leave(roomId);
+                    logger.info(`Socket ${socket.id} (user ${user.id}) left room ${roomId}`);
                 }
-                if (!socket.rooms.has(roomId)) {
-                    return socket.emit('error_message', { error: 'Bạn chưa tham gia cuộc hội thoại này' });
-                }
+            });
 
-                logger.info(`Message in room ${roomId} by ${user.id}`);
-                this.io.to(roomId).emit('message_received', {
-                    senderId: user.id,
-                    message,
-                    timestamp: new Date()
-                });
+            // Gửi tin nhắn và lưu vào cơ sở dữ liệu MongoDB
+            socket.on('send_message', async (data: {
+                roomId?: string;
+                receiverId?: string;
+                message?: string;
+                attachments?: string[];
+                productWidget?: any;
+                customQuotation?: any;
+            }, callback?: (response: any) => void) => {
+                try {
+                    let roomId = data?.roomId;
+                    let receiverId = data?.receiverId;
+                    const messageText = data?.message ?? (data as any)?.message_text ?? (data as any)?.messageText ?? '';
+
+                    if (!roomId && receiverId) {
+                        roomId = buildConversationId(user.id, receiverId);
+                    } else if (roomId && !receiverId) {
+                        receiverId = roomId.split('_').find(id => id !== user.id);
+                    }
+
+                    if (!roomId || !receiverId) {
+                        const errPayload = { error: 'Thiếu thông tin phòng hoặc người nhận' };
+                        socket.emit('error_message', errPayload);
+                        if (typeof callback === 'function') callback(errPayload);
+                        return;
+                    }
+
+                    if (!isParticipant(user, roomId)) {
+                        const errPayload = { error: 'Bạn không thuộc cuộc hội thoại này' };
+                        socket.emit('error_message', errPayload);
+                        if (typeof callback === 'function') callback(errPayload);
+                        return;
+                    }
+
+                    if (!socket.rooms.has(roomId)) {
+                        socket.join(roomId);
+                    }
+
+                    // Lưu tin nhắn vào MongoDB
+                    const savedMessage = await chatService.saveMessage({
+                        senderId: user.id,
+                        receiverId: receiverId,
+                        roomId: roomId,
+                        messageText: messageText,
+                        attachments: data.attachments,
+                        productWidget: data.productWidget,
+                        customQuotation: data.customQuotation
+                    });
+
+                    // Phát tin nhắn tới tất cả client đang mở phòng hội thoại
+                    this.io.to(roomId).emit('message_received', savedMessage);
+
+                    // Gửi thông báo tin nhắn mới tới phòng cá nhân của người nhận (dành cho badge & notification)
+                    const receiverUnreadCount = await chatService.getTotalUnreadCount(receiverId);
+                    this.io.to(`user_${receiverId}`).emit('new_message_notification', {
+                        message: savedMessage,
+                        unreadCount: receiverUnreadCount
+                    });
+
+                    logger.info(`Tin nhắn trong phòng ${roomId} gửi bởi ${user.id}`);
+
+                    if (typeof callback === 'function') {
+                        callback({ success: true, data: savedMessage });
+                    }
+                } catch (error: any) {
+                    logger.error(`Lỗi gửi tin nhắn socket: ${error.message}`);
+                    const errPayload = { error: error.message || 'Không thể gửi tin nhắn' };
+                    socket.emit('error_message', errPayload);
+                    if (typeof callback === 'function') callback(errPayload);
+                }
+            });
+
+            // Chỉ báo đang soạn tin nhắn (Typing Indicator)
+            socket.on('typing', (data: { roomId: string }) => {
+                if (data?.roomId && isParticipant(user, data.roomId)) {
+                    socket.to(data.roomId).emit('user_typing', {
+                        userId: user.id,
+                        roomId: data.roomId,
+                        isTyping: true
+                    });
+                }
+            });
+
+            socket.on('stop_typing', (data: { roomId: string }) => {
+                if (data?.roomId && isParticipant(user, data.roomId)) {
+                    socket.to(data.roomId).emit('user_typing', {
+                        userId: user.id,
+                        roomId: data.roomId,
+                        isTyping: false
+                    });
+                }
+            });
+
+            // Đánh dấu đã đọc tin nhắn
+            socket.on('mark_read', async (data: { roomId: string }) => {
+                if (data?.roomId && isParticipant(user, data.roomId)) {
+                    try {
+                        await chatService.markAsRead(data.roomId, user.id);
+                        socket.to(data.roomId).emit('messages_read', {
+                            roomId: data.roomId,
+                            readerId: user.id
+                        });
+                        const unreadCount = await chatService.getTotalUnreadCount(user.id);
+                        socket.emit('unread_count_updated', { unreadCount });
+                    } catch (error: any) {
+                        logger.error(`Lỗi đánh dấu đã đọc socket: ${error.message}`);
+                    }
+                }
             });
 
             socket.on('disconnect', () => {
-                logger.info(`Client disconnected: ${socket.id}`);
+                logger.info(`Client đã ngắt kết nối: ${socket.id} (user ${user.id})`);
             });
         });
     }
 }
+
 export default ChatGateway;
