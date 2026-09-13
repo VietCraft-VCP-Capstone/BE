@@ -1,11 +1,11 @@
 import { Router } from 'express';
 import { authRouter } from '../modules/auth';
 
-import { adminRouter } from '../modules/admin';
+import { adminRouter, adminSellerRouter } from '../modules/admin';
 import { categoryRouter } from '../modules/category';
 import { tagsRouter } from '../modules/tags';
 import { userRouter } from '../modules/user';
-import { sellerSettingsRouter, sellerOrdersRouter } from '../modules/seller';
+import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter } from '../modules/seller';
 
 import { cartRouter } from '../modules/cart';
 import { productsRouter, wishlistRouter } from '../modules/product';
@@ -25,8 +25,10 @@ router.use('/auth', authRouter);
 // không phải sửa gì. Guard admin nằm sẵn trên từng route trong 2 module đó.
 router.use('/admin/categories', categoryRouter);
 router.use('/admin/tags', tagsRouter);
+router.use('/admin/seller-applications', adminSellerRouter);
 router.use('/admin', adminRouter);
 router.use('/users', userRouter);
+router.use('/seller/kyc', sellerKycRouter);
 router.use('/seller/settings', sellerSettingsRouter);
 // Đơn BÁN được của gian hàng. Tách khỏi '/orders' (đơn người dùng ĐI MUA) vì hai bên
 // lọc theo hai khoá khác nhau: buyer_id với /orders, shop_id với route này.

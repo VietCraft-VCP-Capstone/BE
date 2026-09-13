@@ -25,6 +25,10 @@ export interface IUser extends Document {
     full_name: string;
     avatar?: string;
     phone?: string;
+    is_phone_verified?: boolean;
+    is_email_verified?: boolean;
+    seller_status?: 'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED';
+    seller_application_id?: mongoose.Types.ObjectId;
     identity_card_number?: string;
     tax_code?: string;
     addresses: IAddress[];

@@ -4,13 +4,9 @@ import { chatService } from '../application/chat.service';
 
 const router = Router();
 
-// Tất cả các route chat đều yêu cầu xác thực người dùng
 router.use(authenticate);
 
-/**
- * GET /api/chat/conversations
- * Lấy danh sách cuộc hội thoại của người dùng hiện tại
- */
+// Lấy danh sách cuộc hội thoại của người dùng hiện tại
 router.get('/conversations', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -21,10 +17,7 @@ router.get('/conversations', async (req: AuthenticatedRequest, res: Response) =>
     }
 });
 
-/**
- * POST /api/chat/conversations
- * Bắt đầu hoặc mở cuộc hội thoại với Seller hoặc User
- */
+// Bắt đầu hoặc mở cuộc hội thoại với Seller hoặc User
 router.post('/conversations', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -54,10 +47,7 @@ router.post('/conversations', async (req: AuthenticatedRequest, res: Response) =
     }
 });
 
-/**
- * GET /api/chat/conversations/:id/messages
- * Lấy danh sách tin nhắn của cuộc hội thoại
- */
+// Lấy danh sách tin nhắn của cuộc hội thoại
 router.get('/conversations/:id/messages', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -76,10 +66,7 @@ router.get('/conversations/:id/messages', async (req: AuthenticatedRequest, res:
     }
 });
 
-/**
- * POST /api/chat/conversations/:id/messages
- * Gửi tin nhắn qua REST API (fallback / hỗ trợ đính kèm)
- */
+// Gửi tin nhắn qua REST API
 router.post('/conversations/:id/messages', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -102,10 +89,7 @@ router.post('/conversations/:id/messages', async (req: AuthenticatedRequest, res
     }
 });
 
-/**
- * PUT /api/chat/conversations/:id/read
- * Đánh dấu đã đọc cuộc hội thoại
- */
+// Đánh dấu đã đọc cuộc hội thoại
 router.put('/conversations/:id/read', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -117,10 +101,7 @@ router.put('/conversations/:id/read', async (req: AuthenticatedRequest, res: Res
     }
 });
 
-/**
- * GET /api/chat/unread-count
- * Lấy tổng số tin nhắn chưa đọc của người dùng
- */
+// Lấy tổng số tin nhắn chưa đọc của người dùng
 router.get('/unread-count', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;

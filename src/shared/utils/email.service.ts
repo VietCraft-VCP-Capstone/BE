@@ -44,3 +44,65 @@ export async function sendResetPasswordEmail(to: string, otp: string) {
         `,
     });
 }
+
+export async function sendSellerApprovalEmail(to: string, shopName: string, sellerName: string) {
+    await transporter.sendMail({
+        from: `"VietCraft" <${config.mailUser}>`,
+        to,
+        subject: '🎉 Chúc mừng! Hồ sơ Người bán VietCraft của bạn đã được phê duyệt',
+        html: `
+            <div style="font-family:sans-serif;max-width:520px;margin:auto;padding:32px;border:1px solid #e5e7eb;border-radius:12px;background:#ffffff">
+                <div style="text-align:center;margin-bottom:20px">
+                    <h1 style="color:#007700;margin:0;font-size:28px">Viet<span style="color:#330033">Craft</span></h1>
+                    <span style="display:inline-block;margin-top:8px;padding:4px 12px;background:#ecfdf5;color:#047857;border-radius:20px;font-size:12px;font-weight:bold">HỒ SƠ ĐÃ ĐƯỢC PHÊ DUYỆT</span>
+                </div>
+                <h3 style="color:#111827;margin:0 0 12px">Xin chào ${sellerName},</h3>
+                <p style="color:#4b5563;line-height:1.6;margin:0 0 16px">
+                    Hồ sơ định danh (KYC) và thông tin mở gian hàng <strong>${shopName}</strong> của bạn đã được Quản trị viên VietCraft phê duyệt thành công.
+                </p>
+                <div style="background:#f9fafb;border:1px solid #f3f4f6;border-radius:8px;padding:16px;margin-bottom:24px">
+                    <p style="margin:0 0 8px;font-size:13px;color:#374151"><strong>Tên gian hàng:</strong> ${shopName}</p>
+                    <p style="margin:0 0 8px;font-size:13px;color:#374151"><strong>Trạng thái:</strong> Đang hoạt động (Kích hoạt đầy đủ quyền Người bán)</p>
+                    <p style="margin:0;font-size:13px;color:#374151"><strong>Phân quyền:</strong> SELLER</p>
+                </div>
+                <div style="text-align:center;margin-bottom:24px">
+                    <a href="${config.frontendUrl}/seller/dashboard" style="display:inline-block;background:#007700;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:bold;font-size:14px">
+                        Truy cập Kênh Người Bán
+                    </a>
+                </div>
+                <p style="color:#9ca3af;font-size:12px;margin:0;text-align:center">Cảm ơn bạn đã đồng hành cùng cộng đồng thủ công mỹ nghệ Việt Nam!</p>
+            </div>
+        `,
+    });
+}
+
+export async function sendSellerRejectionEmail(to: string, shopName: string, sellerName: string, reason: string) {
+    await transporter.sendMail({
+        from: `"VietCraft" <${config.mailUser}>`,
+        to,
+        subject: 'Thông báo về hồ sơ đăng ký Người bán VietCraft',
+        html: `
+            <div style="font-family:sans-serif;max-width:520px;margin:auto;padding:32px;border:1px solid #fee2e2;border-radius:12px;background:#ffffff">
+                <div style="text-align:center;margin-bottom:20px">
+                    <h1 style="color:#007700;margin:0;font-size:28px">Viet<span style="color:#330033">Craft</span></h1>
+                    <span style="display:inline-block;margin-top:8px;padding:4px 12px;background:#fef2f2;color:#b91c1c;border-radius:20px;font-size:12px;font-weight:bold">CẦN CẬP NHẬT HỒ SƠ</span>
+                </div>
+                <h3 style="color:#111827;margin:0 0 12px">Xin chào ${sellerName},</h3>
+                <p style="color:#4b5563;line-height:1.6;margin:0 0 16px">
+                    Rất tiếc, hồ sơ đăng ký Người bán cho gian hàng <strong>${shopName}</strong> chưa thể phê duyệt do chưa đáp ứng một số tiêu chí theo quy định.
+                </p>
+                <div style="background:#fff1f2;border-left:4px solid #e11d48;padding:16px;margin-bottom:24px;border-radius:4px">
+                    <p style="margin:0 0 4px;font-size:12px;font-weight:bold;color:#9f1239">LÝ DO TỪ CHỐI TỪ QUẢN TRỊ VIÊN:</p>
+                    <p style="margin:0;font-size:14px;color:#881337;line-height:1.5">${reason || 'Thông tin hoặc hình ảnh định danh chưa đạt chuẩn theo quy định.'}</p>
+                </div>
+                <div style="text-align:center;margin-bottom:24px">
+                    <a href="${config.frontendUrl}/seller/register" style="display:inline-block;background:#330033;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:bold;font-size:14px">
+                        Cập nhật lại hồ sơ
+                    </a>
+                </div>
+                <p style="color:#9ca3af;font-size:12px;margin:0;text-align:center">Nếu có thắc mắc, vui lòng liên hệ bộ phận hỗ trợ đối tác của VietCraft.</p>
+            </div>
+        `,
+    });
+}
+

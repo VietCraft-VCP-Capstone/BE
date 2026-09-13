@@ -75,7 +75,7 @@ const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
     updatedAt: new Date().toISOString()
 };
 
-async function resolveUniqueSlug(desired: string, ownerId: mongoose.Types.ObjectId, seed: string): Promise<string> {
+export async function resolveUniqueSlug(desired: string, ownerId: mongoose.Types.ObjectId, seed: string): Promise<string> {
     let base = generateSlug(desired || '');
     if (!base || base === 'untitled') base = `shop-${seed}`;
 

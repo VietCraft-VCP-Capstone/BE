@@ -7,7 +7,7 @@ export interface CreateNotificationInput {
     user_id: string | mongoose.Types.ObjectId;
     title: string;
     content: string;
-    type: 'ORDER_UPDATE' | 'LOW_STOCK' | 'ANALYTICS_ALERT' | 'PROMOTION' | 'NEW_MESSAGE' | 'PRODUCT_UNPUBLISHED' | 'PRODUCT_REPUBLISHED';
+    type: 'ORDER_UPDATE' | 'LOW_STOCK' | 'ANALYTICS_ALERT' | 'PROMOTION' | 'NEW_MESSAGE' | 'PRODUCT_UNPUBLISHED' | 'PRODUCT_REPUBLISHED' | 'SELLER_APPLICATION_APPROVED' | 'SELLER_APPLICATION_REJECTED';
     link?: string;
     metadata?: Record<string, any>;
 }

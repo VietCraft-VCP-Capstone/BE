@@ -4,7 +4,7 @@ export interface INotification extends Document {
     user_id: mongoose.Types.ObjectId;
     title: string;
     content: string;
-    type: 'ORDER_UPDATE' | 'LOW_STOCK' | 'ANALYTICS_ALERT' | 'PROMOTION' | 'NEW_MESSAGE' | 'PRODUCT_UNPUBLISHED' | 'PRODUCT_REPUBLISHED';
+    type: 'ORDER_UPDATE' | 'LOW_STOCK' | 'ANALYTICS_ALERT' | 'PROMOTION' | 'NEW_MESSAGE' | 'PRODUCT_UNPUBLISHED' | 'PRODUCT_REPUBLISHED' | 'SELLER_APPLICATION_APPROVED' | 'SELLER_APPLICATION_REJECTED';
     link?: string;
     metadata?: Record<string, any>;
     is_read: boolean;
@@ -18,7 +18,11 @@ const NotificationSchema = new Schema<INotification>({
     type: {
         type: String,
         required: true,
-        enum: ['ORDER_UPDATE', 'LOW_STOCK', 'ANALYTICS_ALERT', 'PROMOTION', 'NEW_MESSAGE', 'PRODUCT_UNPUBLISHED', 'PRODUCT_REPUBLISHED']
+        enum: [
+            'ORDER_UPDATE', 'LOW_STOCK', 'ANALYTICS_ALERT', 'PROMOTION',
+            'NEW_MESSAGE', 'PRODUCT_UNPUBLISHED', 'PRODUCT_REPUBLISHED',
+            'SELLER_APPLICATION_APPROVED', 'SELLER_APPLICATION_REJECTED'
+        ]
     },
     link: { type: String },
     metadata: { type: Schema.Types.Mixed },
