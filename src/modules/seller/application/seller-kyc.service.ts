@@ -20,6 +20,8 @@ import {
 import { resolveKycFilePath, KYC_STORAGE_ROOT } from '../../../shared/upload/kyc-storage.middleware';
 import { generateSlug } from '../../../shared/utils/slug';
 import { logger } from '../../../shared/utils/logger';
+import { sendPhoneVerificationOtpEmail } from '../../../shared/utils/email.service';
+import { SmsService } from '../../../shared/utils/sms.service';
 
 const PHONE_OTP_TTL_MS = 5 * 60 * 1000;
 const PHONE_REGEX = /^(0|84)(3|5|7|8|9)[0-9]{8}$/;
@@ -121,10 +123,23 @@ export class SellerKycService {
             attempts: 0
         });
 
-        logger.info(`📱 SMS OTP -> ${phone}: [ ${otp} ]`);
+        // Gửi SMS thật đến số điện thoại qua SpeedSMS
+        const smsResult = await SmsService.sendOtp(phone, otp);
+
+        // Gửi email dự phòng song song
+        const user = await User.findById(userId);
+        if (user && user.email) {
+            await sendPhoneVerificationOtpEmail(user.email, phone, otp);
+            logger.info(`📧 Đã gửi email dự phòng mã OTP tới: ${user.email}`);
+        }
+
+        logger.info(`📱 SMS OTP -> ${phone}: [ ${otp} ] (SpeedSMS status: ${smsResult.success ? 'SENT' : smsResult.message})`);
+
         return {
             success: true,
-            message: `Mã OTP đã được gửi tới số điện thoại ${phone}.`
+            message: `Mã xác thực OTP đã được gửi tới số điện thoại ${phone}. Vui lòng kiểm tra tin nhắn trên điện thoại của bạn.`,
+            smsSent: smsResult.success,
+            sentToEmail: user?.email || null
         };
     }
 
@@ -161,10 +176,17 @@ export class SellerKycService {
 
         await OtpVerification.deleteOne({ _id: pending._id });
 
+        // Cập nhật trạng thái xác thực điện thoại ở User
         await User.findByIdAndUpdate(userId, {
             phone,
             is_phone_verified: true
         });
+
+        // Đồng bộ trạng thái đã xác thực điện thoại ở SellerApplication (nếu có đơn DRAFT/PENDING)
+        await SellerApplication.updateMany(
+            { user_id: userId },
+            { phone, is_phone_verified: true }
+        );
 
         return {
             success: true,
@@ -281,7 +303,14 @@ export class SellerKycService {
                 shop_slug: shopSlug,
                 description: shop.description,
                 main_category: shop.main_category,
-                pickup_address: pickup,
+                pickup_address: {
+                    recipient_name: String(pickup.recipient_name || fullName).trim(),
+                    phone: String(pickup.phone || user.phone || payload.phone || '').trim(),
+                    province_id: String(pickup.province_id || '').trim(),
+                    district_id: String(pickup.district_id || '').trim(),
+                    ward_code: String(pickup.ward_code || '').trim(),
+                    address_detail: String(pickup.address_detail || '').trim(),
+                },
             },
             bank_info: {
                 bank_code: bank.bank_code,
@@ -296,15 +325,14 @@ export class SellerKycService {
                 electronic_signature: signature,
                 signed_at: new Date(),
                 ip_address: clientIp || '127.0.0.1',
-            },
-            $push: {
-                audit_trail: {
-                    action: 'SUBMITTED',
-                    actor_id: user._id,
-                    timestamp: new Date(),
-                    note: 'Người dùng nộp hồ sơ KYC đăng ký Người bán'
-                }
             }
+        };
+
+        const auditEntry = {
+            action: 'SUBMITTED',
+            actor_id: user._id,
+            timestamp: new Date(),
+            note: 'Người dùng nộp hồ sơ KYC đăng ký Người bán'
         };
 
         const existingApp = await SellerApplication.findOne({ user_id: user._id });
@@ -314,8 +342,11 @@ export class SellerKycService {
             Object.assign(existingApp, applicationData);
             existingApp.status = 'PENDING_APPROVAL';
             existingApp.review = undefined;
+            if (!existingApp.audit_trail) existingApp.audit_trail = [];
+            existingApp.audit_trail.push(auditEntry as any);
             savedApp = await existingApp.save();
         } else {
+            (applicationData as any).audit_trail = [auditEntry];
             savedApp = await SellerApplication.create(applicationData);
         }
 

@@ -88,7 +88,7 @@ const PickupAddressSchema = new Schema<IPickupAddress>({
     phone: { type: String, required: true },
     province_id: { type: String, required: true },
     district_id: { type: String, required: true },
-    ward_code: { type: String, required: true },
+    ward_code: { type: String, default: '' },
     address_detail: { type: String, required: true },
 }, { _id: false });
 

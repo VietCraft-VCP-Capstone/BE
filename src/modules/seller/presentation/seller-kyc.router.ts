@@ -3,6 +3,7 @@ import { SellerKycService } from '../application/seller-kyc.service';
 import { authenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { uploadKycDocument } from '../../../shared/upload/kyc-storage.middleware';
 import { generatePresignedToken } from '../../../shared/utils/crypto.service';
+import { logger } from '../../../shared/utils/logger';
 
 const router = Router();
 
@@ -77,6 +78,7 @@ router.post('/apply', authenticate, async (req: AuthenticatedRequest, res: Respo
         const result = await SellerKycService.submitApplication(req.user!.id, req.body, clientIp);
         res.status(200).json(result);
     } catch (error: any) {
+        logger.error(`[Seller KYC Apply Error] User ${req.user?.id}: ${error.message}`);
         res.status(400).json({ success: false, error: error.message });
     }
 });

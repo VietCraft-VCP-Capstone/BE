@@ -24,24 +24,25 @@ export class UserService {
             throw new Error('ID người dùng không hợp lệ');
         }
 
-        const user = await User.findById(userId).select('-password_hash');
+        const user = await User.findById(userId).select('-password_hash').lean();
         if (!user) {
             throw new Error('Không tìm thấy người dùng');
         }
 
-        const ordersCount = await Order.countDocuments({ buyer_id: userId });
-        const wishlist = await Wishlist.findOne({ user_id: userId });
+        const [ordersCount, wishlist, followingCount] = await Promise.all([
+            Order.countDocuments({ buyer_id: userId }),
+            Wishlist.findOne({ user_id: userId }).lean(),
+            ShopFollower.countDocuments({ buyer_ids: userId })
+        ]);
         const wishlistCount = wishlist ? wishlist.product_ids.length : 0;
-        const followingCount = await ShopFollower.countDocuments({ buyer_ids: userId });
 
-        const userObj = user.toObject();
         return {
-            ...userObj,
+            ...user,
             rank: 'Thành viên Bạc',
             stats: {
-                ordersCount: ordersCount,
+                ordersCount,
                 collectionsCount: wishlistCount,
-                followingCount: followingCount
+                followingCount
             }
         };
     }

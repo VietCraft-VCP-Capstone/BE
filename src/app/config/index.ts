@@ -34,6 +34,8 @@ export const config = {
     },
     // Shared secret cổng thanh toán dùng để ký webhook POST /orders/callback/:id.
     paymentCallbackSecret: process.env.PAYMENT_CALLBACK_SECRET || '',
+    speedSmsAccessToken: process.env.SPEEDSMS_ACCESS_TOKEN || '',
+    speedSmsType: Number(process.env.SPEEDSMS_SMS_TYPE) || 2,
 };
 
 if (!config.jwtSecret) {

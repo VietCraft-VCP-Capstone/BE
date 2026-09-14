@@ -28,6 +28,35 @@ export async function sendOtpEmail(to: string, otp: string) {
     });
 }
 
+export async function sendPhoneVerificationOtpEmail(to: string, phone: string, otp: string) {
+    try {
+        await transporter.sendMail({
+            from: `"VietCraft" <${config.mailUser}>`,
+            to,
+            subject: `[VietCraft] Mã xác thực OTP số điện thoại: ${otp}`,
+            html: `
+                <div style="font-family:sans-serif;max-width:500px;margin:auto;padding:32px;border:1px solid #e5e7eb;border-radius:12px;background:#ffffff">
+                    <div style="text-align:center;margin-bottom:20px">
+                        <h1 style="color:#007700;margin:0;font-size:26px">Viet<span style="color:#330033">Craft</span></h1>
+                        <span style="display:inline-block;margin-top:6px;padding:3px 12px;background:#ecfdf5;color:#047857;border-radius:16px;font-size:12px;font-weight:bold">XÁC THỰC SỐ ĐIỆN THOẠI NGƯỜI BÁN (KYC)</span>
+                    </div>
+                    <h3 style="color:#111827;margin:0 0 12px">Xác nhận số điện thoại di động</h3>
+                    <p style="color:#4b5563;line-height:1.6;margin:0 0 16px">
+                        Bạn đang thực hiện xác thực số điện thoại <strong>${phone}</strong> trong quy trình định danh (KYC) mở gian hàng Người bán trên VietCraft.
+                    </p>
+                    <p style="color:#6b7280;margin:0 0 12px;font-size:13px">Mã OTP xác thực của bạn có hiệu lực trong <strong>5 phút</strong>:</p>
+                    <div style="background:#f0fdf4;border:2px dashed #007700;border-radius:10px;padding:18px;text-align:center;font-size:36px;font-weight:bold;letter-spacing:10px;color:#007700;margin-bottom:20px">${otp}</div>
+                    <p style="color:#9ca3af;font-size:12px;margin:0;line-height:1.5">
+                        Lưu ý: Nếu hệ thống chưa kết nối SMS Gateway nhà mạng, mã này được gửi an toàn về email đã đăng ký của bạn để phục vụ kiểm thử và xác nhận. Vui lòng không chia sẻ mã OTP với bất kỳ ai.
+                    </p>
+                </div>
+            `,
+        });
+    } catch (err: any) {
+        console.warn('⚠️ Lỗi gửi email OTP số điện thoại:', err?.message);
+    }
+}
+
 export async function sendResetPasswordEmail(to: string, otp: string) {
     await transporter.sendMail({
         from: `"VietCraft" <${config.mailUser}>`,

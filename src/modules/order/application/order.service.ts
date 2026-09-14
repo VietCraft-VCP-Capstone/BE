@@ -247,7 +247,8 @@ export class OrdersService {
 
     const orders = await OrderModel.find(query)
       .populate("shop_id")
-      .sort({ created_at: -1 });
+      .sort({ created_at: -1 })
+      .lean();
     return orders.map(mapDbOrderToResponse);
   }
 
