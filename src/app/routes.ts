@@ -10,6 +10,7 @@ import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter } from '../mo
 import { cartRouter } from '../modules/cart';
 import { productsRouter, wishlistRouter } from '../modules/product';
 import { ordersRouter } from '../modules/order';
+import { paymentRouter } from '../modules/payment';
 import { promotionRouter } from '../modules/promotion';
 
 import { analyticsRouter } from '../modules/analytics';
@@ -37,6 +38,7 @@ router.use('/seller/orders', sellerOrdersRouter);
 router.use('/cart', cartRouter);
 router.use('/products', productsRouter);
 router.use('/orders', ordersRouter);
+router.use('/payment', paymentRouter);
 
 router.use('/favorites', wishlistRouter);
 router.use('/analytics', analyticsRouter);
