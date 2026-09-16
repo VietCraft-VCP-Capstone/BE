@@ -1,9 +1,12 @@
 import sharp from 'sharp';
 import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { Design } from '../infrastructure/models/design.model';
-import { publicUrl, resolveUploadPath } from '../../../shared/upload/upload.middleware';
+import { publicUrl, resolveUploadPath, DESIGN_DIR } from '../../../shared/upload/upload.middleware';
 import { isCloudinaryEnabled, uploadImage } from '../../../infrastructure/storage/cloudinary.service';
+import { logger } from '../../../shared/utils/logger';
 
 export class ForbiddenError extends Error { }
 
@@ -34,17 +37,22 @@ export class DesignService {
 
         if (isCloudinaryEnabled()) {
             const buffer = Buffer.isBuffer(source) ? source : await fs.promises.readFile(source);
-            let asset;
             try {
-                asset = await uploadImage(buffer, { filename: file.originalname, mimetype: file.mimetype });
-            } catch (err) {
+                const asset = await uploadImage(buffer, { filename: file.originalname, mimetype: file.mimetype });
                 await cleanupLocal();
-                throw err;
+                fileUrl = asset.url;
+                storage = 'cloudinary';
+                publicId = asset.publicId;
+            } catch (err: any) {
+                logger.warn(`Cloudinary upload failed (${err.message}), falling back to local file storage.`);
+                const ext = file.mimetype === 'image/jpeg' ? '.jpg' : file.mimetype === 'image/webp' ? '.webp' : '.png';
+                const filename = `${crypto.randomUUID()}${ext}`;
+                const destPath = path.join(DESIGN_DIR, filename);
+                await fs.promises.writeFile(destPath, buffer);
+                await cleanupLocal();
+                fileUrl = publicUrl(destPath);
+                storage = 'local';
             }
-            await cleanupLocal();
-            fileUrl = asset.url;
-            storage = 'cloudinary';
-            publicId = asset.publicId;
         } else {
             fileUrl = publicUrl(file.path);
         }

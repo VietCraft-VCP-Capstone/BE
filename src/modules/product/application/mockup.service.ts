@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 import { config } from '../../../app/config';
 import { MOCKUP_DIR, UPLOAD_ROOT, publicUrl } from '../../../shared/upload/upload.middleware';
@@ -17,7 +18,13 @@ async function loadImage(url: string): Promise<Buffer> {
         const abs = path.join(UPLOAD_ROOT, url.replace('/uploads/', ''));
         return sharp(abs).toBuffer();
     }
-    const full = url.startsWith('http') ? url : `${config.printerApiUrl}${url}`;
+    if (url.startsWith('/images/')) {
+        const localPath = path.join(process.cwd(), '..', 'frontend', 'public', url);
+        if (fs.existsSync(localPath)) {
+            return sharp(localPath).toBuffer();
+        }
+    }
+    const full = url.startsWith('http') ? url : (url.startsWith('/') ? `http://localhost:5173${url}` : `${config.printerApiUrl}${url}`);
     const res = await fetch(full);
     if (!res.ok) throw new Error(`Không tải được ảnh phôi (${res.status})`);
     return Buffer.from(await res.arrayBuffer());
