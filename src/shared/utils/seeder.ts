@@ -55,10 +55,15 @@ export async function backfillProductStatus() {
     );
 }
 
+import { seedRealisticData } from './seed_realistic_data';
+
 export async function seedDatabase() {
     try {
         // Vá dữ liệu cũ trước, việc này độc lập với chuyện có seed hay không.
         await backfillProductStatus();
+
+        // Nạp dữ liệu thực tế chất lượng cao (Shops, Products, Reviews, Delivered Orders, Test Buyer)
+        await seedRealisticData();
 
         const couponCount = await Coupon.countDocuments();
         if (couponCount === 0) {

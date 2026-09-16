@@ -20,6 +20,7 @@ export interface IShop extends Document {
     performance_benchmarks?: Record<string, any>;
     listing_count: number;
     average_rating: number;
+    rating_count: number;
     product_diversity_score?: number;
     settings?: Record<string, any>;
     created_at: Date;
@@ -47,6 +48,7 @@ const ShopSchema = new Schema<IShop>({
     settings: { type: Schema.Types.Mixed, default: {} },
     listing_count: { type: Number, default: 0 },
     average_rating: { type: Number, default: 0.0 },
+    rating_count: { type: Number, default: 0 },
     product_diversity_score: { type: Number, default: 0.0 }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }

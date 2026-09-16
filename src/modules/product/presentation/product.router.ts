@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { ProductsService, ValidationError, ForbiddenError, ProductActor } from '../application/product.service';
 import { BlankClient } from '../application/blank-client.service';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { ReviewService } from '../../order';
 
 const router = Router();
 
@@ -120,6 +121,20 @@ router.patch('/batch-status', authenticate, requireRole(['seller', 'admin']), as
 });
 
 // ==================== CHI TIẾT CÔNG KHAI ====================
+
+router.get('/:id/reviews', async (req, res) => {
+    try {
+        const { page, limit, rating } = req.query;
+        const result = await ReviewService.getProductReviews(req.params.id, {
+            page: page ? Number(page) : undefined,
+            limit: limit ? Number(limit) : undefined,
+            rating: rating ? Number(rating) : undefined,
+        });
+        res.json(result);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi tải danh sách đánh giá.' });
+    }
+});
 
 router.get('/:id/related', async (req, res) => {
     try {

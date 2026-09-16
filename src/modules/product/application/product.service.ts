@@ -131,6 +131,8 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         } : undefined,
         sellerId: product.shop_id ? product.shop_id.toString() : undefined,
         tags: product.tags || [],
+        rating: typeof product.average_rating === 'number' ? product.average_rating : 5.0,
+        ratingCount: typeof product.rating_count === 'number' ? product.rating_count : 0,
         allowCustomization: Boolean(product.allow_customization),
         customizationType: product.customization_type || 'NONE',
         createdAt: product.created_at ? new Date(product.created_at).toISOString() : new Date().toISOString(),

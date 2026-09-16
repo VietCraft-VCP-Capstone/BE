@@ -8,8 +8,8 @@ import { userRouter } from '../modules/user';
 import { sellerSettingsRouter, sellerOrdersRouter } from '../modules/seller';
 
 import { cartRouter } from '../modules/cart';
-import { productsRouter, wishlistRouter } from '../modules/product';
-import { ordersRouter } from '../modules/order';
+import { productsRouter, wishlistRouter, shopRouter } from '../modules/product';
+import { ordersRouter, reviewRouter } from '../modules/order';
 import { promotionRouter } from '../modules/promotion';
 
 import { analyticsRouter } from '../modules/analytics';
@@ -33,7 +33,9 @@ router.use('/seller/orders', sellerOrdersRouter);
 
 router.use('/cart', cartRouter);
 router.use('/products', productsRouter);
+router.use('/shops', shopRouter);
 router.use('/orders', ordersRouter);
+router.use('/reviews', reviewRouter);
 
 router.use('/favorites', wishlistRouter);
 router.use('/analytics', analyticsRouter);
