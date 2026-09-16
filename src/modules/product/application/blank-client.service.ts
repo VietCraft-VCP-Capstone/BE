@@ -42,22 +42,22 @@ export const DEFAULT_BLANKS: Blank[] = [
         print_areas: [
             {
                 key: 'front',
-                label: 'Mặt trước (26×34cm)',
+                label: 'Mặt trước (25×33cm)',
                 image: '/images/AoMT.png',
-                x: 270,
-                y: 230,
-                width: 260,
-                height: 340,
+                x: 275,
+                y: 220,
+                width: 250,
+                height: 330,
                 surface: 'flat'
             },
             {
                 key: 'back',
-                label: 'Mặt sau (26×34cm)',
+                label: 'Mặt sau (25×33cm)',
                 image: '/images/AoMS.png',
-                x: 270,
-                y: 230,
-                width: 260,
-                height: 340,
+                x: 275,
+                y: 220,
+                width: 250,
+                height: 330,
                 surface: 'flat'
             }
         ],

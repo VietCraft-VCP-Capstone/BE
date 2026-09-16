@@ -39,10 +39,9 @@ export async function generateMockup(
 ): Promise<string> {
     const [blankBuf, designBuf] = await Promise.all([loadImage(blankImageUrl), loadImage(designUrl)]);
 
-    const blank = sharp(blankBuf);
-    const meta = await blank.metadata();
-    const canvasW = meta.width || 800;
-    const canvasH = meta.height || 800;
+    const blank = sharp(blankBuf).resize(800, 800, { fit: 'fill' });
+    const canvasW = 800;
+    const canvasH = 800;
 
     const box = area ?? { x: canvasW * 0.2, y: canvasH * 0.2, width: canvasW * 0.6, height: canvasH * 0.6, key: 'auto' };
     const targetW = Math.max(1, Math.round(box.width * (placement.scale ?? 1)));
@@ -134,9 +133,8 @@ async function layerToPng(layer: Layer): Promise<{ buf: Buffer; w: number; h: nu
 
 export async function generateMockupLayers(blankImageUrl: string, layers: Layer[]): Promise<string> {
     const blankBuf = await loadImage(blankImageUrl);
-    const blank = sharp(blankBuf);
-    const meta = await blank.metadata();
-    const canvasW = meta.width || 800, canvasH = meta.height || 800;
+    const blank = sharp(blankBuf).resize(800, 800, { fit: 'fill' });
+    const canvasW = 800, canvasH = 800;
 
     const ops: { input: Buffer; left: number; top: number }[] = [];
     for (const layer of layers) {
