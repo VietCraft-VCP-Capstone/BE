@@ -172,6 +172,7 @@ export class ChatGateway {
                             readerId: user.id
                         });
                         const unreadCount = await chatService.getTotalUnreadCount(user.id);
+                        this.io.to(`user_${user.id}`).emit('unread_count_updated', { unreadCount });
                         socket.emit('unread_count_updated', { unreadCount });
                     } catch (error: any) {
                         logger.error(`Lỗi đánh dấu đã đọc socket: ${error.message}`);

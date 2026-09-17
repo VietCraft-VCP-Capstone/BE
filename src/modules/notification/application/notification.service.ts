@@ -39,19 +39,21 @@ export class NotificationService {
         // Tính toán số lượng chưa đọc mới nhất
         const unreadCount = await this.getUnreadCount(userId.toString());
 
-        // Phát realtime tới phòng cá nhân của user
-        NotificationGateway.sendNotification(userId.toString(), {
-            id: doc._id.toString(),
-            _id: doc._id.toString(),
-            user_id: userId.toString(),
-            title: doc.title,
-            content: doc.content,
-            type: doc.type,
-            link: doc.link,
-            metadata: doc.metadata,
-            is_read: doc.is_read,
-            created_at: doc.created_at
-        }, unreadCount);
+        // Phát realtime tới phòng cá nhân của user (chỉ phát cho thông báo chung, tin nhắn đã có Chat Socket)
+        if (doc.type !== 'NEW_MESSAGE') {
+            NotificationGateway.sendNotification(userId.toString(), {
+                id: doc._id.toString(),
+                _id: doc._id.toString(),
+                user_id: userId.toString(),
+                title: doc.title,
+                content: doc.content,
+                type: doc.type,
+                link: doc.link,
+                metadata: doc.metadata,
+                is_read: doc.is_read,
+                created_at: doc.created_at
+            }, unreadCount);
+        }
 
         return doc;
     }
@@ -74,6 +76,9 @@ export class NotificationService {
 
         if (query.type) {
             filter.type = query.type;
+        } else {
+            // Mặc định ngoại trừ tin nhắn chat (vì chat đã có icon riêng bên cạnh)
+            filter.type = { $ne: 'NEW_MESSAGE' };
         }
 
         const [items, total, unreadCount] = await Promise.all([
@@ -110,13 +115,14 @@ export class NotificationService {
     }
 
     /**
-     * Lấy số lượng thông báo chưa đọc của người dùng
+     * Lấy số lượng thông báo chưa đọc của người dùng (ngoại trừ tin nhắn chat)
      */
     async getUnreadCount(userId: string): Promise<number> {
         try {
             return await Notification.countDocuments({
                 user_id: new mongoose.Types.ObjectId(userId),
-                is_read: false
+                is_read: false,
+                type: { $ne: 'NEW_MESSAGE' }
             });
         } catch (err: any) {
             logger.error(`Lỗi tính unreadCount thông báo: ${err.message}`);
@@ -150,13 +156,14 @@ export class NotificationService {
     }
 
     /**
-     * Đánh dấu tất cả thông báo của người dùng là đã đọc
+     * Đánh dấu tất cả thông báo của người dùng là đã đọc (ngoại trừ tin nhắn chat)
      */
     async markAllAsRead(userId: string): Promise<number> {
         const res = await Notification.updateMany(
             {
                 user_id: new mongoose.Types.ObjectId(userId),
-                is_read: false
+                is_read: false,
+                type: { $ne: 'NEW_MESSAGE' }
             },
             { $set: { is_read: true } }
         );

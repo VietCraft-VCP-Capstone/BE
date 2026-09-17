@@ -594,6 +594,16 @@ export class ProductsService {
         return mapToProductItemResponse(mp, variants, shop);
     }
 
+    static async getByIds(ids: (string | mongoose.Types.ObjectId)[]): Promise<ProductItemResponseDTO[]> {
+        if (!ids || ids.length === 0) return [];
+        const validIds = ids
+            .filter(id => mongoose.Types.ObjectId.isValid(id.toString()))
+            .map(id => typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id);
+        if (validIds.length === 0) return [];
+        const docs = await MongoProduct.find({ _id: { $in: validIds } }).lean();
+        return this.mapMany(docs);
+    }
+
     static async getRelated(id: string, category?: string, limit = 4): Promise<ProductItemResponseDTO[]> {
         if (!mongoose.Types.ObjectId.isValid(id)) return [];
         const self = new mongoose.Types.ObjectId(id);

@@ -30,13 +30,13 @@ router.post('/conversations', async (req: AuthenticatedRequest, res: Response) =
             productWidget
         );
 
-        // Nếu có initialMessage hoặc productWidget kèm theo, tự động gửi tin nhắn đầu tiên
-        if (initialMessage || productWidget) {
+        // Chỉ tự động gửi tin nhắn khởi tạo nếu có nội dung tin nhắn ban đầu
+        if (initialMessage && initialMessage.trim()) {
             await chatService.saveMessage({
                 senderId: userId,
                 receiverId: conversation.partner.id,
                 roomId: conversation.conversation_id,
-                messageText: initialMessage || '',
+                messageText: initialMessage.trim(),
                 productWidget: productWidget
             });
         }
