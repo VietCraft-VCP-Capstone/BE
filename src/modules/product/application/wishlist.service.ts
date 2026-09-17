@@ -37,7 +37,7 @@ export class WishlistService {
 
         const variants = await ProductVariant.find({
             product_id: { $in: productIds }
-        }).select('product_id retail_price mockup_image stock_quantity is_active');
+        }).select('product_id sku color size material retail_price mockup_image stock_quantity is_active');
 
         const populatedProducts = wishlist.product_ids.map((p: any) => {
             if (!p || typeof p !== 'object' || !p._id) return p;
@@ -53,8 +53,15 @@ export class WishlistService {
                 retail_price: price,
                 variants: pVariants.map(v => ({
                     id: v._id.toString(),
+                    _id: v._id.toString(),
+                    sku: v.sku,
+                    color: v.color,
+                    size: v.size,
+                    material: v.material,
+                    name: [v.color, v.size, v.material].filter(Boolean).join(' - ') || 'Tiêu chuẩn',
                     price: parseFloat(v.retail_price?.toString() || '0'),
                     retail_price: parseFloat(v.retail_price?.toString() || '0'),
+                    stock: Number(v.stock_quantity) || 0,
                     mockupImage: v.mockup_image
                 })),
                 shopInfo: pObj.shop_id ? {
