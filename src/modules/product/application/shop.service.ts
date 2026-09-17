@@ -132,4 +132,46 @@ export class ShopService {
             followersCount
         };
     }
+
+    /**
+     * Lấy danh sách các gian hàng mà người dùng đang theo dõi
+     */
+    static async getFollowedShops(userId: string): Promise<ShopDetailDTO[]> {
+        if (!userId) return [];
+        const userObjectId = new mongoose.Types.ObjectId(userId);
+
+        const followerDocs = await ShopFollower.find({ buyer_ids: userObjectId }).lean();
+        if (!followerDocs || followerDocs.length === 0) {
+            return [];
+        }
+
+        const shopIds = followerDocs.map(doc => doc.shop_id);
+        const shops = await Shop.find({ _id: { $in: shopIds } }).lean();
+
+        const countMap = new Map<string, number>();
+        followerDocs.forEach(doc => {
+            countMap.set(doc.shop_id.toString(), doc.buyer_ids?.length || 0);
+        });
+
+        return shops.map(shop => {
+            const sId = shop._id.toString();
+            return {
+                id: sId,
+                _id: sId,
+                name: shop.shop_name,
+                shopName: shop.shop_name,
+                slug: shop.slug,
+                logo: shop.logo || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=200',
+                banner: shop.banner || 'https://images.unsplash.com/photo-1578749556568-bc2c40e68b61?auto=format&fit=crop&q=80&w=1200',
+                description: shop.description || '',
+                rating: typeof shop.average_rating === 'number' ? shop.average_rating : 5.0,
+                averageRating: typeof shop.average_rating === 'number' ? shop.average_rating : 5.0,
+                ratingCount: typeof shop.rating_count === 'number' ? shop.rating_count : 0,
+                listingCount: typeof shop.listing_count === 'number' ? shop.listing_count : 0,
+                followersCount: countMap.get(sId) || 0,
+                isFollowing: true,
+                createdAt: shop.created_at,
+            };
+        });
+    }
 }
