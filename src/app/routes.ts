@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authRouter } from '../modules/auth';
 
-import { adminRouter, adminSellerRouter } from '../modules/admin';
+import { adminRouter } from '../modules/admin';
 import { categoryRouter } from '../modules/category';
 import { tagsRouter } from '../modules/tags';
 import { userRouter } from '../modules/user';
@@ -26,7 +26,6 @@ router.use('/auth', authRouter);
 // không phải sửa gì. Guard admin nằm sẵn trên từng route trong 2 module đó.
 router.use('/admin/categories', categoryRouter);
 router.use('/admin/tags', tagsRouter);
-router.use('/admin/seller-applications', adminSellerRouter);
 router.use('/admin', adminRouter);
 router.use('/users', userRouter);
 router.use('/seller/kyc', sellerKycRouter);
