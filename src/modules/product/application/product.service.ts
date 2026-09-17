@@ -850,9 +850,13 @@ export class ProductsService {
                 ).filter((l: any) => l.type !== 'image' || l.designUrl);
                 if (area && (area as any).surface === 'wrap') {
                     mockups.push(await generateWrapMockup(blankImage, layers, {
-                        x: area.x, y: area.y, width: area.width, height: area.height,
-                        template_w: (area as any).template_w || 2475, template_h: (area as any).template_h || 1155,
-                        arc: (area as any).arc,
+                        x: p.area?.x ?? area.x,
+                        y: p.area?.y ?? area.y,
+                        width: p.area?.width ?? area.width,
+                        height: p.area?.height ?? area.height,
+                        template_w: (area as any).template_w || 2475,
+                        template_h: (area as any).template_h || 1155,
+                        arc: (area as any).arc || 1.35,
                     }));
                 } else {
                     mockups.push(await generateMockupLayers(blankImage, layers));
@@ -910,9 +914,13 @@ export class ProductsService {
             if (!layers.length) continue;
             if (area && (area as any).surface === 'wrap') {
                 out.push(await generateWrapMockup(blankImage, layers, {
-                    x: area.x, y: area.y, width: area.width, height: area.height,
-                    template_w: (area as any).template_w || 2475, template_h: (area as any).template_h || 1155,
-                    arc: (area as any).arc,
+                    x: p.area?.x ?? area.x,
+                    y: p.area?.y ?? area.y,
+                    width: p.area?.width ?? area.width,
+                    height: p.area?.height ?? area.height,
+                    template_w: (area as any).template_w || 2475,
+                    template_h: (area as any).template_h || 1155,
+                    arc: (area as any).arc || 1.35,
                 }));
             } else {
                 out.push(await generateMockupLayers(blankImage, layers));

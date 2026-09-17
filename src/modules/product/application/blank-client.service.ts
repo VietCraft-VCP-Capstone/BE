@@ -79,10 +79,10 @@ export const DEFAULT_BLANKS: Blank[] = [
                 key: 'wrap',
                 label: 'Vòng quanh ly (3D Wrap)',
                 image: '/images/Ly.png',
-                x: 0,
-                y: 0,
-                width: 2475,
-                height: 1155,
+                x: 180,
+                y: 220,
+                width: 440,
+                height: 340,
                 surface: 'wrap',
                 template_w: 2475,
                 template_h: 1155
@@ -104,10 +104,10 @@ export const DEFAULT_BLANKS: Blank[] = [
         print_areas: [
             {
                 key: 'front',
-                label: 'Mặt trước (25×30cm)',
+                label: 'Thân túi (30×33cm)',
                 image: '/images/Tui.png',
                 x: 250,
-                y: 240,
+                y: 320,
                 width: 300,
                 height: 330,
                 surface: 'flat'
@@ -129,12 +129,12 @@ export const DEFAULT_BLANKS: Blank[] = [
         print_areas: [
             {
                 key: 'front',
-                label: 'Bề mặt tranh (30×40cm)',
+                label: 'Lòng tranh (30×40cm)',
                 image: '/images/KhungTranh.png',
-                x: 100,
-                y: 80,
-                width: 600,
-                height: 640,
+                x: 205,
+                y: 140,
+                width: 390,
+                height: 520,
                 surface: 'flat'
             }
         ],
