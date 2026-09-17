@@ -34,6 +34,15 @@ export const config = {
     },
     // Shared secret cổng thanh toán dùng để ký webhook POST /orders/callback/:id.
     paymentCallbackSecret: process.env.PAYMENT_CALLBACK_SECRET || '',
+    speedSmsAccessToken: process.env.SPEEDSMS_ACCESS_TOKEN || '',
+    speedSmsType: Number(process.env.SPEEDSMS_SMS_TYPE) || 2,
+    vnpay: {
+        tmnCode: process.env.VNP_TMNCODE || 'R4B161KM',
+        hashSecret: process.env.VNP_HASHSECRET || 'TYQBZSLIPCVPYOVJLCUTLHKTDTDFHJXA',
+        url: process.env.VNP_URL || 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
+        apiUrl: process.env.VNP_API_URL || 'https://sandbox.vnpayment.vn/merchant_webapi/api/transaction',
+        returnUrl: process.env.VNP_RETURNURL || 'http://localhost:3000/orders/vnpay-return',
+    },
 };
 
 if (!config.jwtSecret) {

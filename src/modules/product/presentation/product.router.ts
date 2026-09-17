@@ -123,8 +123,9 @@ router.patch('/batch-status', authenticate, requireRole(['seller', 'admin']), as
 
 router.get('/:id/related', async (req, res) => {
     try {
-        const product = await ProductsService.getById(req.params.id);
-        res.json(await ProductsService.getRelated(req.params.id, product?.category));
+        const limit = req.query.limit ? Number(req.query.limit) : 4;
+        const category = req.query.category as string | undefined;
+        res.json(await ProductsService.getRelated(req.params.id, category, limit));
     } catch (error: any) {
         res.status(404).json({ error: error.message || 'Không tìm thấy sản phẩm liên quan.' });
     }

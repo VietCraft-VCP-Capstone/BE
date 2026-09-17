@@ -2,7 +2,9 @@ import mongoose from "mongoose";
 import { Order as OrderModel } from "../infrastructure/models/order.model";
 import { Product } from "../../product/infrastructure/models/product.model";
 import { ProductVariant } from "../../product/infrastructure/models/product-variant.model";
+import { Shop } from "../../product/infrastructure/models/shop.model";
 import { Design } from "../../design/infrastructure/models/design.model";
+import { notificationService } from "../../notification";
 import { dispatchToPrinter } from "./printer-dispatch.service";
 import { OrderResponse, DEFAULT_SHIPPING_FEE, PLATFORM_FEE_RATE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
@@ -174,6 +176,36 @@ export class OrdersService {
       order_hour_of_week: now.getDay() * 24 + now.getHours(),
     });
 
+    // Phát thông báo Realtime cho Người mua & Người bán
+    try {
+      // 1. Thông báo cho người mua
+      await notificationService.createNotification({
+        user_id: buyerId,
+        type: 'ORDER_UPDATE',
+        title: 'Đặt hàng thành công',
+        content: `Đơn hàng #${order.order_code} đã được tạo thành công.`,
+        link: `/orders/${order._id}`,
+        metadata: { orderId: order._id.toString(), orderCode: order.order_code }
+      });
+
+      // 2. Thông báo cho người bán (nếu có shop)
+      if (shopId) {
+        const shop = await Shop.findById(shopId);
+        if (shop?.owner_id) {
+          await notificationService.createNotification({
+            user_id: shop.owner_id.toString(),
+            type: 'ORDER_UPDATE',
+            title: 'Bạn có đơn hàng mới',
+            content: `Đơn hàng mới #${order.order_code} với giá trị ${subtotal.toLocaleString('vi-VN')}₫ cần xử lý.`,
+            link: `/seller/orders`,
+            metadata: { orderId: order._id.toString(), orderCode: order.order_code }
+          });
+        }
+      }
+    } catch (err: any) {
+      console.error('[NOTIFICATION] Lỗi tạo thông báo đơn hàng mới:', err?.message || err);
+    }
+
     const populated = await OrderModel.findById(order._id).populate("shop_id");
     return mapDbOrderToResponse(populated || order);
   }
@@ -215,7 +247,8 @@ export class OrdersService {
 
     const orders = await OrderModel.find(query)
       .populate("shop_id")
-      .sort({ created_at: -1 });
+      .sort({ created_at: -1 })
+      .lean();
     return orders.map(mapDbOrderToResponse);
   }
 
@@ -245,15 +278,41 @@ export class OrdersService {
           err?.message || err,
         ),
       );
+
+      try {
+        await notificationService.createNotification({
+          user_id: order.buyer_id.toString(),
+          type: 'ORDER_UPDATE',
+          title: 'Thanh toán thành công',
+          content: `Đơn hàng #${order.order_code} đã thanh toán thành công và chuyển sang xử lý sản xuất.`,
+          link: `/orders/${order._id}`,
+          metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: 'PROCESSING' }
+        });
+      } catch (err: any) {
+        console.error('[NOTIFICATION] Lỗi gửi thông báo thanh toán thành công:', err?.message || err);
+      }
     } else {
       order.payment_status = "PENDING";
       order.order_status = "CANCELLED";
       order.status_history.push({
         status: "CANCELLED",
         changed_at: new Date(),
-        note: "Thanh toán thất bại. Đơn hàng tự động hủy.",
+        note: "Thanh toán thất bại hoặc người dùng huỷ.",
       });
       await order.save();
+
+      try {
+        await notificationService.createNotification({
+          user_id: order.buyer_id.toString(),
+          type: 'ORDER_UPDATE',
+          title: 'Đơn hàng đã bị huỷ',
+          content: `Đơn hàng #${order.order_code} đã bị huỷ do thanh toán không thành công.`,
+          link: `/orders/${order._id}`,
+          metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: 'CANCELLED' }
+        });
+      } catch (err: any) {
+        console.error('[NOTIFICATION] Lỗi gửi thông báo huỷ đơn hàng:', err?.message || err);
+      }
     }
 
     return mapDbOrderToResponse(order);

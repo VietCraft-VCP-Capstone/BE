@@ -484,18 +484,16 @@ export class ProductsService {
     }
 
     private static async page(query: any, filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
-        const total = await MongoProduct.countDocuments(query);
         const page = Math.max(1, Number(filter?.page) || 1);
         const limit = Math.max(1, Number(filter?.limit || filter?.pageSize) || 6);
-        const totalPages = Math.max(1, Math.ceil(total / limit));
         const skip = (page - 1) * limit;
 
         const sort = filter?.sort;
-        let docs: any[];
+        let docsPromise: Promise<any[]>;
         if (sort === 'price_asc' || sort === 'price_desc' || sort === 'stock_asc' || sort === 'stock_desc') {
             const dir = sort.endsWith('_asc') ? 1 : -1;
             const field = sort.startsWith('price') ? '_minPrice' : '_totalStock';
-            docs = await MongoProduct.aggregate([
+            docsPromise = MongoProduct.aggregate([
                 { $match: query },
                 {
                     $lookup: {
@@ -514,13 +512,19 @@ export class ProductsService {
                 { $sort: { [field]: dir, created_at: -1 } },
                 { $skip: skip },
                 { $limit: limit }
-            ]);
+            ]).exec();
         } else {
             const sortOption: any = sort === 'rank_asc'
                 ? { display_rank: 1, created_at: -1 }
                 : { created_at: -1 };
-            docs = await MongoProduct.find(query).sort(sortOption).skip(skip).limit(limit).lean();
+            docsPromise = MongoProduct.find(query).sort(sortOption).skip(skip).limit(limit).lean().exec();
         }
+
+        const [total, docs] = await Promise.all([
+            MongoProduct.countDocuments(query),
+            docsPromise
+        ]);
+        const totalPages = Math.max(1, Math.ceil(total / limit));
 
         const items = await ProductsService.mapMany(docs);
         return { items, total, page, limit, totalPages };
@@ -598,12 +602,28 @@ export class ProductsService {
         return mapToProductItemResponse(mp, variants, shop);
     }
 
+    static async getByIds(ids: (string | mongoose.Types.ObjectId)[]): Promise<ProductItemResponseDTO[]> {
+        if (!ids || ids.length === 0) return [];
+        const validIds = ids
+            .filter(id => mongoose.Types.ObjectId.isValid(id.toString()))
+            .map(id => typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id);
+        if (validIds.length === 0) return [];
+        const docs = await MongoProduct.find({ _id: { $in: validIds } }).lean();
+        return this.mapMany(docs);
+    }
+
     static async getRelated(id: string, category?: string, limit = 4): Promise<ProductItemResponseDTO[]> {
         if (!mongoose.Types.ObjectId.isValid(id)) return [];
         const self = new mongoose.Types.ObjectId(id);
 
+        let cat = category;
+        if (!cat) {
+            const p = await MongoProduct.findById(self).select('categories').lean();
+            cat = p?.categories?.[0];
+        }
+
         const base: any = { ...PUBLIC_QUERY, listing_status: 'ACTIVE', _id: { $ne: self } };
-        let docs = await MongoProduct.find(category ? { ...base, categories: category } : base)
+        let docs = await MongoProduct.find(cat ? { ...base, categories: cat } : base)
             .limit(limit).lean();
 
         if (docs.length < limit) {
