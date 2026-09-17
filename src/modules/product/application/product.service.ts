@@ -256,7 +256,7 @@ export class ProductsService {
         }
 
         let blank: Blank | undefined;
-        let podVariants: { sku: string; markup: number; stock: number }[] | undefined;
+        let podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[] | undefined;
         let designPlacements: any[] | undefined;
         if (isPod) {
             try {
@@ -273,14 +273,22 @@ export class ProductsService {
             const seenSku = new Set<string>();
             rawVars.forEach((v: any, i: number) => {
                 const vari = blank?.variations.find(bv => bv.sku === v.sku);
-                if (!vari) { errors.push(`variant[${i}].sku không thuộc phôi đã chọn`); return; }
-                if (seenSku.has(v.sku)) { errors.push(`variant[${i}].sku bị trùng`); return; }
-                seenSku.add(v.sku);
+                const sku = String(v.sku || `custom-${i}`).trim();
+                if (seenSku.has(sku)) { errors.push(`variant[${i}].sku bị trùng`); return; }
+                seenSku.add(sku);
                 const markup = Number(v.markup ?? 0);
                 if (!Number.isFinite(markup) || markup < 0) errors.push(`variant[${i}].markup phải là số >= 0`);
                 const stock = Number(v.stock ?? 100);
                 if (!Number.isFinite(stock) || stock < 0) errors.push(`variant[${i}].stock phải là số >= 0`);
-                podVariants!.push({ sku: v.sku, markup, stock });
+                podVariants!.push({
+                    sku,
+                    color: v.color || vari?.color || 'Màu mặc định',
+                    size: v.size || vari?.size || 'Freesize',
+                    material: v.material || vari?.material || (blank as any)?.material || 'Cotton',
+                    base_cost: Number(v.base_cost ?? vari?.base_cost ?? 50000),
+                    markup,
+                    stock
+                });
             });
 
             const rawPl = Array.isArray(payload.designPlacements) ? payload.designPlacements : [];
@@ -817,7 +825,7 @@ export class ProductsService {
 
     private static async buildPodArtifacts(
         blank: Blank,
-        podVariants: { sku: string; markup: number; stock: number }[],
+        podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[],
         placements: any[]
     ): Promise<{ images: string[]; variants: VariantInput[] }> {
 
@@ -842,9 +850,13 @@ export class ProductsService {
                 ).filter((l: any) => l.type !== 'image' || l.designUrl);
                 if (area && (area as any).surface === 'wrap') {
                     mockups.push(await generateWrapMockup(blankImage, layers, {
-                        x: area.x, y: area.y, width: area.width, height: area.height,
-                        template_w: (area as any).template_w || 2475, template_h: (area as any).template_h || 1155,
-                        arc: (area as any).arc,
+                        x: p.area?.x ?? area.x,
+                        y: p.area?.y ?? area.y,
+                        width: p.area?.width ?? area.width,
+                        height: p.area?.height ?? area.height,
+                        template_w: (area as any).template_w || 2475,
+                        template_h: (area as any).template_h || 1155,
+                        arc: (area as any).arc || 1.35,
                     }));
                 } else {
                     mockups.push(await generateMockupLayers(blankImage, layers));
@@ -859,14 +871,14 @@ export class ProductsService {
         const images = mockups.length ? mockups : [blank.default_image];
 
         const variants: VariantInput[] = podVariants.map(pv => {
-            const vari = blank.variations.find(v => v.sku === pv.sku)!;
+            const vari = blank.variations?.find(v => v.sku === pv.sku);
             return {
                 sku: pv.sku,
-                color: vari.color,
-                size: vari.size,
-                material: vari.material,
-                base_cost: vari.base_cost,
-                price: vari.base_cost + pv.markup,
+                color: pv.color || vari?.color || 'Màu mặc định',
+                size: pv.size || vari?.size || 'Freesize',
+                material: pv.material || vari?.material || (blank as any)?.material || 'Cotton',
+                base_cost: pv.base_cost ?? vari?.base_cost ?? 50000,
+                price: (pv.base_cost ?? vari?.base_cost ?? 50000) + pv.markup,
                 stock: pv.stock,
             };
         });
@@ -902,9 +914,13 @@ export class ProductsService {
             if (!layers.length) continue;
             if (area && (area as any).surface === 'wrap') {
                 out.push(await generateWrapMockup(blankImage, layers, {
-                    x: area.x, y: area.y, width: area.width, height: area.height,
-                    template_w: (area as any).template_w || 2475, template_h: (area as any).template_h || 1155,
-                    arc: (area as any).arc,
+                    x: p.area?.x ?? area.x,
+                    y: p.area?.y ?? area.y,
+                    width: p.area?.width ?? area.width,
+                    height: p.area?.height ?? area.height,
+                    template_w: (area as any).template_w || 2475,
+                    template_h: (area as any).template_h || 1155,
+                    arc: (area as any).arc || 1.35,
                 }));
             } else {
                 out.push(await generateMockupLayers(blankImage, layers));

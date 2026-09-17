@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 import { config } from '../../../app/config';
 import { MOCKUP_DIR, UPLOAD_ROOT, publicUrl } from '../../../shared/upload/upload.middleware';
@@ -17,7 +18,13 @@ async function loadImage(url: string): Promise<Buffer> {
         const abs = path.join(UPLOAD_ROOT, url.replace('/uploads/', ''));
         return sharp(abs).toBuffer();
     }
-    const full = url.startsWith('http') ? url : `${config.printerApiUrl}${url}`;
+    if (url.startsWith('/images/')) {
+        const localPath = path.join(process.cwd(), '..', 'frontend', 'public', url);
+        if (fs.existsSync(localPath)) {
+            return sharp(localPath).toBuffer();
+        }
+    }
+    const full = url.startsWith('http') ? url : (url.startsWith('/') ? `http://localhost:5173${url}` : `${config.printerApiUrl}${url}`);
     const res = await fetch(full);
     if (!res.ok) throw new Error(`Không tải được ảnh phôi (${res.status})`);
     return Buffer.from(await res.arrayBuffer());
@@ -32,10 +39,9 @@ export async function generateMockup(
 ): Promise<string> {
     const [blankBuf, designBuf] = await Promise.all([loadImage(blankImageUrl), loadImage(designUrl)]);
 
-    const blank = sharp(blankBuf);
-    const meta = await blank.metadata();
-    const canvasW = meta.width || 800;
-    const canvasH = meta.height || 800;
+    const blank = sharp(blankBuf).resize(800, 800, { fit: 'fill' });
+    const canvasW = 800;
+    const canvasH = 800;
 
     const box = area ?? { x: canvasW * 0.2, y: canvasH * 0.2, width: canvasW * 0.6, height: canvasH * 0.6, key: 'auto' };
     const targetW = Math.max(1, Math.round(box.width * (placement.scale ?? 1)));
@@ -127,17 +133,31 @@ async function layerToPng(layer: Layer): Promise<{ buf: Buffer; w: number; h: nu
 
 export async function generateMockupLayers(blankImageUrl: string, layers: Layer[]): Promise<string> {
     const blankBuf = await loadImage(blankImageUrl);
-    const blank = sharp(blankBuf);
-    const meta = await blank.metadata();
-    const canvasW = meta.width || 800, canvasH = meta.height || 800;
+    const canvasW = 800, canvasH = 800;
+    const blank = sharp(blankBuf).resize(canvasW, canvasH, { fit: 'fill' });
 
     const ops: { input: Buffer; left: number; top: number }[] = [];
     for (const layer of layers) {
         const rendered = await layerToPng(layer);
         if (!rendered) continue;
-        const left = Math.round(Math.max(0, Math.min(canvasW - 1, layer.x)));
-        const top = Math.round(Math.max(0, Math.min(canvasH - 1, layer.y)));
-        ops.push({ input: rendered.buf, left, top });
+
+        let finalBuf = rendered.buf;
+        let rW = rendered.w;
+        let rH = rendered.h;
+
+        // Đảm bảo kích thước overlay không vượt quá khung canvas 800x800
+        if (rW > canvasW || rH > canvasH) {
+            const fitW = Math.min(rW, canvasW);
+            const fitH = Math.min(rH, canvasH);
+            finalBuf = await sharp(finalBuf).resize(fitW, fitH, { fit: 'inside' }).png().toBuffer();
+            const meta = await sharp(finalBuf).metadata();
+            rW = meta.width || fitW;
+            rH = meta.height || fitH;
+        }
+
+        const left = Math.round(Math.max(0, Math.min(canvasW - rW, layer.x)));
+        const top = Math.round(Math.max(0, Math.min(canvasH - rH, layer.y)));
+        ops.push({ input: finalBuf, left, top });
     }
     const outName = `${crypto.randomUUID()}.png`;
     const outAbs = path.join(MOCKUP_DIR, outName);
@@ -156,11 +176,12 @@ async function renderDieline(layers: Layer[], tW: number, tH: number): Promise<B
     for (const layer of layers) {
         const rendered = await layerToPng(layer);
         if (!rendered) continue;
-        ops.push({ input: rendered.buf, left: Math.round(layer.x), top: Math.round(layer.y) });
+        const left = Math.round(Math.max(0, Math.min(tW - 1, layer.x)));
+        const top = Math.round(Math.max(0, Math.min(tH - 1, layer.y)));
+        ops.push({ input: rendered.buf, left, top });
     }
     return base.composite(ops).png().toBuffer();
 }
-
 
 async function cylinderWarp(flat: Buffer, boxW: number, boxH: number, arc: number): Promise<Buffer> {
     const STRIPS = 60;
@@ -181,9 +202,14 @@ async function cylinderWarp(flat: Buffer, boxW: number, boxH: number, arc: numbe
         const top = Math.round((boxH - h) / 2);
         const cropLeft = Math.min(Math.round(u0 * fW), fW - 1);
         const cropW = Math.max(1, Math.round((u1 - u0) * fW));
+
+        const safeW = Math.min(w, Math.max(1, boxW - left));
+        const safeH = Math.min(h, Math.max(1, boxH - top));
+        if (safeW <= 0 || safeH <= 0 || left >= boxW || top >= boxH) continue;
+
         const stripBuf = await sharp(flat)
             .extract({ left: cropLeft, top: 0, width: Math.min(cropW, fW - cropLeft), height: fH })
-            .resize(w, h, { fit: 'fill' })
+            .resize(safeW, safeH, { fit: 'fill' })
             .png().toBuffer();
         strips.push({ input: stripBuf, left, top });
     }
@@ -193,12 +219,74 @@ async function cylinderWarp(flat: Buffer, boxW: number, boxH: number, arc: numbe
 
 export async function generateWrapMockup(blankImageUrl: string, layers: Layer[], area: WrapArea): Promise<string> {
     const blankBuf = await loadImage(blankImageUrl);
-    const dieline = await renderDieline(layers, area.template_w, area.template_h);
-    const warped = await cylinderWarp(dieline, Math.round(area.width), Math.round(area.height), area.arc || 2.3);
+    const canvasW = 800, canvasH = 800;
+    const blank = sharp(blankBuf).resize(canvasW, canvasH, { fit: 'fill' });
+
+    // Kích thước và toạ độ vùng in trên ảnh mockup ly (canvas 800x800)
+    let boxW = Math.round(area.width || 440);
+    let boxH = Math.round(area.height || 340);
+    if (boxW >= canvasW || boxH >= canvasH || boxW <= 50 || boxH <= 50) {
+        boxW = 440;
+        boxH = 340;
+    }
+
+    let left = Math.round(area.x ?? 180);
+    let top = Math.round(area.y ?? 220);
+    if (left >= canvasW || left < 0) left = 180;
+    if (top >= canvasH || top < 0) top = 220;
+    left = Math.min(left, canvasW - boxW);
+    top = Math.min(top, canvasH - boxH);
+
+    // Tạo tấm phẳng 2D chứa các layer thiết kế đúng toạ độ tương đối bên trong vùng in
+    const flatBase = sharp({
+        create: {
+            width: boxW,
+            height: boxH,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 0 }
+        }
+    });
+
+    const ops: { input: Buffer; left: number; top: number }[] = [];
+    for (const layer of layers) {
+        const rendered = await layerToPng(layer);
+        if (!rendered) continue;
+
+        let finalBuf = rendered.buf;
+        let rW = rendered.w;
+        let rH = rendered.h;
+
+        // Đảm bảo kích thước overlay không vượt quá khung vùng in
+        if (rW > boxW || rH > boxH) {
+            const fitW = Math.min(rW, boxW);
+            const fitH = Math.min(rH, boxH);
+            finalBuf = await sharp(finalBuf).resize(fitW, fitH, { fit: 'inside' }).png().toBuffer();
+            const meta = await sharp(finalBuf).metadata();
+            rW = meta.width || fitW;
+            rH = meta.height || fitH;
+        }
+
+        // Toạ độ tương đối của layer bên trong vùng in (area)
+        const relX = Math.round(layer.x - left);
+        const relY = Math.round(layer.y - top);
+        const layerLeft = Math.max(0, Math.min(boxW - rW, relX));
+        const layerTop = Math.max(0, Math.min(boxH - rH, relY));
+
+        ops.push({ input: finalBuf, left: layerLeft, top: layerTop });
+    }
+
+    const flat = ops.length
+        ? await flatBase.composite(ops).png().toBuffer()
+        : await flatBase.png().toBuffer();
+
+    // Uốn cong 3D (Cylinder Warp) tấm phẳng ôm tròn quanh thân ly
+    const arc = area.arc || 1.35;
+    const warped = await cylinderWarp(flat, boxW, boxH, arc);
+
     const outName = `${crypto.randomUUID()}.png`;
     const outAbs = path.join(MOCKUP_DIR, outName);
-    await sharp(blankBuf)
-        .composite([{ input: warped, left: Math.round(area.x), top: Math.round(area.y) }])
+    await blank
+        .composite([{ input: warped, left, top }])
         .png().toFile(outAbs);
     return publicUrl(outAbs);
 }
