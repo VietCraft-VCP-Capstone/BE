@@ -24,7 +24,29 @@ export class CartService {
 
     static async getCart(userId: string) {
         const ownerId = toUserObjectId(userId);
-        await CartService.ensureCart(ownerId);
+        const cart = await CartService.ensureCart(ownerId);
+
+        // Tự động gán biến thể cho các sản phẩm trong giỏ hàng nếu đang thiếu variant_id
+        if (cart && Array.isArray(cart.items)) {
+            let hasModified = false;
+            for (const item of cart.items) {
+                if (!item.variant_id && item.product_id) {
+                    const fallbackVariant = await ProductVariant.findOne({
+                        product_id: item.product_id,
+                        is_active: { $ne: false }
+                    }) || await ProductVariant.findOne({ product_id: item.product_id });
+
+                    if (fallbackVariant) {
+                        item.variant_id = fallbackVariant._id as any;
+                        hasModified = true;
+                    }
+                }
+            }
+            if (hasModified) {
+                await cart.save();
+            }
+        }
+
         return Cart.findOne({ user_id: ownerId })
             .populate(PRODUCT_POPULATE)
             .populate(VARIANT_POPULATE);
@@ -48,13 +70,19 @@ export class CartService {
             variant = await ProductVariant.findOne({ _id: variantId, product_id: product._id });
             if (!variant) throw new Error('Biến thể không thuộc sản phẩm này');
             if (variant.is_active === false) throw new Error('Biến thể đã ngừng bán');
+        } else {
+            // Tự động lấy biến thể đầu tiên còn hoạt động của sản phẩm
+            variant = await ProductVariant.findOne({ product_id: product._id, is_active: { $ne: false } })
+                || await ProductVariant.findOne({ product_id: product._id });
         }
 
         const cart = await CartService.ensureCart(ownerId);
 
+        const targetVariantId = variant ? variant._id.toString() : (variantId || undefined);
+
         const existingIndex = cart.items.findIndex(
             item => item.product_id.toString() === productId &&
-                (variantId ? item.variant_id?.toString() === variantId : !item.variant_id)
+                (targetVariantId ? item.variant_id?.toString() === targetVariantId : !item.variant_id)
         );
 
         const currentQty = existingIndex > -1 ? cart.items[existingIndex].quantity : 0;
@@ -69,7 +97,7 @@ export class CartService {
         } else {
             cart.items.push({
                 product_id: new mongoose.Types.ObjectId(productId),
-                variant_id: variantId ? new mongoose.Types.ObjectId(variantId) : undefined,
+                variant_id: variant ? variant._id : (variantId ? new mongoose.Types.ObjectId(variantId) : undefined),
                 quantity,
                 is_selected: true,
                 custom_notes: customNotes,
