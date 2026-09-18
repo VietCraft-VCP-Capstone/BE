@@ -24,11 +24,12 @@ export const config = {
     // Lưu trữ ảnh seller upload. Thiếu credential -> tự fallback về đĩa local (BE/uploads).
     // Chỉ cần MỘT trong hai: cặp apiKey+apiSecret (signed) hoặc uploadPreset (unsigned).
     cloudinary: {
+        url: process.env.CLOUDINARY_URL || '',
         cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
-        uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || '',
         apiKey: process.env.CLOUDINARY_API_KEY || '',
         apiSecret: process.env.CLOUDINARY_API_SECRET || '',
-        folder: process.env.CLOUDINARY_FOLDER || 'vietcraft/designs',
+        uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || '',
+        folder: process.env.CLOUDINARY_FOLDER || 'vietcraft',
         // Chỉ đổi khi chạy test hoặc đi qua proxy nội bộ. Bỏ trống = gọi thẳng Cloudinary.
         apiBase: process.env.CLOUDINARY_API_BASE || 'https://api.cloudinary.com',
     },

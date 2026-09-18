@@ -4,6 +4,23 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { config } from '../../../app/config';
 import { MOCKUP_DIR, UPLOAD_ROOT, publicUrl } from '../../../shared/upload/upload.middleware';
+import { isCloudinaryEnabled, uploadImage } from '../../../infrastructure/storage/cloudinary.service';
+import { logger } from '../../../shared/utils/logger';
+
+async function saveMockupResult(buffer: Buffer): Promise<string> {
+    if (isCloudinaryEnabled()) {
+        try {
+            const asset = await uploadImage(buffer, { folder: 'mockups', mimetype: 'image/png' });
+            return asset.url;
+        } catch (err: any) {
+            logger.warn(`Cloudinary upload failed for mockup (${err.message}), falling back to local.`);
+        }
+    }
+    const outName = `${crypto.randomUUID()}.png`;
+    const outAbs = path.join(MOCKUP_DIR, outName);
+    await fs.promises.writeFile(outAbs, buffer);
+    return publicUrl(outAbs);
+}
 
 export interface Placement {
     x: number;
@@ -54,10 +71,8 @@ export async function generateMockup(
     const left = Math.round(Math.max(0, Math.min(canvasW - (dMeta.width || 1), box.x + (placement.x || 0))));
     const top = Math.round(Math.max(0, Math.min(canvasH - (dMeta.height || 1), box.y + (placement.y || 0))));
 
-    const outName = `${crypto.randomUUID()}.png`;
-    const outAbs = path.join(MOCKUP_DIR, outName);
-    await blank.composite([{ input: designPng, left, top }]).png().toFile(outAbs);
-    return publicUrl(outAbs);
+    const pngBuf = await blank.composite([{ input: designPng, left, top }]).png().toBuffer();
+    return saveMockupResult(pngBuf);
 }
 
 export interface Layer {
@@ -159,10 +174,8 @@ export async function generateMockupLayers(blankImageUrl: string, layers: Layer[
         const top = Math.round(Math.max(0, Math.min(canvasH - rH, layer.y)));
         ops.push({ input: finalBuf, left, top });
     }
-    const outName = `${crypto.randomUUID()}.png`;
-    const outAbs = path.join(MOCKUP_DIR, outName);
-    await blank.composite(ops).png().toFile(outAbs);
-    return publicUrl(outAbs);
+    const pngBuf = await blank.composite(ops).png().toBuffer();
+    return saveMockupResult(pngBuf);
 }
 
 export interface WrapArea {
@@ -283,19 +296,15 @@ export async function generateWrapMockup(blankImageUrl: string, layers: Layer[],
     const arc = area.arc || 1.35;
     const warped = await cylinderWarp(flat, boxW, boxH, arc);
 
-    const outName = `${crypto.randomUUID()}.png`;
-    const outAbs = path.join(MOCKUP_DIR, outName);
-    await blank
+    const pngBuf = await blank
         .composite([{ input: warped, left, top }])
-        .png().toFile(outAbs);
-    return publicUrl(outAbs);
+        .png().toBuffer();
+    return saveMockupResult(pngBuf);
 }
 
 export async function generateFlatDieline(layers: Layer[], tW: number, tH: number): Promise<string> {
     const buf = await renderDieline(layers, tW, tH);
-    const outName = `${crypto.randomUUID()}.png`;
-    const outAbs = path.join(MOCKUP_DIR, outName);
-    await sharp({ create: { width: tW, height: tH, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
-        .composite([{ input: buf, left: 0, top: 0 }]).png().toFile(outAbs);
-    return publicUrl(outAbs);
+    const pngBuf = await sharp({ create: { width: tW, height: tH, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
+        .composite([{ input: buf, left: 0, top: 0 }]).png().toBuffer();
+    return saveMockupResult(pngBuf);
 }
