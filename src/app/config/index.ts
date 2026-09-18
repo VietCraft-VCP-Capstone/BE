@@ -3,7 +3,6 @@ import { Pool } from 'pg';
 import mongoose from 'mongoose';
 import { createClient } from 'redis';
 import { logger } from '../../shared/utils/logger';
-import { seedDatabase } from '../../shared/utils/seeder';
 
 dotenv.config();
 
@@ -96,7 +95,6 @@ export async function connectMongo() {
             connectTimeoutMS: 8000,
         });
         logger.info('Connected to MongoDB successfully.');
-        await seedDatabase();
     } catch (error: any) {
         logger.warn('Failed to connect to MongoDB: ' + error.message);
         logger.warn('Auth features require MongoDB. Add your IP to Atlas Network Access: https://cloud.mongodb.com');
