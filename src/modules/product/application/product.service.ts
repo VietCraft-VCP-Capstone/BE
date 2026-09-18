@@ -22,6 +22,7 @@ import {
     PaginatedProductsResponseDTO
 } from './product.dto';
 import { logger } from '../../../shared/utils/logger';
+import { cacheService } from '../../../shared/services/cache.service';
 
 function getColorHex(colorName: string): string {
     const lower = (colorName || '').toLowerCase();
@@ -557,18 +558,34 @@ export class ProductsService {
         ));
     }
 
-    static async getAll(filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
-        const base: any = { ...PUBLIC_QUERY };
-
-        if (filter?.sellerId && mongoose.Types.ObjectId.isValid(filter.sellerId)) {
-            const sellerShop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(filter.sellerId) }).lean();
-            if (!sellerShop) return { items: [], total: 0, page: 1, limit: Number(filter?.limit || filter?.pageSize) || 6, totalPages: 0 };
-            base.shop_id = sellerShop._id;
-        } else if (filter?.shopId && mongoose.Types.ObjectId.isValid(filter.shopId)) {
-            base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+    public static async invalidateProductCache(productId?: string): Promise<void> {
+        try {
+            await Promise.all([
+                cacheService.delByPattern('vietcraft:products:list:*'),
+                cacheService.delByPattern('vietcraft:products:related:*'),
+                cacheService.del('vietcraft:shops:featured'),
+                productId ? cacheService.del(`vietcraft:products:detail:${productId}`) : Promise.resolve(),
+            ]);
+        } catch (err: any) {
+            logger.warn(`Failed to invalidate product cache: ${err.message}`);
         }
+    }
 
-        return ProductsService.page(ProductsService.buildQuery(base, filter), filter);
+    static async getAll(filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
+        const cacheKey = `vietcraft:products:list:${cacheService.hashKey(filter)}`;
+        return cacheService.getOrSet(cacheKey, async () => {
+            const base: any = { ...PUBLIC_QUERY };
+
+            if (filter?.sellerId && mongoose.Types.ObjectId.isValid(filter.sellerId)) {
+                const sellerShop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(filter.sellerId) }).lean();
+                if (!sellerShop) return { items: [], total: 0, page: 1, limit: Number(filter?.limit || filter?.pageSize) || 6, totalPages: 0 };
+                base.shop_id = sellerShop._id;
+            } else if (filter?.shopId && mongoose.Types.ObjectId.isValid(filter.shopId)) {
+                base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+            }
+
+            return ProductsService.page(ProductsService.buildQuery(base, filter), filter);
+        }, 120);
     }
 
 
@@ -588,18 +605,27 @@ export class ProductsService {
     static async getById(id: string, opts: { includeHidden?: boolean } = {}): Promise<ProductItemResponseDTO> {
         if (!mongoose.Types.ObjectId.isValid(id)) throw new Error('Không tìm thấy sản phẩm.');
 
-        const query: any = opts.includeHidden
-            ? { _id: new mongoose.Types.ObjectId(id) }
-            : { _id: new mongoose.Types.ObjectId(id), ...PUBLIC_QUERY };
+        const fetchProduct = async () => {
+            const query: any = opts.includeHidden
+                ? { _id: new mongoose.Types.ObjectId(id) }
+                : { _id: new mongoose.Types.ObjectId(id), ...PUBLIC_QUERY };
 
-        const mp = await MongoProduct.findOne(query).lean();
-        if (!mp) throw new Error('Không tìm thấy sản phẩm.');
+            const mp = await MongoProduct.findOne(query).lean();
+            if (!mp) throw new Error('Không tìm thấy sản phẩm.');
 
-        const [variants, shop] = await Promise.all([
-            MongoVariant.find({ product_id: mp._id }).lean(),
-            Shop.findById(mp.shop_id).lean()
-        ]);
-        return mapToProductItemResponse(mp, variants, shop);
+            const [variants, shop] = await Promise.all([
+                MongoVariant.find({ product_id: mp._id }).lean(),
+                Shop.findById(mp.shop_id).lean()
+            ]);
+            return mapToProductItemResponse(mp, variants, shop);
+        };
+
+        if (opts.includeHidden) {
+            return fetchProduct();
+        }
+
+        const cacheKey = `vietcraft:products:detail:${id}`;
+        return cacheService.getOrSet(cacheKey, fetchProduct, 300);
     }
 
     static async getByIds(ids: (string | mongoose.Types.ObjectId)[]): Promise<ProductItemResponseDTO[]> {
@@ -614,31 +640,36 @@ export class ProductsService {
 
     static async getRelated(id: string, category?: string, limit = 4): Promise<ProductItemResponseDTO[]> {
         if (!mongoose.Types.ObjectId.isValid(id)) return [];
-        const self = new mongoose.Types.ObjectId(id);
+        const cacheKey = `vietcraft:products:related:${id}:${category || 'auto'}:${limit}`;
+        return cacheService.getOrSet(cacheKey, async () => {
+            const self = new mongoose.Types.ObjectId(id);
 
-        let cat = category;
-        if (!cat) {
-            const p = await MongoProduct.findById(self).select('categories').lean();
-            cat = p?.categories?.[0];
-        }
+            let cat = category;
+            if (!cat) {
+                const p = await MongoProduct.findById(self).select('categories').lean();
+                cat = p?.categories?.[0];
+            }
 
-        const base: any = { ...PUBLIC_QUERY, listing_status: 'ACTIVE', _id: { $ne: self } };
-        let docs = await MongoProduct.find(cat ? { ...base, categories: cat } : base)
-            .limit(limit).lean();
+            const base: any = { ...PUBLIC_QUERY, listing_status: 'ACTIVE', _id: { $ne: self } };
+            let docs = await MongoProduct.find(cat ? { ...base, categories: cat } : base)
+                .limit(limit).lean();
 
-        if (docs.length < limit) {
-            const extra = await MongoProduct.find({
-                ...base,
-                _id: { $nin: [self, ...docs.map(p => p._id)] }
-            }).limit(limit - docs.length).lean();
-            docs = [...docs, ...extra];
-        }
+            if (docs.length < limit) {
+                const extra = await MongoProduct.find({
+                    ...base,
+                    _id: { $nin: [self, ...docs.map(p => p._id)] }
+                }).limit(limit - docs.length).lean();
+                docs = [...docs, ...extra];
+            }
 
-        return ProductsService.mapMany(docs);
+            return ProductsService.mapMany(docs);
+        }, 600);
     }
 
     static async getFeaturedShops(): Promise<any[]> {
-        return Shop.find().sort({ average_rating: -1, listing_count: -1 }).limit(5).lean();
+        return cacheService.getOrSet('vietcraft:shops:featured', async () => {
+            return Shop.find().sort({ average_rating: -1, listing_count: -1 }).limit(5).lean();
+        }, 600);
     }
 
     private static async createStructured(sellerId: string, payload: any): Promise<ProductItemResponseDTO> {
@@ -698,6 +729,7 @@ export class ProductsService {
         }
 
         await Shop.updateOne({ _id: shop._id }, { $inc: { listing_count: 1 } });
+        await ProductsService.invalidateProductCache(mp._id.toString());
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
 
@@ -797,7 +829,7 @@ export class ProductsService {
             await Tag.updateMany({ _id: { $in: tags.map(t => t._id) } }, { $inc: { product_count: 1 } });
         }
         await Shop.updateOne({ _id: shop._id }, { $inc: { listing_count: 1 } });
-
+        await ProductsService.invalidateProductCache(mp._id.toString());
         logger.info(`Created new product: ${mp._id} (${mp.title})`);
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
@@ -1065,9 +1097,12 @@ export class ProductsService {
             || Array.isArray(payload?.designPlacements)
             || Array.isArray(payload?.variants);
 
-        return isStructured
+        const result = await (isStructured
             ? ProductsService.updateStructured(mp, actor, payload)
-            : ProductsService.updateSimple(mp, actor, payload as Partial<ProductFormDataDTO>);
+            : ProductsService.updateSimple(mp, actor, payload as Partial<ProductFormDataDTO>));
+
+        await ProductsService.invalidateProductCache(id);
+        return result;
     }
 
     static async delete(id: string, actor: ProductActor): Promise<{ success: boolean; message: string }> {
@@ -1083,6 +1118,7 @@ export class ProductsService {
         await MongoVariant.updateMany({ product_id: mp._id }, { $set: { is_active: false } });
         await Shop.updateOne({ _id: mp.shop_id }, { $inc: { listing_count: -1 } });
 
+        await ProductsService.invalidateProductCache(id);
         logger.info(`Soft deleted product: ${id} by ${actor.id}`);
         return { success: true, message: 'Đã xóa sản phẩm thành công.' };
     }
@@ -1097,6 +1133,7 @@ export class ProductsService {
         );
         await MongoVariant.updateMany({ product_id: { $in: scoped } }, { $set: { is_active: false } });
 
+        await ProductsService.invalidateProductCache();
         logger.info(`Batch soft deleted ${result.modifiedCount} products by ${actor.id}`);
         return { success: true, count: result.modifiedCount };
     }
@@ -1111,6 +1148,7 @@ export class ProductsService {
             { $set: { listing_status: mongoStatus } }
         );
 
+        await ProductsService.invalidateProductCache();
         logger.info(`Batch updated listing_status to ${mongoStatus} for ${result.modifiedCount} products by ${actor.id}`);
         return { success: true, count: result.modifiedCount };
     }
@@ -1141,6 +1179,7 @@ export class ProductsService {
         mp.listing_status = 'INACTIVE';
         mp.unpublish_reason = reason;
         await mp.save();
+        await ProductsService.invalidateProductCache(id);
         return ProductsService.getById(id, { includeHidden: true });
     }
 
@@ -1173,6 +1212,7 @@ export class ProductsService {
         mp.unpublish_reason = undefined;
         mp.is_hidden = false;
         await mp.save();
+        await ProductsService.invalidateProductCache(id);
 
         return { product: await ProductsService.getById(id, { includeHidden: true }), warnings };
     }

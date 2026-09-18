@@ -3,7 +3,6 @@ import { Pool } from 'pg';
 import mongoose from 'mongoose';
 import { createClient } from 'redis';
 import { logger } from '../../shared/utils/logger';
-import { seedDatabase } from '../../shared/utils/seeder';
 
 dotenv.config();
 
@@ -12,7 +11,7 @@ export const config = {
     nodeEnv: process.env.NODE_ENV || 'development',
     databaseUrl: process.env.DATABASE_URL || '',
     mongoUri: process.env.MONGO_URI || '',
-    redisUrl: process.env.REDIS_URL || '',
+    redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
     jwtSecret: process.env.JWT_SECRET || '',
     aiAnalyticsUrl: process.env.AI_ANALYTICS_URL || 'http://localhost:8000',
     googleClientId: process.env.GOOGLE_CLIENT_ID || '',
@@ -24,11 +23,12 @@ export const config = {
     // Lưu trữ ảnh seller upload. Thiếu credential -> tự fallback về đĩa local (BE/uploads).
     // Chỉ cần MỘT trong hai: cặp apiKey+apiSecret (signed) hoặc uploadPreset (unsigned).
     cloudinary: {
+        url: process.env.CLOUDINARY_URL || '',
         cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
-        uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || '',
         apiKey: process.env.CLOUDINARY_API_KEY || '',
         apiSecret: process.env.CLOUDINARY_API_SECRET || '',
-        folder: process.env.CLOUDINARY_FOLDER || 'vietcraft/designs',
+        uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || '',
+        folder: process.env.CLOUDINARY_FOLDER || 'vietcraft',
         // Chỉ đổi khi chạy test hoặc đi qua proxy nội bộ. Bỏ trống = gọi thẳng Cloudinary.
         apiBase: process.env.CLOUDINARY_API_BASE || 'https://api.cloudinary.com',
     },
@@ -95,7 +95,6 @@ export async function connectMongo() {
             connectTimeoutMS: 8000,
         });
         logger.info('Connected to MongoDB successfully.');
-        await seedDatabase();
     } catch (error: any) {
         logger.warn('Failed to connect to MongoDB: ' + error.message);
         logger.warn('Auth features require MongoDB. Add your IP to Atlas Network Access: https://cloud.mongodb.com');
@@ -103,30 +102,52 @@ export async function connectMongo() {
 }
 
 // Redis client
+let redisIsReady = false;
+
 export const redisClient = createClient({
     url: config.redisUrl,
     socket: {
+        connectTimeout: 4000,
         reconnectStrategy: (retries) => {
             if (retries > 3) {
-                return false; // stop reconnecting
+                return false; // stop reconnecting after 3 retries
             }
             return 2000; // try reconnecting after 2 seconds
         }
     }
 });
 
+redisClient.on('connect', () => {
+    redisIsReady = true;
+});
+
+redisClient.on('ready', () => {
+    redisIsReady = true;
+});
+
+redisClient.on('end', () => {
+    redisIsReady = false;
+});
+
 redisClient.on('error', (err) => {
-    if (!err.message.includes('Closed') && !err.message.includes('ECONNREFUSED')) {
+    redisIsReady = false;
+    if (!err.message.includes('Closed') && !err.message.includes('ECONNREFUSED') && !err.message.includes('connect ECONNREFUSED')) {
         logger.error('Redis error: ' + err.message);
     }
 });
 
+export function isRedisReady(): boolean {
+    return redisIsReady && Boolean(redisClient.isOpen);
+}
+
 export async function connectRedis() {
     try {
         await redisClient.connect();
-        logger.info('Connected to Redis successfully.');
+        redisIsReady = true;
+        logger.info(`Connected to Redis successfully .`);
     } catch (error: any) {
-        logger.warn('Failed to connect to Redis. Running in demo fallback mode: ' + error.message);
+        redisIsReady = false;
+        logger.warn('Failed to connect to Redis. Running in demo fallback mode (Direct DB): ' + error.message);
     }
 }
 
