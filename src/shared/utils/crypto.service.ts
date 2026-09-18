@@ -1,8 +1,7 @@
 import crypto from 'crypto';
 import { config } from '../../app/config';
 
-// Khóa mã hóa 32 bytes sinh từ JWT_SECRET hoặc fallback
-const RAW_SECRET = process.env.KYC_ENCRYPTION_KEY || config.jwtSecret || 'vietcraft-secret-kyc-aes-256-key-salt';
+const RAW_SECRET = process.env.KYC_ENCRYPTION_KEY || config.jwtSecret || '';
 const ENCRYPTION_KEY = crypto.createHash('sha256').update(RAW_SECRET).digest();
 const ALGORITHM = 'aes-256-cbc';
 const IV_LENGTH = 16;

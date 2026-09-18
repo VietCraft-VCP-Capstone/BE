@@ -6,8 +6,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",
-    "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
-    "clean:mock": "node -r ts-node/register src/shared/utils/clean-mock-data.ts"
+    "dev": "ts-node-dev --respawn --transpile-only src/main.ts"
   },
   "dependencies": {
     "@types/bcryptjs": "^2.4.6",
