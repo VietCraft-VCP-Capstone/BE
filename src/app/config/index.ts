@@ -21,8 +21,8 @@ export const config = {
     mailPass: process.env.MAIL_PASS || '',
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
     printerApiUrl: process.env.PRINTER_API_URL || 'http://localhost:8880',
-    printerApiKey: process.env.PRINTER_API_KEY || 'vietcraft_shop_api_secret_key_2026',
-    printerWebhookSecret: process.env.PRINTER_WEBHOOK_SECRET || 'vietcraft_hmac_webhook_secret_key_2026',
+    printerApiKey: process.env.PRINTER_API_KEY || '',
+    printerWebhookSecret: process.env.PRINTER_WEBHOOK_SECRET || '',
     printerEnv: process.env.PRINTER_ENV || 'sandbox',
     // Lưu trữ ảnh seller upload. Thiếu credential -> tự fallback về đĩa local (BE/uploads).
     // Chỉ cần MỘT trong hai: cặp apiKey+apiSecret (signed) hoặc uploadPreset (unsigned).
