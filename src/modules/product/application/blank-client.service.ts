@@ -146,7 +146,13 @@ let cache: { at: number; data: Blank[] } | null = null;
 const TTL_MS = 1_000;
 
 async function fetchBlanks(): Promise<Blank[]> {
-    const res = await fetch(`${config.printerApiUrl}/api/blanks`, { signal: AbortSignal.timeout(5000) });
+    const res = await fetch(`${config.printerApiUrl}/api/blanks`, {
+        signal: AbortSignal.timeout(5000),
+        headers: {
+            'Accept': 'application/json',
+            ...(config.printerApiKey ? { 'X-API-Key': config.printerApiKey } : {}),
+        },
+    });
     if (!res.ok) throw new Error(`Printer trả về ${res.status}`);
     return res.json() as Promise<Blank[]>;
 }
@@ -156,10 +162,15 @@ export class BlankClient {
         if (cache && Date.now() - cache.at < TTL_MS) return cache.data;
         try {
             const data = await fetchBlanks();
+            if (!Array.isArray(data) || data.length === 0) {
+                // Nếu xưởng in trả về danh sách rỗng -> tự động fallback về bộ phôi dự phòng
+                cache = { at: Date.now(), data: DEFAULT_BLANKS };
+                return DEFAULT_BLANKS;
+            }
             cache = { at: Date.now(), data };
             return data;
         } catch {
-            // Khi xưởng in (port 8880) không chạy hoặc lỗi mạng -> Tự động fallback về bộ phôi mặc định
+            // Khi không fetch được phôi của xưởng (lỗi mạng, timeout hoặc xưởng in chưa bật) -> trả về phôi dự phòng
             cache = { at: Date.now(), data: DEFAULT_BLANKS };
             return DEFAULT_BLANKS;
         }
@@ -167,7 +178,10 @@ export class BlankClient {
 
     static async getBlank(id: string): Promise<Blank | undefined> {
         const blanks = await BlankClient.listBlanks();
-        return blanks.find(b => b._id === id);
+        const found = blanks.find(b => b._id === id);
+        if (found) return found;
+        // Dự phòng: nếu không tìm thấy trong danh sách phôi từ xưởng thì tìm trong phôi dự phòng
+        return DEFAULT_BLANKS.find(b => b._id === id);
     }
 
     static async findVariation(blankId: string, sku: string): Promise<BlankVariation | undefined> {

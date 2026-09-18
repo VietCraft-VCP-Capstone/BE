@@ -20,6 +20,9 @@ export const config = {
     mailPass: process.env.MAIL_PASS || '',
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
     printerApiUrl: process.env.PRINTER_API_URL || 'http://localhost:8880',
+    printerApiKey: process.env.PRINTER_API_KEY || '',
+    printerWebhookSecret: process.env.PRINTER_WEBHOOK_SECRET || '',
+    printerEnv: process.env.PRINTER_ENV || 'sandbox',
     // Lưu trữ ảnh seller upload. Thiếu credential -> tự fallback về đĩa local (BE/uploads).
     // Chỉ cần MỘT trong hai: cặp apiKey+apiSecret (signed) hoặc uploadPreset (unsigned).
     cloudinary: {
@@ -95,6 +98,12 @@ export async function connectMongo() {
             connectTimeoutMS: 8000,
         });
         logger.info('Connected to MongoDB successfully.');
+        if (config.nodeEnv !== 'production' && process.env.ENABLE_SEEDER === 'true') {
+            await seedDatabase();
+        } else {
+            const { backfillProductStatus } = await import('../../shared/utils/seeder');
+            await backfillProductStatus();
+        }
     } catch (error: any) {
         logger.warn('Failed to connect to MongoDB: ' + error.message);
         logger.warn('Auth features require MongoDB. Add your IP to Atlas Network Access: https://cloud.mongodb.com');

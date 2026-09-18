@@ -20,6 +20,9 @@ async function bootstrap() {
 
     await initializeDatabases();
 
+    const { FulfillmentQueueService } = await import('./modules/order/application/fulfillment-queue.service');
+    FulfillmentQueueService.startWorker();
+
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);
         logger.info(` VietCraft Backend Monolith Running...`);
