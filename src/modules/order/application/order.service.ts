@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { Order as OrderModel } from "../infrastructure/models/order.model";
+import { WebhookLog } from "../infrastructure/models/webhook-log.model";
 import { Product } from "../../product/infrastructure/models/product.model";
 import { ProductVariant } from "../../product/infrastructure/models/product-variant.model";
 import { Shop } from "../../product/infrastructure/models/shop.model";
@@ -107,6 +108,7 @@ export class OrdersService {
         retail_price: variant.retail_price,
         image: variant.mockup_image || product.images?.[0],
         design_file_url: designUrl,
+        provider_sku: variant.provider_sku || variant.sku,
         custom_notes: JSON.stringify({
           sku: variant.sku,
           blank_id: product.blank_id,
@@ -316,6 +318,291 @@ export class OrdersService {
     }
 
     return mapDbOrderToResponse(order);
+  }
+
+  static async handlePrinterStatusWebhook(payload: {
+    order_code?: string;
+    vietcraft_order_id?: string;
+    status: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const query: any = {};
+    if (payload.vietcraft_order_id && mongoose.Types.ObjectId.isValid(payload.vietcraft_order_id)) {
+      query._id = new mongoose.Types.ObjectId(payload.vietcraft_order_id);
+    } else if (payload.order_code) {
+      query.order_code = payload.order_code;
+    } else {
+      throw new Error('Thiếu order_code hoặc vietcraft_order_id.');
+    }
+
+    const order = await OrderModel.findOne(query).populate('shop_id');
+    if (!order) throw new Error('Không tìm thấy đơn hàng trên sàn VietCraft.');
+
+    const pStatus = (payload.status || '').toUpperCase();
+    let note = `Xưởng in cập nhật trạng thái: ${pStatus}`;
+    let buyerTitle = `Tiến độ đơn hàng #${order.order_code}`;
+    let buyerContent = '';
+
+    if (pStatus === 'PRINTING') {
+      if (['ORDERED', 'PENDING_DESIGN'].includes(order.order_status)) {
+        order.order_status = 'PROCESSING';
+      }
+      note = 'Xưởng in đã tiếp nhận file thiết kế và đang tiến hành in ấn.';
+      buyerContent = `Đơn hàng #${order.order_code} của bạn đang được xưởng in ấn và sản xuất.`;
+    } else if (pStatus === 'PACKAGED') {
+      note = 'Xưởng in đã hoàn tất in ấn và đang đóng gói sản phẩm.';
+      buyerContent = `Đơn hàng #${order.order_code} của bạn đã in xong và đang được đóng gói chờ giao.`;
+    } else if (pStatus === 'SHIPPED') {
+      order.order_status = 'SHIPPING';
+      note = 'Xưởng in đã hoàn tất đóng gói và xuất kho giao hàng.';
+      buyerContent = `Đơn hàng #${order.order_code} của bạn đã được xuất kho và bàn giao cho đơn vị vận chuyển.`;
+    }
+
+    order.status_history.push({
+      status: order.order_status,
+      changed_at: new Date(),
+      note
+    });
+    await order.save();
+
+    if (buyerContent && order.buyer_id) {
+      try {
+        await notificationService.createNotification({
+          user_id: order.buyer_id.toString(),
+          type: 'ORDER_UPDATE',
+          title: buyerTitle,
+          content: buyerContent,
+          link: `/orders/${order._id}`,
+          metadata: { orderId: order._id.toString(), orderCode: order.order_code, printerStatus: pStatus }
+        });
+      } catch (err: any) {
+        console.error('[PRINTER WEBHOOK] Lỗi gửi thông báo cho Buyer:', err?.message || err);
+      }
+    }
+
+    const shopOwnerId = (order.shop_id as any)?.owner_id;
+    if (shopOwnerId) {
+      try {
+        await notificationService.createNotification({
+          user_id: shopOwnerId.toString(),
+          type: 'ORDER_UPDATE',
+          title: `Xưởng in: Đơn #${order.order_code}`,
+          content: `Xưởng in vừa cập nhật tiến độ đơn #${order.order_code}: ${note}`,
+          link: `/seller/orders`,
+          metadata: { orderId: order._id.toString(), orderCode: order.order_code, printerStatus: pStatus }
+        });
+      } catch (err: any) {
+        console.error('[PRINTER WEBHOOK] Lỗi gửi thông báo cho Seller:', err?.message || err);
+      }
+    }
+
+    return { success: true, message: `Đã cập nhật trạng thái đơn ${order.order_code} sang ${pStatus}` };
+  }
+
+  static async handlePrinterTrackingWebhook(payload: {
+    order_code?: string;
+    vietcraft_order_id?: string;
+    carrier?: string;
+    tracking_number?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const query: any = {};
+    if (payload.vietcraft_order_id && mongoose.Types.ObjectId.isValid(payload.vietcraft_order_id)) {
+      query._id = new mongoose.Types.ObjectId(payload.vietcraft_order_id);
+    } else if (payload.order_code) {
+      query.order_code = payload.order_code;
+    } else {
+      throw new Error('Thiếu order_code hoặc vietcraft_order_id.');
+    }
+
+    const order = await OrderModel.findOne(query).populate('shop_id');
+    if (!order) throw new Error('Không tìm thấy đơn hàng trên sàn VietCraft.');
+
+    const carrier = (payload.carrier || 'GHN').toUpperCase();
+    const tracking = payload.tracking_number || '';
+
+    order.shipping_details = {
+      ...(order.shipping_details || {}),
+      carrier: carrier.toLowerCase(),
+      tracking_number: tracking,
+      shipping_fee: order.shipping_details?.shipping_fee || (mongoose.Types.Decimal128.fromString('0.0'))
+    };
+
+    order.order_status = 'SHIPPING';
+    order.status_history.push({
+      status: 'SHIPPING',
+      changed_at: new Date(),
+      note: `Xưởng in đã xuất kho qua hãng ${carrier}, mã vận đơn: ${tracking}`
+    });
+    await order.save();
+
+    if (order.buyer_id) {
+      try {
+        await notificationService.createNotification({
+          user_id: order.buyer_id.toString(),
+          type: 'ORDER_UPDATE',
+          title: `Đơn hàng #${order.order_code} đang được giao`,
+          content: `Đơn hàng #${order.order_code} đã bàn giao cho ${carrier} với mã vận đơn ${tracking}.`,
+          link: `/orders/${order._id}`,
+          metadata: { orderId: order._id.toString(), orderCode: order.order_code, carrier, tracking }
+        });
+      } catch (err: any) {
+        console.error('[TRACKING WEBHOOK] Lỗi gửi thông báo cho Buyer:', err?.message || err);
+      }
+    }
+
+    const shopOwnerId = (order.shop_id as any)?.owner_id;
+    if (shopOwnerId) {
+      try {
+        await notificationService.createNotification({
+          user_id: shopOwnerId.toString(),
+          type: 'ORDER_UPDATE',
+          title: `Đơn #${order.order_code} đã xuất kho`,
+          content: `Đơn hàng #${order.order_code} đã được xưởng in giao cho ${carrier}, mã vận đơn: ${tracking}.`,
+          link: `/seller/orders`,
+          metadata: { orderId: order._id.toString(), orderCode: order.order_code, carrier, tracking }
+        });
+      } catch (err: any) {
+        console.error('[TRACKING WEBHOOK] Lỗi gửi thông báo cho Seller:', err?.message || err);
+      }
+    }
+
+    return { success: true, message: `Đã cập nhật mã vận đơn ${tracking} (${carrier}) cho đơn ${order.order_code}` };
+  }
+
+  static async handleProviderWebhook(
+    payload: {
+      order_code?: string;
+      vietcraft_order_id?: string;
+      supplier_order_id?: string;
+      status?: string;
+      carrier?: string;
+      tracking_number?: string;
+      event?: string;
+      note?: string;
+    },
+    headers: any = {},
+    ip = ''
+  ): Promise<{ success: boolean; message: string }> {
+    const query: any = {};
+    if (payload.vietcraft_order_id && mongoose.Types.ObjectId.isValid(payload.vietcraft_order_id)) {
+      query._id = new mongoose.Types.ObjectId(payload.vietcraft_order_id);
+    } else if (payload.order_code) {
+      query.order_code = payload.order_code;
+    } else if (payload.supplier_order_id) {
+      query.supplier_order_id = payload.supplier_order_id;
+    } else {
+      throw new Error('Thiếu thông tin định danh đơn hàng (order_code, vietcraft_order_id hoặc supplier_order_id).');
+    }
+
+    const order = await OrderModel.findOne(query).populate('shop_id');
+    if (!order) {
+      throw new Error(`Không tìm thấy đơn hàng trên sàn VietCraft với điều kiện: ${JSON.stringify(query)}`);
+    }
+
+    const pStatus = (payload.status || '').toUpperCase();
+    const carrier = payload.carrier ? payload.carrier.toUpperCase() : undefined;
+    const tracking = payload.tracking_number || '';
+
+    if (payload.supplier_order_id && !order.supplier_order_id) {
+      order.supplier_order_id = payload.supplier_order_id;
+    }
+
+    let statusNote = payload.note || `Xưởng in cập nhật trạng thái: ${pStatus}`;
+    let buyerTitle = `Cập nhật đơn hàng #${order.order_code}`;
+    let buyerContent = '';
+
+    if (pStatus === 'RECEIVED') {
+      order.fulfillment_status = 'RECEIVED';
+      statusNote = 'Xưởng in đã tiếp nhận đơn hàng vào quy trình sản xuất.';
+      buyerContent = `Đơn hàng #${order.order_code} đã được chuyển tới xưởng in và chuẩn bị phôi.`;
+    } else if (pStatus === 'PRINTING') {
+      order.fulfillment_status = 'PRINTING';
+      if (['ORDERED', 'PENDING_DESIGN'].includes(order.order_status)) {
+        order.order_status = 'PROCESSING';
+      }
+      statusNote = 'Xưởng in đang tiến hành in ấn sản phẩm.';
+      buyerContent = `Đơn hàng #${order.order_code} của bạn đang được xưởng in ấn theo bản vẽ.`;
+    } else if (pStatus === 'PACKAGED') {
+      order.fulfillment_status = 'PACKAGED';
+      statusNote = 'Xưởng in đã hoàn tất in ấn và đang đóng gói.';
+      buyerContent = `Đơn hàng #${order.order_code} đã in xong và đang được đóng gói chờ xuất kho.`;
+    } else if (pStatus === 'SHIPPED') {
+      order.fulfillment_status = 'SHIPPED';
+      order.order_status = 'SHIPPING';
+      statusNote = `Xưởng in đã xuất kho và giao cho hãng vận chuyển${carrier ? ` ${carrier}` : ''}${tracking ? ` (Mã: ${tracking})` : ''}.`;
+      buyerContent = `Đơn hàng #${order.order_code} đã xuất kho và đang được giao đến bạn.`;
+    } else if (pStatus === 'CANCELLED') {
+      order.fulfillment_status = 'CANCELLED';
+      statusNote = 'Xưởng in đã hủy sản xuất đơn hàng.';
+    }
+
+    if (tracking) {
+      order.shipping_details = {
+        ...(order.shipping_details || {}),
+        carrier: (carrier || order.shipping_details?.carrier || 'GHN').toLowerCase(),
+        tracking_number: tracking,
+        shipping_fee: order.shipping_details?.shipping_fee || (mongoose.Types.Decimal128.fromString('0.0'))
+      };
+      order.order_status = 'SHIPPING';
+      order.fulfillment_status = 'SHIPPED';
+    }
+
+    order.status_history.push({
+      status: order.order_status,
+      changed_at: new Date(),
+      note: statusNote
+    });
+
+    await order.save();
+
+    await WebhookLog.create({
+      provider: 'PRINTING_SHOP',
+      event_type: payload.event || pStatus || (tracking ? 'TRACKING_UPDATE' : 'STATUS_UPDATE'),
+      order_id: order._id,
+      order_code: order.order_code,
+      supplier_order_id: order.supplier_order_id,
+      payload,
+      headers,
+      signature_valid: true,
+      status: 'SUCCESS',
+      ip_address: ip,
+      processed_at: new Date()
+    }).catch(err => console.error('[WEBHOOK LOG ERROR]', err));
+
+    if (buyerContent && order.buyer_id) {
+      try {
+        await notificationService.createNotification({
+          user_id: order.buyer_id.toString(),
+          type: 'ORDER_UPDATE',
+          title: buyerTitle,
+          content: buyerContent,
+          link: `/orders/${order._id}`,
+          metadata: { orderId: order._id.toString(), orderCode: order.order_code, fulfillmentStatus: order.fulfillment_status, tracking }
+        });
+      } catch (err: any) {
+        console.error('[WEBHOOK NOTIFY] Lỗi gửi thông báo cho Buyer:', err?.message || err);
+      }
+    }
+
+    const shopOwnerId = (order.shop_id as any)?.owner_id;
+    if (shopOwnerId) {
+      try {
+        await notificationService.createNotification({
+          user_id: shopOwnerId.toString(),
+          type: 'ORDER_UPDATE',
+          title: `Xưởng in: Đơn #${order.order_code}`,
+          content: `Xưởng in vừa cập nhật tiến độ đơn #${order.order_code}: ${statusNote}`,
+          link: `/seller/orders`,
+          metadata: { orderId: order._id.toString(), orderCode: order.order_code, fulfillmentStatus: order.fulfillment_status, tracking }
+        });
+      } catch (err: any) {
+        console.error('[WEBHOOK NOTIFY] Lỗi gửi thông báo cho Seller:', err?.message || err);
+      }
+    }
+
+    return {
+      success: true,
+      message: `Đã cập nhật trạng thái đơn ${order.order_code} thành ${order.fulfillment_status || order.order_status}`
+    };
   }
 }
 export default OrdersService;

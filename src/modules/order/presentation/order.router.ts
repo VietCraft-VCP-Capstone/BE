@@ -49,6 +49,42 @@ router.get('/', authenticate, async (req: AuthenticatedRequest, res) => {
     }
 });
 
+import { verifyPrinterWebhook } from './middlewares/verify-printer-webhook.middleware';
+
+router.post('/webhook/provider', verifyPrinterWebhook, async (req: Request, res: Response) => {
+    try {
+        const clientIp = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '');
+        logger.info(`[PROVIDER WEBHOOK] Nhận payload: ${JSON.stringify(req.body)}`);
+        const result = await OrdersService.handleProviderWebhook(req.body, req.headers, clientIp);
+        res.json(result);
+    } catch (error: any) {
+        logger.error(`[PROVIDER WEBHOOK ERROR] ${error.message}`);
+        res.status(400).json({ error: error.message });
+    }
+});
+
+router.post('/webhook/printer', verifyPrinterWebhook, async (req: Request, res: Response) => {
+    try {
+        logger.info(`[PRINTER WEBHOOK] Nhận callback trạng thái: ${JSON.stringify(req.body)}`);
+        const result = await OrdersService.handlePrinterStatusWebhook(req.body);
+        res.json(result);
+    } catch (error: any) {
+        logger.error(`[PRINTER WEBHOOK ERROR] ${error.message}`);
+        res.status(400).json({ error: error.message });
+    }
+});
+
+router.post('/webhook/tracking', verifyPrinterWebhook, async (req: Request, res: Response) => {
+    try {
+        logger.info(`[TRACKING WEBHOOK] Nhận callback vận đơn: ${JSON.stringify(req.body)}`);
+        const result = await OrdersService.handlePrinterTrackingWebhook(req.body);
+        res.json(result);
+    } catch (error: any) {
+        logger.error(`[TRACKING WEBHOOK ERROR] ${error.message}`);
+        res.status(400).json({ error: error.message });
+    }
+});
+
 router.get('/:id', authenticate, async (req: AuthenticatedRequest, res) => {
     try {
         const buyerId = req.user!.id;

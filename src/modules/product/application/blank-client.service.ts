@@ -22,7 +22,13 @@ let cache: { at: number; data: Blank[] } | null = null;
 const TTL_MS = 60_000;
 
 async function fetchBlanks(): Promise<Blank[]> {
-    const res = await fetch(`${config.printerApiUrl}/api/blanks`, { signal: AbortSignal.timeout(5000) });
+    const res = await fetch(`${config.printerApiUrl}/api/blanks`, {
+        signal: AbortSignal.timeout(5000),
+        headers: {
+            'Accept': 'application/json',
+            'X-API-Key': config.printerApiKey || '',
+        },
+    });
     if (!res.ok) throw new Error(`Printer trả về ${res.status}`);
     return res.json() as Promise<Blank[]>;
 }
