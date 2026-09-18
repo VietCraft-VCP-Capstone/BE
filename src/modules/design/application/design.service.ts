@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { Design } from '../infrastructure/models/design.model';
 import { publicUrl, resolveUploadPath, DESIGN_DIR } from '../../../shared/upload/upload.middleware';
-import { isCloudinaryEnabled, uploadImage } from '../../../infrastructure/storage/cloudinary.service';
+import { isCloudinaryEnabled, uploadImage, deleteImage } from '../../../infrastructure/storage/cloudinary.service';
 import { logger } from '../../../shared/utils/logger';
 
 export class ForbiddenError extends Error { }
@@ -38,7 +38,7 @@ export class DesignService {
         if (isCloudinaryEnabled()) {
             const buffer = Buffer.isBuffer(source) ? source : await fs.promises.readFile(source);
             try {
-                const asset = await uploadImage(buffer, { filename: file.originalname, mimetype: file.mimetype });
+                const asset = await uploadImage(buffer, { folder: 'designs', filename: file.originalname, mimetype: file.mimetype });
                 await cleanupLocal();
                 fileUrl = asset.url;
                 storage = 'cloudinary';
@@ -80,6 +80,9 @@ export class DesignService {
         const isAdmin = String(role || '').toLowerCase() === 'admin';
         if (!isAdmin && design.seller_id.toString() !== sellerId) {
             throw new ForbiddenError('Không thể xóa thiết kế của người khác');
+        }
+        if (design.storage === 'cloudinary' && design.public_id) {
+            deleteImage(design.public_id).catch(() => { });
         }
         const abs = resolveUploadPath(design.file_url);
         if (abs) fs.promises.unlink(abs).catch(() => { });

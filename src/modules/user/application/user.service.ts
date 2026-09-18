@@ -4,6 +4,8 @@ import { Order } from '../../order/infrastructure/models/order.model';
 import { Wishlist } from '../../product/infrastructure/models/wishlist.model';
 import { ShopFollower } from '../../product/infrastructure/models/shop-follower.model';
 import mongoose from 'mongoose';
+import { isCloudinaryEnabled, uploadImage } from '../../../infrastructure/storage/cloudinary.service';
+import { logger } from '../../../shared/utils/logger';
 
 const EDITABLE_PROFILE_FIELDS = ['full_name', 'phone', 'avatar', 'identity_card_number', 'tax_code', 'notification_settings'] as const;
 
@@ -53,6 +55,20 @@ export class UserService {
         }
 
         const safePayload = pick<Record<string, any>>(payload, EDITABLE_PROFILE_FIELDS);
+
+        if (safePayload.avatar && typeof safePayload.avatar === 'string' && safePayload.avatar.startsWith('data:image/')) {
+            if (isCloudinaryEnabled()) {
+                try {
+                    const asset = await uploadImage(safePayload.avatar, {
+                        folder: 'avatars',
+                        transformation: [{ width: 400, height: 400, crop: 'fill', gravity: 'face' }]
+                    });
+                    safePayload.avatar = asset.url;
+                } catch (e: any) {
+                    logger.warn('Failed to upload base64 avatar to Cloudinary in updateProfile: ' + e.message);
+                }
+            }
+        }
 
         const user = await User.findByIdAndUpdate(
             userId,

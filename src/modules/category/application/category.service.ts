@@ -10,12 +10,20 @@ import {
     ICategoryService,
     PaginatedCategoryTree,
 } from '../types';
+import { cacheService } from '../../../shared/services/cache.service';
 
 function escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 class CategoryService implements ICategoryService {
+
+    private async invalidateCache() {
+        await Promise.all([
+            cacheService.delByPattern('vietcraft:categories:*'),
+            cacheService.delByPattern('vietcraft:products:*'),
+        ]);
+    }
 
     async listCategories(opts: CategoryListOptions, params: PageParams): Promise<Paginated<any>> {
         const query = this.buildQuery(opts);
@@ -31,20 +39,25 @@ class CategoryService implements ICategoryService {
     }
 
     async listCategoryTree(opts: CategoryListOptions, params: PageParams): Promise<PaginatedCategoryTree> {
-        const all = await Category.find().sort({ sort_order: 1, name: 1 }).lean();
-        const matches = this.buildMatcher(opts);
-        const tree = buildCategoryTree(all);
-        const filtered = matches ? filterCategoryTree(tree, matches) : tree;
-        return { ...paginateArray(filtered, params), totalNodes: countCategoryNodes(filtered) };
+        const cacheKey = `vietcraft:categories:tree:${cacheService.hashKey({ opts, params })}`;
+        return cacheService.getOrSet(cacheKey, async () => {
+            const all = await Category.find().sort({ sort_order: 1, name: 1 }).lean();
+            const matches = this.buildMatcher(opts);
+            const tree = buildCategoryTree(all);
+            const filtered = matches ? filterCategoryTree(tree, matches) : tree;
+            return { ...paginateArray(filtered, params), totalNodes: countCategoryNodes(filtered) };
+        }, 600);
     }
 
     async getCategoryStats(): Promise<CategoryStats> {
-        const [total, active, roots] = await Promise.all([
-            Category.countDocuments({}),
-            Category.countDocuments({ is_active: true }),
-            Category.countDocuments({ parent_id: null }),
-        ]);
-        return { total, active, hidden: total - active, roots };
+        return cacheService.getOrSet('vietcraft:categories:stats', async () => {
+            const [total, active, roots] = await Promise.all([
+                Category.countDocuments({}),
+                Category.countDocuments({ is_active: true }),
+                Category.countDocuments({ parent_id: null }),
+            ]);
+            return { total, active, hidden: total - active, roots };
+        }, 300);
     }
 
     async listOptions(): Promise<any[]> {
@@ -96,12 +109,16 @@ class CategoryService implements ICategoryService {
             sort_order: data.sort_order ?? 0,
             is_active: data.is_active ?? true,
         });
-        return doc.save();
+        const saved = await doc.save();
+        await this.invalidateCache();
+        return saved;
     }
 
     async updateCategory(id: string, data: any): Promise<any | null> {
         if (data.name && !data.slug) data.slug = generateSlug(data.name);
-        return Category.findByIdAndUpdate(id, data, { new: true }).lean();
+        const updated = await Category.findByIdAndUpdate(id, data, { new: true }).lean();
+        await this.invalidateCache();
+        return updated;
     }
 
     async deleteCategory(id: string): Promise<boolean> {
@@ -119,14 +136,19 @@ class CategoryService implements ICategoryService {
             }
         }
         const result = await Category.findByIdAndDelete(id);
+        if (result) {
+            await this.invalidateCache();
+        }
         return !!result;
     }
 
     async listActive(): Promise<any[]> {
-        return Category.find({ is_active: true })
-            .sort({ sort_order: 1, name: 1 })
-            .select('name slug _id')
-            .lean();
+        return cacheService.getOrSet('vietcraft:categories:active', async () => {
+            return Category.find({ is_active: true })
+                .sort({ sort_order: 1, name: 1 })
+                .select('name slug _id')
+                .lean();
+        }, 1800);
     }
 }
 export const categoryService: ICategoryService = new CategoryService();

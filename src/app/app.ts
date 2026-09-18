@@ -6,6 +6,8 @@ import { errorHandler } from './middleware/error.middleware';
 import { config } from './config';
 import router from './routes';
 
+import { cacheService } from '../shared/services/cache.service';
+
 const app = express();
 
 app.disable('x-powered-by');
@@ -47,7 +49,14 @@ app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 app.use('/images', express.static(path.resolve(process.cwd(), '..', 'frontend', 'public', 'images')));
 
 app.use('/health', (req, res) => {
-    res.json({ status: 'ok', service: 'backend-core', timestamp: new Date() });
+    res.json({
+        status: 'ok',
+        service: 'backend-core',
+        timestamp: new Date(),
+        redis: {
+            ready: cacheService.isReady(),
+        }
+    });
 });
 
 app.use('/api', router);
