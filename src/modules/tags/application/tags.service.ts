@@ -4,6 +4,7 @@ import { Product } from '../../product/infrastructure/models/product.model';
 import { generateSlug } from '../../../shared/utils/slug';
 import { PageParams, Paginated, clampPage, paginate } from '../../../shared/utils/pagination';
 import { ITagsService, TagListOptions, TagStats } from '../types';
+import { cacheService } from '../../../shared/services/cache.service';
 
 function escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -12,6 +13,13 @@ function escapeRegex(value: string): string {
 const APPROVED_ONLY = { status: { $ne: 'pending' } } as const;
 
 class TagsService implements ITagsService {
+    private async invalidateCache() {
+        await Promise.all([
+            cacheService.delByPattern('vietcraft:tags:*'),
+            cacheService.delByPattern('vietcraft:products:*'),
+        ]);
+    }
+
     async listTags(opts: TagListOptions, params: PageParams): Promise<Paginated<any>> {
         const query: Record<string, any> = { ...APPROVED_ONLY };
         const search = opts.search?.trim();
@@ -33,22 +41,24 @@ class TagsService implements ITagsService {
     }
 
     async getTagStats(): Promise<TagStats> {
-        const [agg, pending] = await Promise.all([
-            Tag.aggregate([
-                { $match: APPROVED_ONLY },
-                {
-                    $group: {
-                        _id: null,
-                        total: { $sum: 1 },
-                        tagged: { $sum: { $ifNull: ['$product_count', 0] } },
-                        unused: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$product_count', 0] }, 0] }, 0, 1] } },
+        return cacheService.getOrSet('vietcraft:tags:stats', async () => {
+            const [agg, pending] = await Promise.all([
+                Tag.aggregate([
+                    { $match: APPROVED_ONLY },
+                    {
+                        $group: {
+                            _id: null,
+                            total: { $sum: 1 },
+                            tagged: { $sum: { $ifNull: ['$product_count', 0] } },
+                            unused: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$product_count', 0] }, 0] }, 0, 1] } },
+                        },
                     },
-                },
-            ]),
-            Tag.countDocuments({ status: 'pending' }),
-        ]);
-        const row = agg[0] || { total: 0, tagged: 0, unused: 0 };
-        return { total: row.total, pending, tagged: row.tagged, unused: row.unused };
+                ]),
+                Tag.countDocuments({ status: 'pending' }),
+            ]);
+            const row = agg[0] || { total: 0, tagged: 0, unused: 0 };
+            return { total: row.total, pending, tagged: row.tagged, unused: row.unused };
+        }, 300);
     }
 
     async getTagById(id: string): Promise<any | null> {
@@ -62,12 +72,16 @@ class TagsService implements ITagsService {
             color: data.color || '#007700',
             product_count: 0,
         });
-        return doc.save();
+        const saved = await doc.save();
+        await this.invalidateCache();
+        return saved;
     }
 
     async updateTag(id: string, data: any): Promise<any | null> {
         if (data.name && !data.slug) data.slug = generateSlug(data.name);
-        return Tag.findByIdAndUpdate(id, data, { new: true }).lean();
+        const updated = await Tag.findByIdAndUpdate(id, data, { new: true }).lean();
+        await this.invalidateCache();
+        return updated;
     }
 
     async deleteTag(id: string): Promise<boolean> {
@@ -77,6 +91,9 @@ class TagsService implements ITagsService {
             throw new Error(`Cannot delete tag in use by ${inUse} product(s). Detach it first.`);
         }
         const result = await Tag.findByIdAndDelete(id);
+        if (result) {
+            await this.invalidateCache();
+        }
         return !!result;
     }
 
@@ -89,7 +106,9 @@ class TagsService implements ITagsService {
     }
 
     async approveTag(id: string): Promise<any | null> {
-        return Tag.findByIdAndUpdate(id, { status: 'active' }, { new: true }).lean();
+        const result = await Tag.findByIdAndUpdate(id, { status: 'active' }, { new: true }).lean();
+        await this.invalidateCache();
+        return result;
     }
 
     async rejectTag(id: string): Promise<boolean> {
@@ -100,6 +119,9 @@ class TagsService implements ITagsService {
             { $pull: { tag_ids: id, tags: tag.name } }
         );
         const result = await Tag.findByIdAndDelete(id);
+        if (result) {
+            await this.invalidateCache();
+        }
         return !!result;
     }
 
@@ -119,6 +141,7 @@ class TagsService implements ITagsService {
         if (!alreadyLinked) {
             await Tag.findByIdAndUpdate(tagId, { $inc: { product_count: 1 } });
         }
+        await this.invalidateCache();
     }
 
     async detachTagFromProduct(tagId: string, productId: string): Promise<void> {
@@ -135,13 +158,16 @@ class TagsService implements ITagsService {
         if (result.modifiedCount > 0) {
             await Tag.updateOne({ _id: tagId, product_count: { $gt: 0 } }, { $inc: { product_count: -1 } });
         }
+        await this.invalidateCache();
     }
 
     async listApproved(): Promise<any[]> {
-        return Tag.find(APPROVED_ONLY)
-            .sort({ name: 1 })
-            .select('name slug color _id')
-            .lean();
+        return cacheService.getOrSet('vietcraft:tags:approved', async () => {
+            return Tag.find(APPROVED_ONLY)
+                .sort({ name: 1 })
+                .select('name slug color _id')
+                .lean();
+        }, 1800);
     }
 }
 
