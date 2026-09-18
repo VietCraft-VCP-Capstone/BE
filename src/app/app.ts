@@ -44,6 +44,7 @@ app.use(requestLogger);
 
 // Ảnh design/mockup lưu local (P3/P4). ponytail: static serve, đổi sang CDN sau.
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
+app.use('/images', express.static(path.resolve(process.cwd(), '..', 'frontend', 'public', 'images')));
 
 app.use('/health', (req, res) => {
     res.json({ status: 'ok', service: 'backend-core', timestamp: new Date() });
