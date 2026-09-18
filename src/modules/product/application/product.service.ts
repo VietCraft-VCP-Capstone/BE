@@ -23,6 +23,7 @@ import {
 } from './product.dto';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
+import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
 
 function getColorHex(colorName: string): string {
     const lower = (colorName || '').toLowerCase();
@@ -628,6 +629,26 @@ export class ProductsService {
         return cacheService.getOrSet(cacheKey, fetchProduct, 300);
     }
 
+    public static async sanitizeImages(images: string[]): Promise<string[]> {
+        if (!Array.isArray(images) || images.length === 0) return [];
+        const result: string[] = [];
+        for (const img of images) {
+            if (img && typeof img === 'string' && img.startsWith('data:image')) {
+                if (isCloudinaryEnabled()) {
+                    try {
+                        const uploaded = await uploadImage(img, { folder: 'products' });
+                        result.push(uploaded.url);
+                        continue;
+                    } catch (e: any) {
+                        logger.warn('Failed to auto-upload base64 image to Cloudinary: ' + e.message);
+                    }
+                }
+            }
+            if (img) result.push(img);
+        }
+        return result;
+    }
+
     static async getByIds(ids: (string | mongoose.Types.ObjectId)[]): Promise<ProductItemResponseDTO[]> {
         if (!ids || ids.length === 0) return [];
         const validIds = ids
@@ -701,6 +722,11 @@ export class ProductsService {
                 })),
             };
         }
+
+        if (payload.thumbnail && images.includes(payload.thumbnail)) {
+            images = [payload.thumbnail, ...images.filter((img: string) => img !== payload.thumbnail)];
+        }
+        images = await ProductsService.sanitizeImages(images);
 
         const mp = await MongoProduct.create({
             shop_id: shop._id,
@@ -796,9 +822,14 @@ export class ProductsService {
         const shop = await ProductsService.resolveShop(sellerId);
         const slug = await ProductsService.uniqueSlug(title);
 
-        const images = payload.images && payload.images.length > 0
-            ? payload.images
+        let rawImages = payload.images && payload.images.length > 0
+            ? [...payload.images]
             : (payload.thumbnail ? [payload.thumbnail] : []);
+        const targetCover = payload.thumbnail || rawImages[0];
+        if (targetCover && rawImages.includes(targetCover)) {
+            rawImages = [targetCover, ...rawImages.filter(img => img !== targetCover)];
+        }
+        const images = await ProductsService.sanitizeImages(rawImages);
 
         const mp = await MongoProduct.create({
             shop_id: shop._id,
@@ -997,7 +1028,16 @@ export class ProductsService {
             mp.slug = await ProductsService.uniqueSlug(data.title, id);
         }
         if (payload.description !== undefined) mp.description = data.description;
-        if (payload.images !== undefined) mp.images = data.images;
+        if (payload.images !== undefined) {
+            let imgs = [...data.images];
+            const targetCover = payload.thumbnail || imgs[0];
+            if (targetCover && imgs.includes(targetCover)) {
+                imgs = [targetCover, ...imgs.filter(img => img !== targetCover)];
+            }
+            mp.images = await ProductsService.sanitizeImages(imgs);
+        } else if (payload.thumbnail && Array.isArray(mp.images) && mp.images.includes(payload.thumbnail)) {
+            mp.images = [payload.thumbnail, ...mp.images.filter((img: string) => img !== payload.thumbnail)];
+        }
         if (payload.categoryId !== undefined && data.category) {
             mp.categories = [data.category.name];
             mp.category_ids = [data.category._id];
@@ -1053,9 +1093,18 @@ export class ProductsService {
             mp.listing_status = payload.status === 'OUT_OF_STOCK' ? 'ACTIVE' : payload.status;
         }
         if (payload.images && payload.images.length > 0) {
-            mp.images = payload.images;
+            let rawImages = [...payload.images];
+            const targetCover = payload.thumbnail || rawImages[0];
+            if (targetCover && rawImages.includes(targetCover)) {
+                rawImages = [targetCover, ...rawImages.filter(img => img !== targetCover)];
+            }
+            mp.images = await ProductsService.sanitizeImages(rawImages);
         } else if (payload.thumbnail) {
-            mp.images = [payload.thumbnail];
+            if (Array.isArray(mp.images) && mp.images.includes(payload.thumbnail)) {
+                mp.images = [payload.thumbnail, ...mp.images.filter((img: string) => img !== payload.thumbnail)];
+            } else {
+                mp.images = await ProductsService.sanitizeImages([payload.thumbnail]);
+            }
         }
         await mp.save();
 

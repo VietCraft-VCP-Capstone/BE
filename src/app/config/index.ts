@@ -98,12 +98,6 @@ export async function connectMongo() {
             connectTimeoutMS: 8000,
         });
         logger.info('Connected to MongoDB successfully.');
-        if (config.nodeEnv !== 'production' && process.env.ENABLE_SEEDER === 'true') {
-            await seedDatabase();
-        } else {
-            const { backfillProductStatus } = await import('../../shared/utils/seeder');
-            await backfillProductStatus();
-        }
     } catch (error: any) {
         logger.warn('Failed to connect to MongoDB: ' + error.message);
         logger.warn('Auth features require MongoDB. Add your IP to Atlas Network Access: https://cloud.mongodb.com');
