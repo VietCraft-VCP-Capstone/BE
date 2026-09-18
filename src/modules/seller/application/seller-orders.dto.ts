@@ -33,6 +33,8 @@ export interface SellerOrderDTO {
     id: string;
     orderCode: string;
     status: SellerOrderStatus;
+    fulfillmentStatus?: string;
+    supplierOrderId?: string;
     paymentStatus: 'PENDING' | 'PAID' | 'REFUNDED';
     paymentMethod: 'VNPAY' | 'MOMO' | 'COD';
     createdAt: string;
@@ -130,6 +132,8 @@ export function mapDbOrderToSellerDTO(dbOrder: any): SellerOrderDTO {
         id: dbOrder.order_code,
         orderCode: dbOrder.order_code,
         status: dbOrder.order_status,
+        fulfillmentStatus: dbOrder.fulfillment_status,
+        supplierOrderId: dbOrder.supplier_order_id,
         paymentStatus: dbOrder.payment_status,
         paymentMethod: dbOrder.payment_method,
         createdAt: iso(dbOrder.created_at),

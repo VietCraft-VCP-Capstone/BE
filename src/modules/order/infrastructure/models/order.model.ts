@@ -27,6 +27,7 @@ export interface IOrderItem {
     image?: string;
     design_file_url?: string;
     custom_notes?: string;
+    provider_sku?: string;
 }
 
 export interface IFinancialBreakdown {
@@ -52,6 +53,8 @@ export interface IOrder extends Document {
     order_status: 'ORDERED' | 'PENDING_DESIGN' | 'PROCESSING' | 'SHIPPING' | 'DELIVERED' | 'CANCELLED';
     shipping_address: IShippingAddress;
     shipping_details: IShippingDetails;
+    supplier_order_id?: string;
+    fulfillment_status?: 'UNFULFILLED' | 'QUEUED' | 'SUBMITTED' | 'RECEIVED' | 'PRINTING' | 'PACKAGED' | 'SHIPPED' | 'FAILED' | 'CANCELLED';
     items: IOrderItem[];
     financial_breakdown: IFinancialBreakdown;
     status_history: IStatusHistory[];
@@ -86,7 +89,8 @@ const OrderItemSchema = new Schema<IOrderItem>({
     retail_price: { type: Schema.Types.Decimal128, required: true },
     image: { type: String },
     design_file_url: { type: String },
-    custom_notes: { type: String }
+    custom_notes: { type: String },
+    provider_sku: { type: String, trim: true }
 }, { _id: false });
 
 const FinancialBreakdownSchema = new Schema<IFinancialBreakdown>({
@@ -121,6 +125,13 @@ const OrderSchema = new Schema<IOrder>({
     },
     shipping_address: { type: ShippingAddressSchema, required: true },
     shipping_details: { type: ShippingDetailsSchema, required: true },
+    supplier_order_id: { type: String, index: true },
+    fulfillment_status: {
+        type: String,
+        enum: ['UNFULFILLED', 'QUEUED', 'SUBMITTED', 'RECEIVED', 'PRINTING', 'PACKAGED', 'SHIPPED', 'FAILED', 'CANCELLED'],
+        default: 'UNFULFILLED',
+        index: true
+    },
     items: { type: [OrderItemSchema], required: true },
     financial_breakdown: { type: FinancialBreakdownSchema, required: true },
     status_history: { type: [StatusHistorySchema], default: [] },
@@ -128,5 +139,8 @@ const OrderSchema = new Schema<IOrder>({
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
+
+OrderSchema.index({ buyer_id: 1, created_at: -1 });
+OrderSchema.index({ shop_id: 1, created_at: -1 });
 
 export const Order = mongoose.model<IOrder>('Order', OrderSchema, 'orders');

@@ -152,5 +152,9 @@ const ProductSchema = new Schema<IProduct>({
 });
 
 ProductSchema.index({ title: 'text' });
+ProductSchema.index({ status: 1, is_hidden: 1, created_at: -1 });
+ProductSchema.index({ status: 1, is_hidden: 1, categories: 1 });
+ProductSchema.index({ shop_id: 1, status: 1 });
+ProductSchema.index({ listing_status: 1, status: 1 });
 
 export const Product = mongoose.model<IProduct>('Product', ProductSchema, 'products');

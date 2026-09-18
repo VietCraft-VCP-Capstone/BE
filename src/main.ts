@@ -4,6 +4,7 @@ import app from './app/app';
 import { config, initializeDatabases } from './app/config';
 import { logger } from './shared/utils/logger';
 import { ChatGateway } from './modules/chat';
+import { NotificationGateway } from './modules/notification';
 
 async function bootstrap() {
     const server = http.createServer(app);
@@ -15,8 +16,12 @@ async function bootstrap() {
     });
 
     new ChatGateway(io);
+    NotificationGateway.setIO(io);
 
     await initializeDatabases();
+
+    const { FulfillmentQueueService } = await import('./modules/order/application/fulfillment-queue.service');
+    FulfillmentQueueService.startWorker();
 
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);

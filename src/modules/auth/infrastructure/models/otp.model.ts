@@ -1,9 +1,10 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IOtpVerification extends Document {
-    email: string;
+    email?: string;
+    phone?: string;
     otp_code: string;
-    purpose: 'REGISTER' | 'FORGOT_PASSWORD';
+    purpose: 'REGISTER' | 'FORGOT_PASSWORD' | 'PHONE_VERIFY';
     expired_at: Date;
     temp_password_hash?: string;
     temp_full_name?: string;
@@ -12,12 +13,13 @@ export interface IOtpVerification extends Document {
 }
 
 const OtpVerificationSchema = new Schema<IOtpVerification>({
-    email: { type: String, required: true, index: true },
+    email: { type: String, index: true },
+    phone: { type: String, index: true },
     otp_code: { type: String, required: true },
     purpose: {
         type: String,
         required: true,
-        enum: ['REGISTER', 'FORGOT_PASSWORD']
+        enum: ['REGISTER', 'FORGOT_PASSWORD', 'PHONE_VERIFY']
     },
     expired_at: {
         type: Date,

@@ -10,6 +10,7 @@ export interface IProductVariant extends Document {
     retail_price: mongoose.Types.Decimal128;
     stock_quantity: number;
     mockup_image?: string;
+    provider_sku?: string;
     is_active: boolean;
 }
 
@@ -23,6 +24,7 @@ const ProductVariantSchema = new Schema<IProductVariant>({
     retail_price: { type: Schema.Types.Decimal128, required: true },
     stock_quantity: { type: Number, required: true, default: 0 },
     mockup_image: { type: String },
+    provider_sku: { type: String, trim: true, index: true },
     is_active: { type: Boolean, default: true }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }

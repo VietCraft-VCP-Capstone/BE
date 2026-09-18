@@ -12,4 +12,6 @@ const ShopFollowerSchema = new Schema<IShopFollower>({
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
+ShopFollowerSchema.index({ buyer_ids: 1 });
+
 export const ShopFollower = mongoose.model<IShopFollower>('ShopFollower', ShopFollowerSchema, 'shop_followers');

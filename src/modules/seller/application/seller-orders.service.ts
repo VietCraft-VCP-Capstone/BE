@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
 import { Order } from '../../order/infrastructure/models/order.model';
 import { Shop } from '../../product/infrastructure/models/shop.model';
+import { notificationService } from '../../notification';
+import { dispatchToPrinter } from '../../order/application/printer-dispatch.service';
 import {
     SellerOrderDTO,
     SellerOrderListDTO,
@@ -213,6 +215,57 @@ export class SellerOrdersService {
             status: next,
             changed_at: new Date(),
             note: String(payload.note || '').trim() || undefined
+        });
+        await order.save();
+
+        // Gửi thông báo thời gian thực cho người mua về cập nhật trạng thái đơn hàng
+        try {
+            const statusTextMap: Record<string, string> = {
+                PROCESSING: 'đang được người bán xử lý và đóng gói',
+                SHIPPING: 'đã được bàn giao cho đơn vị vận chuyển',
+                DELIVERED: 'đã được giao thành công',
+                CANCELLED: 'đã bị huỷ'
+            };
+            if (order.buyer_id) {
+                await notificationService.createNotification({
+                    user_id: order.buyer_id.toString(),
+                    type: 'ORDER_UPDATE',
+                    title: `Cập nhật đơn hàng #${order.order_code}`,
+                    content: `Đơn hàng #${order.order_code} của bạn ${statusTextMap[next] || `đã chuyển sang: ${next}`}.`,
+                    link: `/orders/${order._id}`,
+                    metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: next }
+                });
+            }
+        } catch (err: any) {
+            console.error('Lỗi gửi thông báo cho người mua khi đổi trạng thái đơn:', err?.message || err);
+        }
+
+        const saved = await Order.findById(order._id).populate('buyer_id', 'full_name email').lean();
+        return mapDbOrderToSellerDTO(saved || order.toObject());
+    }
+
+    static async dispatchOrderToPrinter(ownerId: string, id: string): Promise<SellerOrderDTO> {
+        const shopId = await this.findShopId(ownerId);
+        if (!shopId) throw new Error('Không tìm thấy cửa hàng của bạn');
+
+        const order = await Order.findOne({
+            shop_id: shopId,
+            $or: [
+                { order_code: id },
+                { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
+            ]
+        });
+        if (!order) throw new Error('Không tìm thấy đơn hàng');
+
+        await dispatchToPrinter(order);
+
+        if (['ORDERED', 'PENDING_DESIGN'].includes(order.order_status)) {
+            order.order_status = 'PROCESSING';
+        }
+        order.status_history.push({
+            status: order.order_status,
+            changed_at: new Date(),
+            note: 'Người bán đã chuyển đơn và file thiết kế sang xưởng in.'
         });
         await order.save();
 
