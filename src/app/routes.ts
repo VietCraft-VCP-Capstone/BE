@@ -1,11 +1,11 @@
 import { Router } from 'express';
 import { authRouter } from '../modules/auth';
 
-import { adminRouter } from '../modules/admin';
+import { adminRouter, adminPromotionsRouter } from '../modules/admin';
 import { categoryRouter } from '../modules/category';
 import { tagsRouter } from '../modules/tags';
 import { userRouter } from '../modules/user';
-import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter } from '../modules/seller';
+import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter, sellerPromotionsRouter } from '../modules/seller';
 
 import { cartRouter } from '../modules/cart';
 import { productsRouter, wishlistRouter } from '../modules/product';
@@ -22,18 +22,20 @@ import { uploadRouter } from '../modules/upload';
 const router = Router();
 
 router.use('/auth', authRouter);
-// Category/Tag đã tách thành module riêng. Mount TRƯỚC '/admin' để router cụ thể
-// thắng router tổng. URL giữ nguyên /api/admin/categories, /api/admin/tags nên FE
-// không phải sửa gì. Guard admin nằm sẵn trên từng route trong 2 module đó.
+// Category/Tag/Promotion đã tách thành module riêng. Mount TRƯỚC '/admin' để router cụ thể
+// thắng router tổng. URL giữ nguyên /api/admin/categories, /api/admin/tags, /api/admin/promotions.
 router.use('/admin/categories', categoryRouter);
 router.use('/admin/tags', tagsRouter);
+router.use('/admin/promotions', adminPromotionsRouter);
 router.use('/admin', adminRouter);
 router.use('/users', userRouter);
 router.use('/seller/kyc', sellerKycRouter);
 router.use('/seller/settings', sellerSettingsRouter);
+router.use('/seller/promotions', sellerPromotionsRouter);
 // Đơn BÁN được của gian hàng. Tách khỏi '/orders' (đơn người dùng ĐI MUA) vì hai bên
 // lọc theo hai khoá khác nhau: buyer_id với /orders, shop_id với route này.
 router.use('/seller/orders', sellerOrdersRouter);
+
 
 router.use('/cart', cartRouter);
 router.use('/products', productsRouter);

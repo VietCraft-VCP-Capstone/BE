@@ -7,9 +7,11 @@ import { Shop } from "../../product/infrastructure/models/shop.model";
 import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
 import { dispatchToPrinter } from "./printer-dispatch.service";
+import { PromotionService } from "../../promotion/application/promotion.service";
 import { OrderResponse, DEFAULT_SHIPPING_FEE, PLATFORM_FEE_RATE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
 import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
+
 
 export class OrdersService {
 
@@ -123,8 +125,32 @@ export class OrdersService {
       });
     }
     const shippingFee = DEFAULT_SHIPPING_FEE;
-    const discount = 0;
+    let discount = 0;
+    const couponCode = payload.couponCode || payload.coupon_code;
+    let isPlatformCoupon = true;
+
+    if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
+      const applyResult = await PromotionService.validateAndApply(
+        couponCode,
+        subtotal,
+        shippingFee,
+        shopId || undefined
+      );
+
+      if (!applyResult.valid) {
+        throw new Error(applyResult.message || 'Mã giảm giá không hợp lệ.');
+      }
+
+      discount = applyResult.discount;
+      isPlatformCoupon = applyResult.coupon?.is_platform ?? true;
+    }
+
     const platformFee = subtotal * PLATFORM_FEE_RATE;
+    // Nếu là Shop coupon, shop chịu trừ tiền. Nếu là Platform coupon, sàn bù tiền cho shop.
+    const sellerPayoutAmount = isPlatformCoupon
+      ? Math.max(0, subtotal - platformFee)
+      : Math.max(0, subtotal - discount - platformFee);
+
     const gateway = String(
       payload.paymentGateway || payload.payment_method || "COD",
     ).toUpperCase();
@@ -170,13 +196,20 @@ export class OrdersService {
         shipping_fee: dec(shippingFee),
         coupon_discount: dec(discount),
         platform_fee: dec(platformFee),
-        seller_payout_amount: dec(subtotal - platformFee),
+        seller_payout_amount: dec(sellerPayoutAmount),
       },
       status_history: [
         { status: "ORDERED", changed_at: now, note: "Đơn được tạo" },
       ],
       order_hour_of_week: now.getDay() * 24 + now.getHours(),
     });
+
+    if (couponCode) {
+      await PromotionService.recordUsage(couponCode).catch(err => {
+        console.error('Lỗi khi ghi nhận lượt sử dụng coupon:', err);
+      });
+    }
+
 
     // Phát thông báo Realtime cho Người mua & Người bán
     try {
