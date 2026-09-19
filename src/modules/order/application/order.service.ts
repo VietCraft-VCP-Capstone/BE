@@ -134,7 +134,13 @@ export class OrdersService {
         couponCode,
         subtotal,
         shippingFee,
-        shopId || undefined
+        shopId || undefined,
+        undefined,
+        orderItems.map(it => ({
+          productId: it.product_id.toString(),
+          price: num(it.retail_price),
+          quantity: it.quantity
+        }))
       );
 
       if (!applyResult.valid) {

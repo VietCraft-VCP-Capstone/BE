@@ -30,7 +30,13 @@ router.get('/available', async (req, res) => {
         const shopId = req.query.shopId as string | undefined;
         const productId = req.query.productId as string | undefined;
         const subtotal = Number(req.query.subtotal) || 0;
-        const coupons = await PromotionService.getAvailableCoupons(shopId, subtotal, productId);
+        let items: any = undefined;
+        if (req.query.items && typeof req.query.items === 'string') {
+            try {
+                items = JSON.parse(req.query.items);
+            } catch (e) {}
+        }
+        const coupons = await PromotionService.getAvailableCoupons(shopId, subtotal, productId, items);
         res.json(coupons);
     } catch (error: any) {
         res.status(500).json({ error: error.message || 'Lỗi khi tải danh sách voucher khả dụng.' });
@@ -40,13 +46,14 @@ router.get('/available', async (req, res) => {
 // Áp dụng mã giảm giá và tính toán số tiền giảm
 router.post('/apply', async (req, res) => {
     try {
-        const { code, subtotal, shippingFee, shopId, productId } = req.body || {};
+        const { code, subtotal, shippingFee, shopId, productId, items } = req.body || {};
         const result = await PromotionService.validateAndApply(
             code,
             Number(subtotal) || 0,
             Number(shippingFee) || 0,
             shopId,
-            productId
+            productId,
+            items
         );
 
         if (!result.valid) {

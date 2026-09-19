@@ -17,6 +17,16 @@ router.get('/', async (_req: AuthenticatedRequest, res: Response) => {
     }
 });
 
+// Lấy danh sách sản phẩm toàn sàn để chọn áp dụng voucher
+router.get('/selectable-products', async (_req: AuthenticatedRequest, res: Response) => {
+    try {
+        const products = await PromotionService.getAdminSelectableProducts();
+        res.json(products);
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tải danh sách sản phẩm toàn sàn.' });
+    }
+});
+
 // Tạo voucher sàn mới
 router.post('/', async (req: AuthenticatedRequest, res: Response) => {
     try {
@@ -29,6 +39,8 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
             min_order_value,
             max_discount_amount,
             usage_limit,
+            applicable_scope,
+            applicable_product_ids,
             start_date,
             end_date,
             shop_id
@@ -47,6 +59,8 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
             min_order_value: min_order_value ? Number(min_order_value) : undefined,
             max_discount_amount: max_discount_amount ? Number(max_discount_amount) : undefined,
             usage_limit: usage_limit ? Number(usage_limit) : undefined,
+            applicable_scope,
+            applicable_product_ids,
             start_date,
             end_date,
             shop_id: shop_id || null

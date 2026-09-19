@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export type CouponDiscountType = 'PERCENTAGE' | 'FIXED_AMOUNT' | 'FREE_SHIPPING' | 'FLASH_SALE' | 'BUNDLE';
+export type CouponApplicableScope = 'ALL' | 'SPECIFIC_PRODUCTS';
 
 export interface ICoupon extends Document {
     shop_id?: mongoose.Types.ObjectId;
@@ -13,6 +14,8 @@ export interface ICoupon extends Document {
     max_discount_amount?: mongoose.Types.Decimal128;
     usage_limit?: number;
     used_count: number;
+    applicable_scope: CouponApplicableScope;
+    applicable_product_ids: mongoose.Types.ObjectId[];
     start_date: Date;
     end_date: Date;
     is_active: boolean;
@@ -35,6 +38,16 @@ const CouponSchema = new Schema<ICoupon>({
     max_discount_amount: { type: Schema.Types.Decimal128, default: null },
     usage_limit: { type: Number, default: null },
     used_count: { type: Number, required: true, default: 0 },
+    applicable_scope: {
+        type: String,
+        enum: ['ALL', 'SPECIFIC_PRODUCTS'],
+        default: 'ALL'
+    },
+    applicable_product_ids: [{
+        type: Schema.Types.ObjectId,
+        ref: 'Product',
+        default: []
+    }],
     start_date: { type: Date, required: true },
     end_date: { type: Date, required: true },
     is_active: { type: Boolean, required: true, default: true }

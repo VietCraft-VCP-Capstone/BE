@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { Coupon, ICoupon, CouponDiscountType } from '../infrastructure/models/coupon.model';
 import { Shop } from '../../product/infrastructure/models/shop.model';
 import { Product } from '../../product/infrastructure/models/product.model';
+import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
 
 export const dec = (n: number) => mongoose.Types.Decimal128.fromString(Math.round(n || 0).toString());
 export const num = (v: any) => (v ? Number(v.toString()) : 0);
@@ -20,6 +21,8 @@ export interface ApplyCouponResult {
         discount_value: number;
         min_order_value?: number;
         max_discount_amount?: number;
+        applicable_scope?: 'ALL' | 'SPECIFIC_PRODUCTS';
+        applicable_product_ids?: string[];
         shop_id?: string | null;
         is_platform: boolean;
     };
@@ -34,6 +37,8 @@ export interface CreateCouponInput {
     min_order_value?: number;
     max_discount_amount?: number;
     usage_limit?: number;
+    applicable_scope?: 'ALL' | 'SPECIFIC_PRODUCTS';
+    applicable_product_ids?: string[];
     start_date: string | Date;
     end_date: string | Date;
 }
@@ -53,25 +58,33 @@ export class PromotionService {
     /**
      * Kiểm tra tính hợp lệ và tính toán số tiền giảm cho đơn hàng
      */
+    /**
+     * Kiểm tra tính hợp lệ và tính toán số tiền giảm cho đơn hàng
+     */
     static async validateAndApply(
         code: string,
         subtotal: number,
         shippingFee: number = 0,
         shopId?: string | mongoose.Types.ObjectId,
-        productId?: string
+        productId?: string,
+        items?: Array<{ productId: string; price: number; quantity: number }>
     ): Promise<ApplyCouponResult> {
         if (!code || !code.trim()) {
             return { valid: false, discount: 0, target: 'PRODUCT', message: 'Vui lòng nhập mã giảm giá' };
         }
 
-        // Tự động phân giải shopId từ productId nếu chưa có shopId
+        // Tự động phân giải shopId từ productId hoặc items nếu chưa có shopId
         if (!shopId && productId && mongoose.Types.ObjectId.isValid(productId)) {
             const product = await Product.findById(productId).select('shop_id').lean();
             if (product?.shop_id) {
                 shopId = product.shop_id as mongoose.Types.ObjectId;
             }
+        } else if (!shopId && items && items.length > 0 && mongoose.Types.ObjectId.isValid(items[0].productId)) {
+            const product = await Product.findById(items[0].productId).select('shop_id').lean();
+            if (product?.shop_id) {
+                shopId = product.shop_id as mongoose.Types.ObjectId;
+            }
         }
-
 
         const cleanCode = code.trim().toUpperCase();
         const coupon = await Coupon.findOne({ code: cleanCode, is_active: true }).lean();
@@ -111,7 +124,7 @@ export class PromotionService {
             };
         }
 
-        // Kiểm tra phạm vi áp dụng (Shop voucher vs Platform voucher)
+        // Kiểm tra phạm vi gian hàng (Shop voucher vs Platform voucher)
         if (coupon.shop_id) {
             if (!shopId || coupon.shop_id.toString() !== shopId.toString()) {
                 const shop = await Shop.findById(coupon.shop_id).select('shop_name').lean();
@@ -125,14 +138,62 @@ export class PromotionService {
             }
         }
 
+        // Kiểm tra phạm vi sản phẩm áp dụng (Tất cả vs Chỉ một số sản phẩm)
+        let eligibleSubtotal = subtotal;
+        const scope = coupon.applicable_scope || 'ALL';
+        const allowedProductIds = (coupon.applicable_product_ids || []).map((id: any) => id.toString());
+
+        if (scope === 'SPECIFIC_PRODUCTS') {
+            if (allowedProductIds.length === 0) {
+                return {
+                    valid: false,
+                    discount: 0,
+                    target: 'PRODUCT',
+                    message: 'Mã giảm giá này chưa được gán sản phẩm áp dụng.'
+                };
+            }
+
+            if (items && items.length > 0) {
+                const matchingItems = items.filter(it => it.productId && allowedProductIds.includes(it.productId.toString()));
+                if (matchingItems.length === 0) {
+                    return {
+                        valid: false,
+                        discount: 0,
+                        target: 'PRODUCT',
+                        message: 'Mã giảm giá này chỉ áp dụng cho một số sản phẩm chỉ định trong danh mục khuyến mãi.'
+                    };
+                }
+                eligibleSubtotal = matchingItems.reduce((sum, it) => sum + ((Number(it.price) || 0) * (Number(it.quantity) || 1)), 0);
+            } else if (productId) {
+                if (!allowedProductIds.includes(productId.toString())) {
+                    return {
+                        valid: false,
+                        discount: 0,
+                        target: 'PRODUCT',
+                        message: 'Mã giảm giá này không áp dụng cho sản phẩm bạn đang chọn.'
+                    };
+                }
+                eligibleSubtotal = subtotal;
+            } else {
+                return {
+                    valid: false,
+                    discount: 0,
+                    target: 'PRODUCT',
+                    message: 'Mã giảm giá này chỉ áp dụng cho một số sản phẩm nhất định.'
+                };
+            }
+        }
+
         const minOrderValue = num(coupon.min_order_value);
-        if (minOrderValue > 0 && subtotal < minOrderValue) {
-            const diff = minOrderValue - subtotal;
+        if (minOrderValue > 0 && eligibleSubtotal < minOrderValue) {
+            const diff = minOrderValue - eligibleSubtotal;
             return {
                 valid: false,
                 discount: 0,
                 target: 'PRODUCT',
-                message: `Đơn hàng tối thiểu phải từ ${minOrderValue.toLocaleString('vi-VN')}đ (cần mua thêm ${diff.toLocaleString('vi-VN')}đ để áp dụng).`
+                message: scope === 'SPECIFIC_PRODUCTS'
+                    ? `Các sản phẩm khuyến mãi trong đơn phải đạt tối thiểu ${minOrderValue.toLocaleString('vi-VN')}đ (cần thêm ${diff.toLocaleString('vi-VN')}đ để áp dụng).`
+                    : `Đơn hàng tối thiểu phải từ ${minOrderValue.toLocaleString('vi-VN')}đ (cần mua thêm ${diff.toLocaleString('vi-VN')}đ để áp dụng).`
             };
         }
 
@@ -143,14 +204,14 @@ export class PromotionService {
 
         switch (coupon.discount_type) {
             case 'PERCENTAGE': {
-                const rawDiscount = subtotal * (discountVal / 100);
+                const rawDiscount = eligibleSubtotal * (discountVal / 100);
                 const cappedDiscount = maxDiscount > 0 ? Math.min(rawDiscount, maxDiscount) : rawDiscount;
-                discount = Math.min(Math.round(cappedDiscount), subtotal);
+                discount = Math.min(Math.round(cappedDiscount), eligibleSubtotal);
                 target = 'PRODUCT';
                 break;
             }
             case 'FIXED_AMOUNT': {
-                discount = Math.min(Math.round(discountVal), subtotal);
+                discount = Math.min(Math.round(discountVal), eligibleSubtotal);
                 target = 'PRODUCT';
                 break;
             }
@@ -162,22 +223,22 @@ export class PromotionService {
             }
             case 'FLASH_SALE': {
                 if (discountVal <= 100) {
-                    const raw = subtotal * (discountVal / 100);
+                    const raw = eligibleSubtotal * (discountVal / 100);
                     const capped = maxDiscount > 0 ? Math.min(raw, maxDiscount) : raw;
-                    discount = Math.min(Math.round(capped), subtotal);
+                    discount = Math.min(Math.round(capped), eligibleSubtotal);
                 } else {
-                    discount = Math.min(Math.round(discountVal), subtotal);
+                    discount = Math.min(Math.round(discountVal), eligibleSubtotal);
                 }
                 target = 'PRODUCT';
                 break;
             }
             case 'BUNDLE': {
                 if (discountVal <= 100) {
-                    const raw = subtotal * (discountVal / 100);
+                    const raw = eligibleSubtotal * (discountVal / 100);
                     const capped = maxDiscount > 0 ? Math.min(raw, maxDiscount) : raw;
-                    discount = Math.min(Math.round(capped), subtotal);
+                    discount = Math.min(Math.round(capped), eligibleSubtotal);
                 } else {
-                    discount = Math.min(Math.round(discountVal), subtotal);
+                    discount = Math.min(Math.round(discountVal), eligibleSubtotal);
                 }
                 target = 'PRODUCT';
                 break;
@@ -198,6 +259,8 @@ export class PromotionService {
                 discount_value: discountVal,
                 min_order_value: minOrderValue,
                 max_discount_amount: maxDiscount,
+                applicable_scope: scope,
+                applicable_product_ids: allowedProductIds,
                 shop_id: coupon.shop_id ? coupon.shop_id.toString() : null,
                 is_platform: !coupon.shop_id
             }
@@ -207,9 +270,19 @@ export class PromotionService {
     /**
      * Lấy danh sách voucher khả dụng khi người mua chuẩn bị checkout
      */
-    static async getAvailableCoupons(shopId?: string, subtotal: number = 0, productId?: string) {
+    static async getAvailableCoupons(
+        shopId?: string,
+        subtotal: number = 0,
+        productId?: string,
+        items?: Array<{ productId: string; price: number; quantity: number }>
+    ) {
         if (!shopId && productId && mongoose.Types.ObjectId.isValid(productId)) {
             const product = await Product.findById(productId).select('shop_id').lean();
+            if (product?.shop_id) {
+                shopId = product.shop_id.toString();
+            }
+        } else if (!shopId && items && items.length > 0 && mongoose.Types.ObjectId.isValid(items[0].productId)) {
+            const product = await Product.findById(items[0].productId).select('shop_id').lean();
             if (product?.shop_id) {
                 shopId = product.shop_id.toString();
             }
@@ -220,7 +293,6 @@ export class PromotionService {
             ? { $or: [{ shop_id: null }, { shop_id: new mongoose.Types.ObjectId(shopId) }] }
             : { shop_id: null };
 
-
         const coupons = await Coupon.find({
             ...shopQuery,
             is_active: true,
@@ -230,12 +302,46 @@ export class PromotionService {
                 { usage_limit: null },
                 { $expr: { $lt: ['$used_count', '$usage_limit'] } }
             ]
-        }).populate('shop_id', 'shop_name logo').sort({ end_date: 1 }).lean();
+        })
+        .populate('shop_id', 'shop_name logo')
+        .populate('applicable_product_ids', 'title thumbnail_url images')
+        .sort({ end_date: 1 })
+        .lean();
 
         return coupons.map(c => {
             const minOrder = num(c.min_order_value);
-            const isEligible = subtotal >= minOrder;
             const shopObj: any = c.shop_id;
+            const scope = c.applicable_scope || 'ALL';
+            const allowedIds = (c.applicable_product_ids || []).map((p: any) => (p._id ? p._id.toString() : p.toString()));
+
+            let isEligible = true;
+            let eligibleSubtotal = subtotal;
+            let minOrderDiff = 0;
+            let scopeMessage = '';
+
+            if (scope === 'SPECIFIC_PRODUCTS') {
+                if (items && items.length > 0) {
+                    const matching = items.filter(it => it.productId && allowedIds.includes(it.productId.toString()));
+                    if (matching.length === 0) {
+                        isEligible = false;
+                        scopeMessage = 'Chỉ áp dụng cho sản phẩm nhất định';
+                    } else {
+                        eligibleSubtotal = matching.reduce((sum, it) => sum + ((Number(it.price) || 0) * (Number(it.quantity) || 1)), 0);
+                    }
+                } else if (productId) {
+                    if (!allowedIds.includes(productId.toString())) {
+                        isEligible = false;
+                        scopeMessage = 'Không áp dụng cho sản phẩm này';
+                    }
+                }
+            }
+
+            if (isEligible) {
+                if (minOrder > 0 && eligibleSubtotal < minOrder) {
+                    isEligible = false;
+                    minOrderDiff = minOrder - eligibleSubtotal;
+                }
+            }
 
             return {
                 id: c._id.toString(),
@@ -248,13 +354,17 @@ export class PromotionService {
                 max_discount_amount: num(c.max_discount_amount),
                 usage_limit: c.usage_limit,
                 used_count: c.used_count,
+                applicable_scope: scope,
+                applicable_product_ids: allowedIds,
+                applicable_products_count: allowedIds.length,
                 start_date: c.start_date,
                 end_date: c.end_date,
                 is_platform: !c.shop_id,
                 shop_name: shopObj?.shop_name || 'Toàn sàn VietCraft',
                 shop_logo: shopObj?.logo,
                 is_eligible: isEligible,
-                min_order_diff: isEligible ? 0 : Math.max(0, minOrder - subtotal)
+                min_order_diff: minOrderDiff,
+                scope_message: scopeMessage
             };
         });
     }
@@ -275,24 +385,33 @@ export class PromotionService {
     // ==========================================
     static async listSellerCoupons(ownerId: string) {
         const shopId = await this.getSellerShopId(ownerId);
-        const coupons = await Coupon.find({ shop_id: shopId }).sort({ created_at: -1 }).lean();
+        const coupons = await Coupon.find({ shop_id: shopId })
+            .populate('applicable_product_ids', 'title thumbnail_url images')
+            .sort({ created_at: -1 })
+            .lean();
 
-        return coupons.map(c => ({
-            id: c._id.toString(),
-            code: c.code,
-            title: c.title,
-            description: c.description,
-            discount_type: c.discount_type,
-            discount_value: num(c.discount_value),
-            min_order_value: num(c.min_order_value),
-            max_discount_amount: num(c.max_discount_amount),
-            usage_limit: c.usage_limit,
-            used_count: c.used_count,
-            start_date: c.start_date,
-            end_date: c.end_date,
-            is_active: c.is_active,
-            created_at: c.created_at
-        }));
+        return coupons.map(c => {
+            const allowedIds = (c.applicable_product_ids || []).map((p: any) => (p._id ? p._id.toString() : p.toString()));
+            return {
+                id: c._id.toString(),
+                code: c.code,
+                title: c.title,
+                description: c.description,
+                discount_type: c.discount_type,
+                discount_value: num(c.discount_value),
+                min_order_value: num(c.min_order_value),
+                max_discount_amount: num(c.max_discount_amount),
+                usage_limit: c.usage_limit,
+                used_count: c.used_count,
+                applicable_scope: c.applicable_scope || 'ALL',
+                applicable_product_ids: allowedIds,
+                applicable_products_count: allowedIds.length,
+                start_date: c.start_date,
+                end_date: c.end_date,
+                is_active: c.is_active,
+                created_at: c.created_at
+            };
+        });
     }
 
     private static validateCouponInput(input: CreateCouponInput) {
@@ -334,6 +453,12 @@ export class PromotionService {
             }
         }
 
+        if (input.applicable_scope === 'SPECIFIC_PRODUCTS') {
+            if (!input.applicable_product_ids || !Array.isArray(input.applicable_product_ids) || input.applicable_product_ids.length === 0) {
+                throw new Error('Vui lòng chọn ít nhất 1 sản phẩm áp dụng cho chương trình này.');
+            }
+        }
+
         const startDate = new Date(input.start_date);
         const endDate = new Date(input.end_date);
         if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
@@ -362,6 +487,10 @@ export class PromotionService {
             throw new Error(`Mã giảm giá "${cleanCode}" đã tồn tại trên hệ thống. Vui lòng chọn mã khác.`);
         }
 
+        const targetProductIds = (input.applicable_scope === 'SPECIFIC_PRODUCTS' && Array.isArray(input.applicable_product_ids))
+            ? input.applicable_product_ids.filter(id => mongoose.Types.ObjectId.isValid(id)).map(id => new mongoose.Types.ObjectId(id))
+            : [];
+
         const coupon = await Coupon.create({
             shop_id: shopId,
             code: cleanCode,
@@ -373,6 +502,8 @@ export class PromotionService {
             max_discount_amount: input.max_discount_amount ? dec(input.max_discount_amount) : null,
             usage_limit: input.usage_limit ? Number(input.usage_limit) : null,
             used_count: 0,
+            applicable_scope: input.applicable_scope || 'ALL',
+            applicable_product_ids: targetProductIds,
             start_date: new Date(input.start_date),
             end_date: new Date(input.end_date),
             is_active: true
@@ -389,6 +520,9 @@ export class PromotionService {
             max_discount_amount: num(coupon.max_discount_amount),
             usage_limit: coupon.usage_limit,
             used_count: coupon.used_count,
+            applicable_scope: coupon.applicable_scope,
+            applicable_product_ids: targetProductIds.map(id => id.toString()),
+            applicable_products_count: targetProductIds.length,
             start_date: coupon.start_date,
             end_date: coupon.end_date,
             is_active: coupon.is_active,
@@ -423,17 +557,53 @@ export class PromotionService {
         return { success: true };
     }
 
+    /**
+     * Lấy danh sách sản phẩm của gian hàng để người bán chọn áp dụng voucher
+     */
+    static async getSellerSelectableProducts(ownerId: string) {
+        const shopId = await this.getSellerShopId(ownerId);
+        const products = await Product.find({
+            shop_id: shopId,
+            listing_status: { $ne: 'DELETED' }
+        })
+        .select('_id title images original_price listing_status')
+        .sort({ created_at: -1 })
+        .limit(100)
+        .lean();
+
+        const productIds = products.map(p => p._id);
+        const variants = await ProductVariant.find({ product_id: { $in: productIds } }).lean();
+
+        return products.map(p => {
+            const prodVariants = variants.filter(v => v.product_id.toString() === p._id.toString());
+            const firstVariant = prodVariants[0];
+            const price = firstVariant ? num(firstVariant.retail_price) : (p.original_price || 0);
+            const totalStock = prodVariants.reduce((sum, v) => sum + (v.stock_quantity || 0), 0);
+
+            return {
+                id: p._id.toString(),
+                title: p.title,
+                image: (p.images && p.images[0]) || '',
+                price,
+                stock: totalStock,
+                status: p.listing_status
+            };
+        });
+    }
+
     // ==========================================
     // ADMIN PROMOTION MANAGEMENT
     // ==========================================
     static async listAdminCoupons() {
         const coupons = await Coupon.find()
             .populate('shop_id', 'shop_name')
+            .populate('applicable_product_ids', 'title thumbnail_url images')
             .sort({ created_at: -1 })
             .lean();
 
         return coupons.map(c => {
             const shopObj: any = c.shop_id;
+            const allowedIds = (c.applicable_product_ids || []).map((p: any) => (p._id ? p._id.toString() : p.toString()));
             return {
                 id: c._id.toString(),
                 code: c.code,
@@ -445,6 +615,9 @@ export class PromotionService {
                 max_discount_amount: num(c.max_discount_amount),
                 usage_limit: c.usage_limit,
                 used_count: c.used_count,
+                applicable_scope: c.applicable_scope || 'ALL',
+                applicable_product_ids: allowedIds,
+                applicable_products_count: allowedIds.length,
                 start_date: c.start_date,
                 end_date: c.end_date,
                 is_active: c.is_active,
@@ -469,6 +642,10 @@ export class PromotionService {
             ? new mongoose.Types.ObjectId(input.shop_id)
             : null;
 
+        const targetProductIds = (input.applicable_scope === 'SPECIFIC_PRODUCTS' && Array.isArray(input.applicable_product_ids))
+            ? input.applicable_product_ids.filter(id => mongoose.Types.ObjectId.isValid(id)).map(id => new mongoose.Types.ObjectId(id))
+            : [];
+
         const coupon = await Coupon.create({
             shop_id: targetShopId,
             code: cleanCode,
@@ -480,6 +657,8 @@ export class PromotionService {
             max_discount_amount: input.max_discount_amount ? dec(input.max_discount_amount) : null,
             usage_limit: input.usage_limit ? Number(input.usage_limit) : null,
             used_count: 0,
+            applicable_scope: input.applicable_scope || 'ALL',
+            applicable_product_ids: targetProductIds,
             start_date: new Date(input.start_date),
             end_date: new Date(input.end_date),
             is_active: true
@@ -496,6 +675,9 @@ export class PromotionService {
             max_discount_amount: num(coupon.max_discount_amount),
             usage_limit: coupon.usage_limit,
             used_count: coupon.used_count,
+            applicable_scope: coupon.applicable_scope,
+            applicable_product_ids: targetProductIds.map(id => id.toString()),
+            applicable_products_count: targetProductIds.length,
             start_date: coupon.start_date,
             end_date: coupon.end_date,
             is_active: coupon.is_active,
@@ -528,6 +710,41 @@ export class PromotionService {
 
         await Coupon.findByIdAndDelete(couponId);
         return { success: true };
+    }
+
+    /**
+     * Lấy danh sách sản phẩm toàn sàn để Admin chọn tạo ưu đãi Flash Sale / Voucher
+     */
+    static async getAdminSelectableProducts() {
+        const products = await Product.find({
+            listing_status: { $ne: 'DELETED' }
+        })
+        .populate('shop_id', 'shop_name')
+        .select('_id title shop_id images original_price listing_status')
+        .sort({ created_at: -1 })
+        .limit(150)
+        .lean();
+
+        const productIds = products.map(p => p._id);
+        const variants = await ProductVariant.find({ product_id: { $in: productIds } }).lean();
+
+        return products.map(p => {
+            const shop: any = p.shop_id;
+            const prodVariants = variants.filter(v => v.product_id.toString() === p._id.toString());
+            const firstVariant = prodVariants[0];
+            const price = firstVariant ? num(firstVariant.retail_price) : (p.original_price || 0);
+            const totalStock = prodVariants.reduce((sum, v) => sum + (v.stock_quantity || 0), 0);
+
+            return {
+                id: p._id.toString(),
+                title: p.title,
+                shop_name: shop?.shop_name || 'VietCraft',
+                image: (p.images && p.images[0]) || '',
+                price,
+                stock: totalStock,
+                status: p.listing_status
+            };
+        });
     }
 }
 
