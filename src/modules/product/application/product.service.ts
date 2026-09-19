@@ -22,6 +22,8 @@ import {
     PaginatedProductsResponseDTO
 } from './product.dto';
 import { logger } from '../../../shared/utils/logger';
+import { cacheService } from '../../../shared/services/cache.service';
+import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
 
 function getColorHex(colorName: string): string {
     const lower = (colorName || '').toLowerCase();
@@ -70,7 +72,7 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         : undefined;
     const originalPrice = product.original_price
         ?? legacyOriginal
-        ?? (price ? Math.round(price * 1.1) : 0);
+        ?? undefined;
 
     const baseRank = product.display_rank ?? product.stock_alert_threshold ?? 1;
     const engagementTrend = [
@@ -256,7 +258,7 @@ export class ProductsService {
         }
 
         let blank: Blank | undefined;
-        let podVariants: { sku: string; markup: number; stock: number }[] | undefined;
+        let podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[] | undefined;
         let designPlacements: any[] | undefined;
         if (isPod) {
             try {
@@ -273,14 +275,22 @@ export class ProductsService {
             const seenSku = new Set<string>();
             rawVars.forEach((v: any, i: number) => {
                 const vari = blank?.variations.find(bv => bv.sku === v.sku);
-                if (!vari) { errors.push(`variant[${i}].sku không thuộc phôi đã chọn`); return; }
-                if (seenSku.has(v.sku)) { errors.push(`variant[${i}].sku bị trùng`); return; }
-                seenSku.add(v.sku);
+                const sku = String(v.sku || `custom-${i}`).trim();
+                if (seenSku.has(sku)) { errors.push(`variant[${i}].sku bị trùng`); return; }
+                seenSku.add(sku);
                 const markup = Number(v.markup ?? 0);
                 if (!Number.isFinite(markup) || markup < 0) errors.push(`variant[${i}].markup phải là số >= 0`);
                 const stock = Number(v.stock ?? 100);
                 if (!Number.isFinite(stock) || stock < 0) errors.push(`variant[${i}].stock phải là số >= 0`);
-                podVariants!.push({ sku: v.sku, markup, stock });
+                podVariants!.push({
+                    sku,
+                    color: v.color || vari?.color || 'Màu mặc định',
+                    size: v.size || vari?.size || 'Freesize',
+                    material: v.material || vari?.material || (blank as any)?.material || 'Cotton',
+                    base_cost: Number(v.base_cost ?? vari?.base_cost ?? 50000),
+                    markup,
+                    stock
+                });
             });
 
             const rawPl = Array.isArray(payload.designPlacements) ? payload.designPlacements : [];
@@ -476,18 +486,16 @@ export class ProductsService {
     }
 
     private static async page(query: any, filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
-        const total = await MongoProduct.countDocuments(query);
         const page = Math.max(1, Number(filter?.page) || 1);
         const limit = Math.max(1, Number(filter?.limit || filter?.pageSize) || 6);
-        const totalPages = Math.max(1, Math.ceil(total / limit));
         const skip = (page - 1) * limit;
 
         const sort = filter?.sort;
-        let docs: any[];
+        let docsPromise: Promise<any[]>;
         if (sort === 'price_asc' || sort === 'price_desc' || sort === 'stock_asc' || sort === 'stock_desc') {
             const dir = sort.endsWith('_asc') ? 1 : -1;
             const field = sort.startsWith('price') ? '_minPrice' : '_totalStock';
-            docs = await MongoProduct.aggregate([
+            docsPromise = MongoProduct.aggregate([
                 { $match: query },
                 {
                     $lookup: {
@@ -506,13 +514,19 @@ export class ProductsService {
                 { $sort: { [field]: dir, created_at: -1 } },
                 { $skip: skip },
                 { $limit: limit }
-            ]);
+            ]).exec();
         } else {
             const sortOption: any = sort === 'rank_asc'
                 ? { display_rank: 1, created_at: -1 }
                 : { created_at: -1 };
-            docs = await MongoProduct.find(query).sort(sortOption).skip(skip).limit(limit).lean();
+            docsPromise = MongoProduct.find(query).sort(sortOption).skip(skip).limit(limit).lean().exec();
         }
+
+        const [total, docs] = await Promise.all([
+            MongoProduct.countDocuments(query),
+            docsPromise
+        ]);
+        const totalPages = Math.max(1, Math.ceil(total / limit));
 
         const items = await ProductsService.mapMany(docs);
         return { items, total, page, limit, totalPages };
@@ -545,18 +559,34 @@ export class ProductsService {
         ));
     }
 
-    static async getAll(filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
-        const base: any = { ...PUBLIC_QUERY };
-
-        if (filter?.sellerId && mongoose.Types.ObjectId.isValid(filter.sellerId)) {
-            const sellerShop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(filter.sellerId) }).lean();
-            if (!sellerShop) return { items: [], total: 0, page: 1, limit: Number(filter?.limit || filter?.pageSize) || 6, totalPages: 0 };
-            base.shop_id = sellerShop._id;
-        } else if (filter?.shopId && mongoose.Types.ObjectId.isValid(filter.shopId)) {
-            base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+    public static async invalidateProductCache(productId?: string): Promise<void> {
+        try {
+            await Promise.all([
+                cacheService.delByPattern('vietcraft:products:list:*'),
+                cacheService.delByPattern('vietcraft:products:related:*'),
+                cacheService.del('vietcraft:shops:featured'),
+                productId ? cacheService.del(`vietcraft:products:detail:${productId}`) : Promise.resolve(),
+            ]);
+        } catch (err: any) {
+            logger.warn(`Failed to invalidate product cache: ${err.message}`);
         }
+    }
 
-        return ProductsService.page(ProductsService.buildQuery(base, filter), filter);
+    static async getAll(filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
+        const cacheKey = `vietcraft:products:list:${cacheService.hashKey(filter)}`;
+        return cacheService.getOrSet(cacheKey, async () => {
+            const base: any = { ...PUBLIC_QUERY };
+
+            if (filter?.sellerId && mongoose.Types.ObjectId.isValid(filter.sellerId)) {
+                const sellerShop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(filter.sellerId) }).lean();
+                if (!sellerShop) return { items: [], total: 0, page: 1, limit: Number(filter?.limit || filter?.pageSize) || 6, totalPages: 0 };
+                base.shop_id = sellerShop._id;
+            } else if (filter?.shopId && mongoose.Types.ObjectId.isValid(filter.shopId)) {
+                base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+            }
+
+            return ProductsService.page(ProductsService.buildQuery(base, filter), filter);
+        }, 120);
     }
 
 
@@ -576,41 +606,91 @@ export class ProductsService {
     static async getById(id: string, opts: { includeHidden?: boolean } = {}): Promise<ProductItemResponseDTO> {
         if (!mongoose.Types.ObjectId.isValid(id)) throw new Error('Không tìm thấy sản phẩm.');
 
-        const query: any = opts.includeHidden
-            ? { _id: new mongoose.Types.ObjectId(id) }
-            : { _id: new mongoose.Types.ObjectId(id), ...PUBLIC_QUERY };
+        const fetchProduct = async () => {
+            const query: any = opts.includeHidden
+                ? { _id: new mongoose.Types.ObjectId(id) }
+                : { _id: new mongoose.Types.ObjectId(id), ...PUBLIC_QUERY };
 
-        const mp = await MongoProduct.findOne(query).lean();
-        if (!mp) throw new Error('Không tìm thấy sản phẩm.');
+            const mp = await MongoProduct.findOne(query).lean();
+            if (!mp) throw new Error('Không tìm thấy sản phẩm.');
 
-        const [variants, shop] = await Promise.all([
-            MongoVariant.find({ product_id: mp._id }).lean(),
-            Shop.findById(mp.shop_id).lean()
-        ]);
-        return mapToProductItemResponse(mp, variants, shop);
+            const [variants, shop] = await Promise.all([
+                MongoVariant.find({ product_id: mp._id }).lean(),
+                Shop.findById(mp.shop_id).lean()
+            ]);
+            return mapToProductItemResponse(mp, variants, shop);
+        };
+
+        if (opts.includeHidden) {
+            return fetchProduct();
+        }
+
+        const cacheKey = `vietcraft:products:detail:${id}`;
+        return cacheService.getOrSet(cacheKey, fetchProduct, 300);
+    }
+
+    public static async sanitizeImages(images: string[]): Promise<string[]> {
+        if (!Array.isArray(images) || images.length === 0) return [];
+        const result: string[] = [];
+        for (const img of images) {
+            if (img && typeof img === 'string' && img.startsWith('data:image')) {
+                if (isCloudinaryEnabled()) {
+                    try {
+                        const uploaded = await uploadImage(img, { folder: 'products' });
+                        result.push(uploaded.url);
+                        continue;
+                    } catch (e: any) {
+                        logger.warn('Failed to auto-upload base64 image to Cloudinary: ' + e.message);
+                    }
+                }
+            }
+            if (img) result.push(img);
+        }
+        return result;
+    }
+
+    static async getByIds(ids: (string | mongoose.Types.ObjectId)[]): Promise<ProductItemResponseDTO[]> {
+        if (!ids || ids.length === 0) return [];
+        const validIds = ids
+            .filter(id => mongoose.Types.ObjectId.isValid(id.toString()))
+            .map(id => typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id);
+        if (validIds.length === 0) return [];
+        const docs = await MongoProduct.find({ _id: { $in: validIds } }).lean();
+        return this.mapMany(docs);
     }
 
     static async getRelated(id: string, category?: string, limit = 4): Promise<ProductItemResponseDTO[]> {
         if (!mongoose.Types.ObjectId.isValid(id)) return [];
-        const self = new mongoose.Types.ObjectId(id);
+        const cacheKey = `vietcraft:products:related:${id}:${category || 'auto'}:${limit}`;
+        return cacheService.getOrSet(cacheKey, async () => {
+            const self = new mongoose.Types.ObjectId(id);
 
-        const base: any = { ...PUBLIC_QUERY, listing_status: 'ACTIVE', _id: { $ne: self } };
-        let docs = await MongoProduct.find(category ? { ...base, categories: category } : base)
-            .limit(limit).lean();
+            let cat = category;
+            if (!cat) {
+                const p = await MongoProduct.findById(self).select('categories').lean();
+                cat = p?.categories?.[0];
+            }
 
-        if (docs.length < limit) {
-            const extra = await MongoProduct.find({
-                ...base,
-                _id: { $nin: [self, ...docs.map(p => p._id)] }
-            }).limit(limit - docs.length).lean();
-            docs = [...docs, ...extra];
-        }
+            const base: any = { ...PUBLIC_QUERY, listing_status: 'ACTIVE', _id: { $ne: self } };
+            let docs = await MongoProduct.find(cat ? { ...base, categories: cat } : base)
+                .limit(limit).lean();
 
-        return ProductsService.mapMany(docs);
+            if (docs.length < limit) {
+                const extra = await MongoProduct.find({
+                    ...base,
+                    _id: { $nin: [self, ...docs.map(p => p._id)] }
+                }).limit(limit - docs.length).lean();
+                docs = [...docs, ...extra];
+            }
+
+            return ProductsService.mapMany(docs);
+        }, 600);
     }
 
     static async getFeaturedShops(): Promise<any[]> {
-        return Shop.find().sort({ average_rating: -1, listing_count: -1 }).limit(5).lean();
+        return cacheService.getOrSet('vietcraft:shops:featured', async () => {
+            return Shop.find().sort({ average_rating: -1, listing_count: -1 }).limit(5).lean();
+        }, 600);
     }
 
     private static async createStructured(sellerId: string, payload: any): Promise<ProductItemResponseDTO> {
@@ -643,6 +723,11 @@ export class ProductsService {
             };
         }
 
+        if (payload.thumbnail && images.includes(payload.thumbnail)) {
+            images = [payload.thumbnail, ...images.filter((img: string) => img !== payload.thumbnail)];
+        }
+        images = await ProductsService.sanitizeImages(images);
+
         const mp = await MongoProduct.create({
             shop_id: shop._id,
             shipping_profile_id: new mongoose.Types.ObjectId(),
@@ -670,6 +755,7 @@ export class ProductsService {
         }
 
         await Shop.updateOne({ _id: shop._id }, { $inc: { listing_count: 1 } });
+        await ProductsService.invalidateProductCache(mp._id.toString());
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
 
@@ -736,9 +822,14 @@ export class ProductsService {
         const shop = await ProductsService.resolveShop(sellerId);
         const slug = await ProductsService.uniqueSlug(title);
 
-        const images = payload.images && payload.images.length > 0
-            ? payload.images
+        let rawImages = payload.images && payload.images.length > 0
+            ? [...payload.images]
             : (payload.thumbnail ? [payload.thumbnail] : []);
+        const targetCover = payload.thumbnail || rawImages[0];
+        if (targetCover && rawImages.includes(targetCover)) {
+            rawImages = [targetCover, ...rawImages.filter(img => img !== targetCover)];
+        }
+        const images = await ProductsService.sanitizeImages(rawImages);
 
         const mp = await MongoProduct.create({
             shop_id: shop._id,
@@ -769,7 +860,7 @@ export class ProductsService {
             await Tag.updateMany({ _id: { $in: tags.map(t => t._id) } }, { $inc: { product_count: 1 } });
         }
         await Shop.updateOne({ _id: shop._id }, { $inc: { listing_count: 1 } });
-
+        await ProductsService.invalidateProductCache(mp._id.toString());
         logger.info(`Created new product: ${mp._id} (${mp.title})`);
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
@@ -817,7 +908,7 @@ export class ProductsService {
 
     private static async buildPodArtifacts(
         blank: Blank,
-        podVariants: { sku: string; markup: number; stock: number }[],
+        podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[],
         placements: any[]
     ): Promise<{ images: string[]; variants: VariantInput[] }> {
 
@@ -842,9 +933,13 @@ export class ProductsService {
                 ).filter((l: any) => l.type !== 'image' || l.designUrl);
                 if (area && (area as any).surface === 'wrap') {
                     mockups.push(await generateWrapMockup(blankImage, layers, {
-                        x: area.x, y: area.y, width: area.width, height: area.height,
-                        template_w: (area as any).template_w || 2475, template_h: (area as any).template_h || 1155,
-                        arc: (area as any).arc,
+                        x: p.area?.x ?? area.x,
+                        y: p.area?.y ?? area.y,
+                        width: p.area?.width ?? area.width,
+                        height: p.area?.height ?? area.height,
+                        template_w: (area as any).template_w || 2475,
+                        template_h: (area as any).template_h || 1155,
+                        arc: (area as any).arc || 1.35,
                     }));
                 } else {
                     mockups.push(await generateMockupLayers(blankImage, layers));
@@ -859,14 +954,14 @@ export class ProductsService {
         const images = mockups.length ? mockups : [blank.default_image];
 
         const variants: VariantInput[] = podVariants.map(pv => {
-            const vari = blank.variations.find(v => v.sku === pv.sku)!;
+            const vari = blank.variations?.find(v => v.sku === pv.sku);
             return {
                 sku: pv.sku,
-                color: vari.color,
-                size: vari.size,
-                material: vari.material,
-                base_cost: vari.base_cost,
-                price: vari.base_cost + pv.markup,
+                color: pv.color || vari?.color || 'Màu mặc định',
+                size: pv.size || vari?.size || 'Freesize',
+                material: pv.material || vari?.material || (blank as any)?.material || 'Cotton',
+                base_cost: pv.base_cost ?? vari?.base_cost ?? 50000,
+                price: (pv.base_cost ?? vari?.base_cost ?? 50000) + pv.markup,
                 stock: pv.stock,
             };
         });
@@ -902,9 +997,13 @@ export class ProductsService {
             if (!layers.length) continue;
             if (area && (area as any).surface === 'wrap') {
                 out.push(await generateWrapMockup(blankImage, layers, {
-                    x: area.x, y: area.y, width: area.width, height: area.height,
-                    template_w: (area as any).template_w || 2475, template_h: (area as any).template_h || 1155,
-                    arc: (area as any).arc,
+                    x: p.area?.x ?? area.x,
+                    y: p.area?.y ?? area.y,
+                    width: p.area?.width ?? area.width,
+                    height: p.area?.height ?? area.height,
+                    template_w: (area as any).template_w || 2475,
+                    template_h: (area as any).template_h || 1155,
+                    arc: (area as any).arc || 1.35,
                 }));
             } else {
                 out.push(await generateMockupLayers(blankImage, layers));
@@ -929,7 +1028,16 @@ export class ProductsService {
             mp.slug = await ProductsService.uniqueSlug(data.title, id);
         }
         if (payload.description !== undefined) mp.description = data.description;
-        if (payload.images !== undefined) mp.images = data.images;
+        if (payload.images !== undefined) {
+            let imgs = [...data.images];
+            const targetCover = payload.thumbnail || imgs[0];
+            if (targetCover && imgs.includes(targetCover)) {
+                imgs = [targetCover, ...imgs.filter(img => img !== targetCover)];
+            }
+            mp.images = await ProductsService.sanitizeImages(imgs);
+        } else if (payload.thumbnail && Array.isArray(mp.images) && mp.images.includes(payload.thumbnail)) {
+            mp.images = [payload.thumbnail, ...mp.images.filter((img: string) => img !== payload.thumbnail)];
+        }
         if (payload.categoryId !== undefined && data.category) {
             mp.categories = [data.category.name];
             mp.category_ids = [data.category._id];
@@ -985,9 +1093,18 @@ export class ProductsService {
             mp.listing_status = payload.status === 'OUT_OF_STOCK' ? 'ACTIVE' : payload.status;
         }
         if (payload.images && payload.images.length > 0) {
-            mp.images = payload.images;
+            let rawImages = [...payload.images];
+            const targetCover = payload.thumbnail || rawImages[0];
+            if (targetCover && rawImages.includes(targetCover)) {
+                rawImages = [targetCover, ...rawImages.filter(img => img !== targetCover)];
+            }
+            mp.images = await ProductsService.sanitizeImages(rawImages);
         } else if (payload.thumbnail) {
-            mp.images = [payload.thumbnail];
+            if (Array.isArray(mp.images) && mp.images.includes(payload.thumbnail)) {
+                mp.images = [payload.thumbnail, ...mp.images.filter((img: string) => img !== payload.thumbnail)];
+            } else {
+                mp.images = await ProductsService.sanitizeImages([payload.thumbnail]);
+            }
         }
         await mp.save();
 
@@ -1029,9 +1146,12 @@ export class ProductsService {
             || Array.isArray(payload?.designPlacements)
             || Array.isArray(payload?.variants);
 
-        return isStructured
+        const result = await (isStructured
             ? ProductsService.updateStructured(mp, actor, payload)
-            : ProductsService.updateSimple(mp, actor, payload as Partial<ProductFormDataDTO>);
+            : ProductsService.updateSimple(mp, actor, payload as Partial<ProductFormDataDTO>));
+
+        await ProductsService.invalidateProductCache(id);
+        return result;
     }
 
     static async delete(id: string, actor: ProductActor): Promise<{ success: boolean; message: string }> {
@@ -1047,6 +1167,7 @@ export class ProductsService {
         await MongoVariant.updateMany({ product_id: mp._id }, { $set: { is_active: false } });
         await Shop.updateOne({ _id: mp.shop_id }, { $inc: { listing_count: -1 } });
 
+        await ProductsService.invalidateProductCache(id);
         logger.info(`Soft deleted product: ${id} by ${actor.id}`);
         return { success: true, message: 'Đã xóa sản phẩm thành công.' };
     }
@@ -1061,6 +1182,7 @@ export class ProductsService {
         );
         await MongoVariant.updateMany({ product_id: { $in: scoped } }, { $set: { is_active: false } });
 
+        await ProductsService.invalidateProductCache();
         logger.info(`Batch soft deleted ${result.modifiedCount} products by ${actor.id}`);
         return { success: true, count: result.modifiedCount };
     }
@@ -1075,6 +1197,7 @@ export class ProductsService {
             { $set: { listing_status: mongoStatus } }
         );
 
+        await ProductsService.invalidateProductCache();
         logger.info(`Batch updated listing_status to ${mongoStatus} for ${result.modifiedCount} products by ${actor.id}`);
         return { success: true, count: result.modifiedCount };
     }
@@ -1105,6 +1228,7 @@ export class ProductsService {
         mp.listing_status = 'INACTIVE';
         mp.unpublish_reason = reason;
         await mp.save();
+        await ProductsService.invalidateProductCache(id);
         return ProductsService.getById(id, { includeHidden: true });
     }
 
@@ -1137,6 +1261,7 @@ export class ProductsService {
         mp.unpublish_reason = undefined;
         mp.is_hidden = false;
         await mp.save();
+        await ProductsService.invalidateProductCache(id);
 
         return { product: await ProductsService.getById(id, { includeHidden: true }), warnings };
     }

@@ -56,4 +56,7 @@ const ChatMessageSchema = new Schema<IChatMessage>({
     timestamps: { createdAt: 'created_at', updatedAt: false }
 });
 
+ChatMessageSchema.index({ conversation_id: 1, created_at: 1 });
+ChatMessageSchema.index({ receiver_id: 1, is_read: 1 });
+
 export const ChatMessage = mongoose.model<IChatMessage>('ChatMessage', ChatMessageSchema, 'chat_messages');

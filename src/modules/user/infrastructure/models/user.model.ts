@@ -32,6 +32,14 @@ const UserSchema = new Schema<IUser>({
     full_name: { type: String, required: true },
     avatar: { type: String },
     phone: { type: String },
+    is_phone_verified: { type: Boolean, default: false },
+    is_email_verified: { type: Boolean, default: true },
+    seller_status: {
+        type: String,
+        enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'],
+        default: 'NONE'
+    },
+    seller_application_id: { type: Schema.Types.ObjectId, ref: 'SellerApplication' },
     identity_card_number: { type: String },
     tax_code: { type: String },
     addresses: { type: [AddressSchema], default: [] },

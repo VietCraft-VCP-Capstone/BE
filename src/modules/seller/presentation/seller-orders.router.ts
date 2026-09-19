@@ -37,6 +37,15 @@ router.patch('/:id/status', authenticate, requireRole(['seller', 'admin']), asyn
     }
 });
 
+router.post('/:id/dispatch-printer', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const order = await SellerOrdersService.dispatchOrderToPrinter(req.user!.id, req.params.id);
+        res.json({ message: 'Đã gửi đơn hàng sang xưởng in thành công.', order });
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi gửi đơn hàng sang xưởng in.' });
+    }
+});
+
 export const sellerOrdersRouter = router;
 export default router;
 

@@ -10,6 +10,7 @@ import {
 } from './seller-settings.dto';
 import { logger } from '../../../shared/utils/logger';
 import { generateSlug } from '../../../shared/utils/slug';
+import { isCloudinaryEnabled, uploadImage } from '../../../infrastructure/storage/cloudinary.service';
 
 const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
     brand: {
@@ -75,7 +76,7 @@ const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
     updatedAt: new Date().toISOString()
 };
 
-async function resolveUniqueSlug(desired: string, ownerId: mongoose.Types.ObjectId, seed: string): Promise<string> {
+export async function resolveUniqueSlug(desired: string, ownerId: mongoose.Types.ObjectId, seed: string): Promise<string> {
     let base = generateSlug(desired || '');
     if (!base || base === 'untitled') base = `shop-${seed}`;
 
@@ -172,6 +173,24 @@ export class SellerSettingsService {
         const currentSettings = shop.settings || {};
 
         if (payload.brand) {
+            if (payload.brand.logoUrl && payload.brand.logoUrl.startsWith('data:image/') && isCloudinaryEnabled()) {
+                try {
+                    const asset = await uploadImage(payload.brand.logoUrl, { folder: 'shops' });
+                    payload.brand.logoUrl = asset.url;
+                } catch (e: any) {
+                    logger.warn('Failed to upload base64 logo to Cloudinary: ' + e.message);
+                }
+            }
+
+            if (payload.brand.bannerUrl && payload.brand.bannerUrl.startsWith('data:image/') && isCloudinaryEnabled()) {
+                try {
+                    const asset = await uploadImage(payload.brand.bannerUrl, { folder: 'shops' });
+                    payload.brand.bannerUrl = asset.url;
+                } catch (e: any) {
+                    logger.warn('Failed to upload base64 banner to Cloudinary: ' + e.message);
+                }
+            }
+
             currentSettings.brand = {
                 ...(currentSettings.brand || {}),
                 ...payload.brand
