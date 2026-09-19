@@ -295,7 +295,65 @@ export class PromotionService {
         }));
     }
 
+    private static validateCouponInput(input: CreateCouponInput) {
+        const cleanCode = input.code ? input.code.trim().toUpperCase() : '';
+
+        if (!cleanCode) {
+            throw new Error('Vui lòng nhập mã giảm giá.');
+        }
+
+        const codeRegex = /^[A-Z0-9_]{3,20}$/;
+        if (!codeRegex.test(cleanCode)) {
+            throw new Error('Mã giảm giá chỉ được chứa chữ cái in hoa (A-Z), số (0-9) và dấu gạch dưới (_), độ dài từ 3 đến 20 ký tự.');
+        }
+
+        const title = input.title ? input.title.trim() : '';
+        if (title.length < 3 || title.length > 100) {
+            throw new Error('Tiêu đề chương trình phải từ 3 đến 100 ký tự.');
+        }
+
+        const discountVal = Number(input.discount_value);
+        if (isNaN(discountVal) || discountVal <= 0) {
+            throw new Error('Giá trị giảm giá phải lớn hơn 0.');
+        }
+
+        if (input.discount_type === 'PERCENTAGE') {
+            if (discountVal < 1 || discountVal > 100) {
+                throw new Error('Phần trăm giảm giá phải nằm trong khoảng từ 1% đến 100%.');
+            }
+        }
+
+        const minOrder = input.min_order_value !== undefined ? Number(input.min_order_value) : undefined;
+        if (minOrder !== undefined && minOrder < 0) {
+            throw new Error('Giá trị đơn hàng tối thiểu không thể là số âm.');
+        }
+
+        if (input.discount_type === 'FIXED_AMOUNT' && minOrder && minOrder > 0) {
+            if (discountVal >= minOrder) {
+                throw new Error(`Số tiền giảm giá (${discountVal.toLocaleString('vi-VN')}đ) phải nhỏ hơn giá trị đơn hàng tối thiểu (${minOrder.toLocaleString('vi-VN')}đ).`);
+            }
+        }
+
+        const startDate = new Date(input.start_date);
+        const endDate = new Date(input.end_date);
+        if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+            throw new Error('Thời gian bắt đầu hoặc kết thúc không hợp lệ.');
+        }
+
+        if (endDate <= startDate) {
+            throw new Error('Thời gian kết thúc phải diễn ra sau thời gian bắt đầu.');
+        }
+
+        if (input.usage_limit !== undefined && input.usage_limit !== null) {
+            const limit = Number(input.usage_limit);
+            if (isNaN(limit) || limit < 1) {
+                throw new Error('Giới hạn số lượt sử dụng phải là số nguyên lớn hơn hoặc bằng 1.');
+            }
+        }
+    }
+
     static async createSellerCoupon(ownerId: string, input: CreateCouponInput) {
+        this.validateCouponInput(input);
         const shopId = await this.getSellerShopId(ownerId);
         const cleanCode = input.code.trim().toUpperCase();
 
@@ -354,8 +412,14 @@ export class PromotionService {
 
     static async deleteSellerCoupon(ownerId: string, couponId: string) {
         const shopId = await this.getSellerShopId(ownerId);
-        const result = await Coupon.findOneAndDelete({ _id: couponId, shop_id: shopId });
-        if (!result) throw new Error('Không tìm thấy mã giảm giá');
+        const coupon = await Coupon.findOne({ _id: couponId, shop_id: shopId });
+        if (!coupon) throw new Error('Không tìm thấy mã giảm giá');
+
+        if (coupon.used_count > 0) {
+            throw new Error(`Mã này đã được sử dụng trong ${coupon.used_count} đơn hàng. Để đảm bảo toàn vẹn dữ liệu đối soát tài chính, bạn chỉ có thể TẮT mã thay vì Xóa.`);
+        }
+
+        await Coupon.findByIdAndDelete(couponId);
         return { success: true };
     }
 
@@ -393,6 +457,7 @@ export class PromotionService {
     }
 
     static async createAdminCoupon(input: CreateCouponInput & { shop_id?: string | null }) {
+        this.validateCouponInput(input);
         const cleanCode = input.code.trim().toUpperCase();
 
         const existing = await Coupon.findOne({ code: cleanCode }).lean();
@@ -453,10 +518,16 @@ export class PromotionService {
         };
     }
 
-
     static async deleteAdminCoupon(couponId: string) {
-        const result = await Coupon.findByIdAndDelete(couponId);
-        if (!result) throw new Error('Không tìm thấy mã giảm giá');
+        const coupon = await Coupon.findById(couponId);
+        if (!coupon) throw new Error('Không tìm thấy mã giảm giá');
+
+        if (coupon.used_count > 0) {
+            throw new Error(`Voucher này đã được sử dụng trong ${coupon.used_count} đơn hàng. Để đảm bảo đối soát tài chính, bạn chỉ có thể TẮT mã thay vì Xóa.`);
+        }
+
+        await Coupon.findByIdAndDelete(couponId);
         return { success: true };
     }
 }
+
