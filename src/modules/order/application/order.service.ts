@@ -108,7 +108,19 @@ export class OrdersService {
         quantity: qty,
         base_cost: variant.base_cost,
         retail_price: variant.retail_price,
-        image: variant.mockup_image || product.images?.[0],
+        image: (() => {
+          // Ưu tiên ảnh Cloudinary/http đầy đủ từ product.images
+          const productImg = product.images?.[0];
+          const mockupImg = variant.mockup_image;
+          if (productImg && (productImg.startsWith('http://') || productImg.startsWith('https://'))) {
+            return productImg;
+          }
+          if (mockupImg && (mockupImg.startsWith('http://') || mockupImg.startsWith('https://'))) {
+            return mockupImg;
+          }
+          // Fallback: dùng bất kỳ cái nào có giá trị
+          return productImg || mockupImg;
+        })(),
         design_file_url: designUrl,
         provider_sku: variant.provider_sku || variant.sku,
         custom_notes: JSON.stringify({
@@ -247,7 +259,9 @@ export class OrdersService {
       console.error('[NOTIFICATION] Lỗi tạo thông báo đơn hàng mới:', err?.message || err);
     }
 
-    const populated = await OrderModel.findById(order._id).populate("shop_id");
+    const populated = await OrderModel.findById(order._id)
+      .populate("shop_id")
+      .populate({ path: 'items.product_id', select: 'images title' });
     return mapDbOrderToResponse(populated || order);
   }
 
@@ -255,7 +269,9 @@ export class OrdersService {
     const query: any = byCodeOrId(id);
     query.buyer_id = toBuyerObjectId(buyerId);
 
-    const order = await OrderModel.findOne(query).populate("shop_id");
+    const order = await OrderModel.findOne(query)
+      .populate("shop_id")
+      .populate({ path: 'items.product_id', select: 'images title' });
     if (!order) throw new Error("Không tìm thấy đơn hàng");
     return mapDbOrderToResponse(order);
   }
@@ -288,6 +304,7 @@ export class OrdersService {
 
     const orders = await OrderModel.find(query)
       .populate("shop_id")
+      .populate({ path: 'items.product_id', select: 'images title' })
       .sort({ created_at: -1 })
       .lean();
     return orders.map(mapDbOrderToResponse);
