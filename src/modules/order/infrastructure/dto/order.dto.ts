@@ -12,7 +12,7 @@ function resolveImageUrl(url: string | undefined | null): string {
     return url;
 }
 
-export function mapDbOrderToResponse(dbOrder: any): OrderResponse {
+export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>): OrderResponse {
     const subtotal = num(dbOrder.financial_breakdown?.subtotal);
     const shippingFee = num(dbOrder.financial_breakdown?.shipping_fee);
     const discount = num(dbOrder.financial_breakdown?.coupon_discount);
@@ -38,35 +38,62 @@ export function mapDbOrderToResponse(dbOrder: any): OrderResponse {
             break;
     }
 
+    const orderMongoId = dbOrder._id?.toString() || '';
+    const orderCode = dbOrder.order_code || '';
+
+    const items = (dbOrder.items || []).map((it: any) => {
+        // it.product_id có thể đã được populate thành object Product
+        const populatedProduct = it.product_id && typeof it.product_id === 'object' && it.product_id.images
+            ? it.product_id
+            : null;
+        // Ưu tiên: ảnh Cloudinary mới nhất từ product → ảnh đã lưu trong order → placeholder
+        const productImg = populatedProduct?.images?.[0];
+        const storedImg = it.image;
+        const image = resolveImageUrl(
+            (productImg && (productImg.startsWith('http://') || productImg.startsWith('https://'))) ? productImg
+            : (storedImg && (storedImg.startsWith('http://') || storedImg.startsWith('https://'))) ? storedImg
+            : productImg || storedImg
+        );
+
+        const prodId = (it.product_id?._id || it.product_id)?.toString() || '';
+        let matchedReview: any = null;
+        if (reviewsMap && prodId) {
+            matchedReview = reviewsMap.get(`${orderMongoId}_${prodId}`) || reviewsMap.get(`${orderCode}_${prodId}`);
+        }
+
+        const isReviewed = Boolean(matchedReview);
+
+        return {
+            productId: prodId,
+            variantId: it.variant_id?.toString() || '',
+            title: it.title,
+            color: it.color,
+            size: it.size,
+            quantity: it.quantity,
+            price: num(it.retail_price),
+            image,
+            is_reviewed: isReviewed,
+            review: matchedReview ? {
+                id: (matchedReview._id || matchedReview.id)?.toString(),
+                rating: matchedReview.rating,
+                comment: matchedReview.comment || '',
+                images: matchedReview.images || [],
+                createdAt: matchedReview.created_at || matchedReview.createdAt,
+                updatedAt: matchedReview.updated_at || matchedReview.updatedAt
+            } : null
+        };
+    });
+
+    const isOrderReviewed = items.length > 0 && items.every((it: any) => it.is_reviewed);
+
     return {
         id: dbOrder.order_code,
+        _id: orderMongoId,
+        orderCode: orderCode,
         buyerId: dbOrder.buyer_id?.toString() || '',
         shopName: dbOrder.shop_id?.shop_name || 'VietCraft Shop',
         shopLogo: dbOrder.shop_id?.logo || PLACEHOLDER_SHOP_LOGO,
-        items: (dbOrder.items || []).map((it: any) => {
-            // it.product_id có thể đã được populate thành object Product
-            const populatedProduct = it.product_id && typeof it.product_id === 'object' && it.product_id.images
-                ? it.product_id
-                : null;
-            // Ưu tiên: ảnh Cloudinary mới nhất từ product → ảnh đã lưu trong order → placeholder
-            const productImg = populatedProduct?.images?.[0];
-            const storedImg = it.image;
-            const image = resolveImageUrl(
-                (productImg && (productImg.startsWith('http://') || productImg.startsWith('https://'))) ? productImg
-                : (storedImg && (storedImg.startsWith('http://') || storedImg.startsWith('https://'))) ? storedImg
-                : productImg || storedImg
-            );
-            return {
-                productId: (it.product_id?._id || it.product_id)?.toString() || '',
-                variantId: it.variant_id?.toString() || '',
-                title: it.title,
-                color: it.color,
-                size: it.size,
-                quantity: it.quantity,
-                price: num(it.retail_price),
-                image
-            };
-        }),
+        items,
         totalAmount,
         shippingFee,
         status: feStatus,
@@ -76,6 +103,7 @@ export function mapDbOrderToResponse(dbOrder: any): OrderResponse {
         shippingCode: dbOrder.shipping_details?.tracking_number,
         paymentStatus: dbOrder.payment_status,
         createdAt: dbOrder.created_at || dbOrder.createdAt || new Date(),
+        is_reviewed: isOrderReviewed,
         shippingAddress: {
             recipient_name: dbOrder.shipping_address?.recipient_name || '',
             phone: dbOrder.shipping_address?.phone || '',

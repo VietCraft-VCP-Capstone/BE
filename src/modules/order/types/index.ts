@@ -1,4 +1,13 @@
 
+export interface OrderItemReview {
+    id: string;
+    rating: number;
+    comment: string;
+    images: string[];
+    createdAt?: Date | string;
+    updatedAt?: Date | string;
+}
+
 export interface OrderItem {
     productId: string;
     variantId: string;
@@ -8,10 +17,14 @@ export interface OrderItem {
     color?: string;
     size?: string;
     image?: string;
+    is_reviewed?: boolean;
+    review?: OrderItemReview | null;
 }
 
 export interface OrderResponse {
     id: string;
+    _id?: string;
+    orderCode?: string;
     buyerId: string;
     items: OrderItem[];
     totalAmount: number;
@@ -25,6 +38,7 @@ export interface OrderResponse {
     shopLogo?: string;
     shippingFee?: number;
     paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
+    is_reviewed?: boolean;
     shippingAddress?: {
         recipient_name: string;
         phone: string;

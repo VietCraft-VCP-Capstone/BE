@@ -89,6 +89,59 @@ router.post('/', authenticate, requireRole(['buyer']), async (req: Authenticated
 });
 
 /**
+ * PUT /api/reviews/:id
+ * PATCH /api/reviews/:id
+ * Buyer cập nhật bài đánh giá đã gửi
+ */
+router.put(['/:id', '/order/:orderId/product/:productId'], authenticate, requireRole(['buyer']), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const buyerId = req.user!.id;
+        const reviewIdentifier = req.params.id || '';
+        const payload = {
+            ...req.body,
+            orderId: req.params.orderId || req.body?.orderId,
+            productId: req.params.productId || req.body?.productId
+        };
+        const review = await ReviewService.updateReview(buyerId, reviewIdentifier, payload);
+        res.json({
+            success: true,
+            message: 'Cập nhật đánh giá thành công.',
+            data: review
+        });
+    } catch (error: any) {
+        const msg = error.message || '';
+        if (msg.includes('không có quyền') || msg.includes('Không tìm thấy')) {
+            return res.status(403).json({ error: msg });
+        }
+        res.status(400).json({ error: msg });
+    }
+});
+
+router.patch(['/:id', '/order/:orderId/product/:productId'], authenticate, requireRole(['buyer']), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const buyerId = req.user!.id;
+        const reviewIdentifier = req.params.id || '';
+        const payload = {
+            ...req.body,
+            orderId: req.params.orderId || req.body?.orderId,
+            productId: req.params.productId || req.body?.productId
+        };
+        const review = await ReviewService.updateReview(buyerId, reviewIdentifier, payload);
+        res.json({
+            success: true,
+            message: 'Cập nhật đánh giá thành công.',
+            data: review
+        });
+    } catch (error: any) {
+        const msg = error.message || '';
+        if (msg.includes('không có quyền') || msg.includes('Không tìm thấy')) {
+            return res.status(403).json({ error: msg });
+        }
+        res.status(400).json({ error: msg });
+    }
+});
+
+/**
  * GET /api/reviews/product/:productId
  * Xem danh sách đánh giá tại trang chi tiết sản phẩm (Public)
  */

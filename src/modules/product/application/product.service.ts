@@ -583,8 +583,15 @@ export class ProductsService {
                 const sellerShop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(filter.sellerId) }).lean();
                 if (!sellerShop) return { items: [], total: 0, page: 1, limit: Number(filter?.limit || filter?.pageSize) || 6, totalPages: 0 };
                 base.shop_id = sellerShop._id;
-            } else if (filter?.shopId && mongoose.Types.ObjectId.isValid(filter.shopId)) {
-                base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+            } else if (filter?.shopId) {
+                if (mongoose.Types.ObjectId.isValid(filter.shopId)) {
+                    base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+                } else {
+                    const shopBySlug = await Shop.findOne({ slug: filter.shopId }).lean();
+                    if (shopBySlug) {
+                        base.shop_id = shopBySlug._id;
+                    }
+                }
             }
 
             return ProductsService.page(ProductsService.buildQuery(base, filter), filter);

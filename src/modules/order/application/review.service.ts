@@ -309,6 +309,99 @@ export class ReviewService {
     }
 
     /**
+     * Buyer chỉnh sửa đánh giá đã gửi
+     */
+    static async updateReview(
+        buyerId: string,
+        reviewIdOrIdentifier: string,
+        payload: {
+            rating?: number;
+            comment?: string;
+            images?: string[];
+            orderId?: string;
+            productId?: string;
+        }
+    ) {
+        const bId = new mongoose.Types.ObjectId(buyerId);
+        let review: any = null;
+
+        // 1. Thử tìm theo review ID nếu là ObjectId hợp lệ
+        if (mongoose.Types.ObjectId.isValid(reviewIdOrIdentifier)) {
+            review = await Review.findOne({
+                _id: new mongoose.Types.ObjectId(reviewIdOrIdentifier),
+                buyer_id: bId
+            });
+        }
+
+        // 2. Nếu chưa tìm thấy và có orderId + productId
+        if (!review && (payload.orderId || payload.productId)) {
+            const targetOrderId = payload.orderId || (mongoose.Types.ObjectId.isValid(reviewIdOrIdentifier) ? reviewIdOrIdentifier : undefined);
+            const targetProductId = payload.productId;
+
+            if (targetOrderId && targetProductId && mongoose.Types.ObjectId.isValid(targetProductId)) {
+                const orderQuery: any = { buyer_id: bId };
+                if (mongoose.Types.ObjectId.isValid(targetOrderId)) {
+                    orderQuery.$or = [{ _id: new mongoose.Types.ObjectId(targetOrderId) }, { order_code: targetOrderId }];
+                } else {
+                    orderQuery.order_code = targetOrderId;
+                }
+                const order = await Order.findOne(orderQuery).select('_id').lean();
+                if (order) {
+                    review = await Review.findOne({
+                        order_id: order._id,
+                        product_id: new mongoose.Types.ObjectId(targetProductId),
+                        buyer_id: bId
+                    });
+                }
+            }
+        }
+
+        if (!review) {
+            throw new Error('Không tìm thấy đánh giá hoặc bạn không có quyền chỉnh sửa đánh giá này.');
+        }
+
+        // 3. Cập nhật các trường
+        if (payload.rating !== undefined) {
+            const numRating = Number(payload.rating);
+            if (isNaN(numRating) || numRating < 1 || numRating > 5) {
+                throw new Error('Điểm đánh giá phải từ 1 đến 5 sao.');
+            }
+            review.rating = Math.round(numRating);
+        }
+
+        if (payload.comment !== undefined) {
+            review.comment = (payload.comment || '').trim();
+        }
+
+        if (payload.images !== undefined) {
+            review.images = Array.isArray(payload.images)
+                ? payload.images.filter(img => typeof img === 'string' && img.trim().length > 0).slice(0, 5)
+                : [];
+        }
+
+        await review.save();
+
+        // 4. Tính toán lại rating trung bình cho Product và Shop (chạy ngầm)
+        Review.recalculateRatings(review.product_id, review.shop_id).catch(err => {
+            console.error('[Review Recalculate Error]:', err);
+        });
+
+        return {
+            id: review._id.toString(),
+            orderId: review.order_id.toString(),
+            productId: review.product_id.toString(),
+            rating: review.rating,
+            comment: review.comment || '',
+            text: review.comment || '',
+            images: review.images || [],
+            sellerResponse: review.seller_response,
+            repliedAt: review.replied_at,
+            createdAt: review.created_at,
+            updatedAt: review.updated_at
+        };
+    }
+
+    /**
      * Upload ảnh đính kèm cho đánh giá (hỗ trợ cả Cloudinary và lưu đĩa local)
      */
     static async uploadReviewImage(file: Express.Multer.File): Promise<string> {

@@ -8,6 +8,7 @@ import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
 import { dispatchToPrinter } from "./printer-dispatch.service";
 import { PromotionService } from "../../promotion/application/promotion.service";
+import { Review } from "../infrastructure/models/review.model";
 import { OrderResponse, DEFAULT_SHIPPING_FEE, PLATFORM_FEE_RATE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
 import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
@@ -273,7 +274,23 @@ export class OrdersService {
       .populate("shop_id")
       .populate({ path: 'items.product_id', select: 'images title' });
     if (!order) throw new Error("Không tìm thấy đơn hàng");
-    return mapDbOrderToResponse(order);
+
+    const reviews = await Review.find({
+      order_id: order._id,
+      buyer_id: toBuyerObjectId(buyerId)
+    }).lean();
+
+    const reviewsMap = new Map<string, any>();
+    for (const rev of reviews) {
+      if (rev.order_id && rev.product_id) {
+        reviewsMap.set(`${rev.order_id.toString()}_${rev.product_id.toString()}`, rev);
+        if (order.order_code) {
+          reviewsMap.set(`${order.order_code}_${rev.product_id.toString()}`, rev);
+        }
+      }
+    }
+
+    return mapDbOrderToResponse(order, reviewsMap);
   }
 
   static async getOrdersByBuyer(
@@ -307,7 +324,34 @@ export class OrdersService {
       .populate({ path: 'items.product_id', select: 'images title' })
       .sort({ created_at: -1 })
       .lean();
-    return orders.map(mapDbOrderToResponse);
+
+    const orderIds = orders.map(o => o._id);
+    const reviews = await Review.find({
+      order_id: { $in: orderIds },
+      buyer_id: toBuyerObjectId(buyerId)
+    }).lean();
+
+    const reviewsMap = new Map<string, any>();
+    const orderCodeMap = new Map<string, string>();
+    for (const ord of orders) {
+      if (ord._id && ord.order_code) {
+        orderCodeMap.set(ord._id.toString(), ord.order_code);
+      }
+    }
+
+    for (const rev of reviews) {
+      if (rev.order_id && rev.product_id) {
+        const oIdStr = rev.order_id.toString();
+        const pIdStr = rev.product_id.toString();
+        reviewsMap.set(`${oIdStr}_${pIdStr}`, rev);
+        const code = orderCodeMap.get(oIdStr);
+        if (code) {
+          reviewsMap.set(`${code}_${pIdStr}`, rev);
+        }
+      }
+    }
+
+    return orders.map(ord => mapDbOrderToResponse(ord, reviewsMap));
   }
 
   /*
