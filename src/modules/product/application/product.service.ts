@@ -72,7 +72,7 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         : undefined;
     const originalPrice = product.original_price
         ?? legacyOriginal
-        ?? (price ? Math.round(price * 1.1) : 0);
+        ?? undefined;
 
     const baseRank = product.display_rank ?? product.stock_alert_threshold ?? 1;
     const engagementTrend = [

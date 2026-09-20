@@ -7,9 +7,11 @@ import { Shop } from "../../product/infrastructure/models/shop.model";
 import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
 import { dispatchToPrinter } from "./printer-dispatch.service";
+import { PromotionService } from "../../promotion/application/promotion.service";
 import { OrderResponse, DEFAULT_SHIPPING_FEE, PLATFORM_FEE_RATE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
 import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
+
 
 export class OrdersService {
 
@@ -106,7 +108,19 @@ export class OrdersService {
         quantity: qty,
         base_cost: variant.base_cost,
         retail_price: variant.retail_price,
-        image: variant.mockup_image || product.images?.[0],
+        image: (() => {
+          // Ưu tiên ảnh Cloudinary/http đầy đủ từ product.images
+          const productImg = product.images?.[0];
+          const mockupImg = variant.mockup_image;
+          if (productImg && (productImg.startsWith('http://') || productImg.startsWith('https://'))) {
+            return productImg;
+          }
+          if (mockupImg && (mockupImg.startsWith('http://') || mockupImg.startsWith('https://'))) {
+            return mockupImg;
+          }
+          // Fallback: dùng bất kỳ cái nào có giá trị
+          return productImg || mockupImg;
+        })(),
         design_file_url: designUrl,
         provider_sku: variant.provider_sku || variant.sku,
         custom_notes: JSON.stringify({
@@ -123,8 +137,38 @@ export class OrdersService {
       });
     }
     const shippingFee = DEFAULT_SHIPPING_FEE;
-    const discount = 0;
+    let discount = 0;
+    const couponCode = payload.couponCode || payload.coupon_code;
+    let isPlatformCoupon = true;
+
+    if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
+      const applyResult = await PromotionService.validateAndApply(
+        couponCode,
+        subtotal,
+        shippingFee,
+        shopId || undefined,
+        undefined,
+        orderItems.map(it => ({
+          productId: it.product_id.toString(),
+          price: num(it.retail_price),
+          quantity: it.quantity
+        }))
+      );
+
+      if (!applyResult.valid) {
+        throw new Error(applyResult.message || 'Mã giảm giá không hợp lệ.');
+      }
+
+      discount = applyResult.discount;
+      isPlatformCoupon = applyResult.coupon?.is_platform ?? true;
+    }
+
     const platformFee = subtotal * PLATFORM_FEE_RATE;
+    // Nếu là Shop coupon, shop chịu trừ tiền. Nếu là Platform coupon, sàn bù tiền cho shop.
+    const sellerPayoutAmount = isPlatformCoupon
+      ? Math.max(0, subtotal - platformFee)
+      : Math.max(0, subtotal - discount - platformFee);
+
     const gateway = String(
       payload.paymentGateway || payload.payment_method || "COD",
     ).toUpperCase();
@@ -170,13 +214,20 @@ export class OrdersService {
         shipping_fee: dec(shippingFee),
         coupon_discount: dec(discount),
         platform_fee: dec(platformFee),
-        seller_payout_amount: dec(subtotal - platformFee),
+        seller_payout_amount: dec(sellerPayoutAmount),
       },
       status_history: [
         { status: "ORDERED", changed_at: now, note: "Đơn được tạo" },
       ],
       order_hour_of_week: now.getDay() * 24 + now.getHours(),
     });
+
+    if (couponCode) {
+      await PromotionService.recordUsage(couponCode).catch(err => {
+        console.error('Lỗi khi ghi nhận lượt sử dụng coupon:', err);
+      });
+    }
+
 
     // Phát thông báo Realtime cho Người mua & Người bán
     try {
@@ -208,7 +259,9 @@ export class OrdersService {
       console.error('[NOTIFICATION] Lỗi tạo thông báo đơn hàng mới:', err?.message || err);
     }
 
-    const populated = await OrderModel.findById(order._id).populate("shop_id");
+    const populated = await OrderModel.findById(order._id)
+      .populate("shop_id")
+      .populate({ path: 'items.product_id', select: 'images title' });
     return mapDbOrderToResponse(populated || order);
   }
 
@@ -216,7 +269,9 @@ export class OrdersService {
     const query: any = byCodeOrId(id);
     query.buyer_id = toBuyerObjectId(buyerId);
 
-    const order = await OrderModel.findOne(query).populate("shop_id");
+    const order = await OrderModel.findOne(query)
+      .populate("shop_id")
+      .populate({ path: 'items.product_id', select: 'images title' });
     if (!order) throw new Error("Không tìm thấy đơn hàng");
     return mapDbOrderToResponse(order);
   }
@@ -249,6 +304,7 @@ export class OrdersService {
 
     const orders = await OrderModel.find(query)
       .populate("shop_id")
+      .populate({ path: 'items.product_id', select: 'images title' })
       .sort({ created_at: -1 })
       .lean();
     return orders.map(mapDbOrderToResponse);

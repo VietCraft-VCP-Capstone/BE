@@ -38,5 +38,5 @@ export const DEFAULT_SHIPPING_FEE = 30000;
 export const PAYMENT_METHODS = ['VNPAY', 'MOMO',];
 export const SHIPPING_CARRIERS = ['ghn', 'ghtk'];
 export const PLACEHOLDER_SHOP_LOGO = 'https://images.unsplash.com/photo-1513519245088-0e12902e5a38?auto=format&fit=crop&w=80';
-export const PLACEHOLDER_ITEM_IMAGE = 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=200';
+export const PLACEHOLDER_ITEM_IMAGE = 'http://localhost:5173/image-not-found.jpg';
 
