@@ -44,6 +44,15 @@ export interface IStatusHistory {
     note?: string;
 }
 
+export interface IPrinterOrderInfo {
+    printer_id?: string;
+    printer_name?: string;
+    supplier_order_id?: string;
+    dispatched_at?: Date;
+    printer_status?: string;
+    rejection_reason?: string;
+}
+
 export interface IOrder extends Document {
     buyer_id: mongoose.Types.ObjectId;
     shop_id: mongoose.Types.ObjectId;
@@ -51,10 +60,12 @@ export interface IOrder extends Document {
     payment_method: 'VNPAY' | 'MOMO' | 'COD';
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
     order_status: 'ORDERED' | 'PENDING_DESIGN' | 'PROCESSING' | 'SHIPPING' | 'DELIVERED' | 'CANCELLED';
+    seller_approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
     shipping_address: IShippingAddress;
     shipping_details: IShippingDetails;
     supplier_order_id?: string;
-    fulfillment_status?: 'UNFULFILLED' | 'QUEUED' | 'SUBMITTED' | 'RECEIVED' | 'PRINTING' | 'PACKAGED' | 'SHIPPED' | 'FAILED' | 'CANCELLED';
+    fulfillment_status?: 'UNFULFILLED' | 'PENDING_APPROVAL' | 'QUEUED' | 'SUBMITTED' | 'RECEIVED' | 'PRINTING' | 'PACKAGED' | 'SHIPPED' | 'FAILED' | 'CANCELLED';
+    printer_info?: IPrinterOrderInfo;
     items: IOrderItem[];
     financial_breakdown: IFinancialBreakdown;
     status_history: IStatusHistory[];
@@ -123,15 +134,22 @@ const OrderSchema = new Schema<IOrder>({
         enum: ['ORDERED', 'PENDING_DESIGN', 'PROCESSING', 'SHIPPING', 'DELIVERED', 'CANCELLED'],
         default: 'ORDERED'
     },
+    seller_approval_status: {
+        type: String,
+        enum: ['PENDING_APPROVAL', 'APPROVED', 'REJECTED'],
+        default: 'PENDING_APPROVAL',
+        index: true
+    },
     shipping_address: { type: ShippingAddressSchema, required: true },
     shipping_details: { type: ShippingDetailsSchema, required: true },
     supplier_order_id: { type: String, index: true },
     fulfillment_status: {
         type: String,
-        enum: ['UNFULFILLED', 'QUEUED', 'SUBMITTED', 'RECEIVED', 'PRINTING', 'PACKAGED', 'SHIPPED', 'FAILED', 'CANCELLED'],
+        enum: ['UNFULFILLED', 'PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'RECEIVED', 'PRINTING', 'PACKAGED', 'SHIPPED', 'FAILED', 'CANCELLED'],
         default: 'UNFULFILLED',
         index: true
     },
+    printer_info: { type: Schema.Types.Mixed, default: {} },
     items: { type: [OrderItemSchema], required: true },
     financial_breakdown: { type: FinancialBreakdownSchema, required: true },
     status_history: { type: [StatusHistorySchema], default: [] },

@@ -33,8 +33,18 @@ export interface SellerOrderDTO {
     id: string;
     orderCode: string;
     status: SellerOrderStatus;
+    approvalStatus?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
     fulfillmentStatus?: string;
     supplierOrderId?: string;
+    printerInfo?: {
+        printerId?: string;
+        printerName?: string;
+        supplierOrderId?: string;
+        printerStatus?: string;
+        dispatchedAt?: string;
+        rejectionReason?: string;
+    };
+    canApprove?: boolean;
     paymentStatus: 'PENDING' | 'PAID' | 'REFUNDED';
     paymentMethod: 'VNPAY' | 'MOMO' | 'COD';
     createdAt: string;
@@ -72,6 +82,7 @@ export interface SellerOrderDTO {
 
 export interface SellerOrderCountsDTO {
     all: number;
+    PENDING_APPROVAL: number;
     ORDERED: number;
     PENDING_DESIGN: number;
     PROCESSING: number;
@@ -128,12 +139,25 @@ export function mapDbOrderToSellerDTO(dbOrder: any): SellerOrderDTO {
     const buyer: any = dbOrder.buyer_id;
     const buyerName: string | undefined = buyer?.full_name || buyer?.email;
 
+    const approvalStatus = dbOrder.seller_approval_status || (dbOrder.fulfillment_status === 'PENDING_APPROVAL' ? 'PENDING_APPROVAL' : 'APPROVED');
+    const canApprove = approvalStatus === 'PENDING_APPROVAL' && ['ORDERED', 'PENDING_DESIGN'].includes(dbOrder.order_status);
+
     return {
         id: dbOrder.order_code,
         orderCode: dbOrder.order_code,
         status: dbOrder.order_status,
+        approvalStatus,
         fulfillmentStatus: dbOrder.fulfillment_status,
         supplierOrderId: dbOrder.supplier_order_id,
+        printerInfo: dbOrder.printer_info ? {
+            printerId: dbOrder.printer_info.printer_id,
+            printerName: dbOrder.printer_info.printer_name,
+            supplierOrderId: dbOrder.printer_info.supplier_order_id,
+            printerStatus: dbOrder.printer_info.printer_status,
+            dispatchedAt: dbOrder.printer_info.dispatched_at ? iso(dbOrder.printer_info.dispatched_at) : undefined,
+            rejectionReason: dbOrder.printer_info.rejection_reason
+        } : undefined,
+        canApprove,
         paymentStatus: dbOrder.payment_status,
         paymentMethod: dbOrder.payment_method,
         createdAt: iso(dbOrder.created_at),

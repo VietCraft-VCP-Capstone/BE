@@ -5,7 +5,7 @@ import { adminRouter, adminPromotionsRouter } from '../modules/admin';
 import { categoryRouter } from '../modules/category';
 import { tagsRouter } from '../modules/tags';
 import { userRouter } from '../modules/user';
-import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter, sellerPromotionsRouter } from '../modules/seller';
+import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter, sellerPromotionsRouter, sellerPrinterRouter } from '../modules/seller';
 
 import { cartRouter } from '../modules/cart';
 import { productsRouter, wishlistRouter, shopRouter } from '../modules/product';
@@ -36,6 +36,7 @@ router.use('/seller/promotions', sellerPromotionsRouter);
 // Đơn BÁN được của gian hàng. Tách khỏi '/orders' (đơn người dùng ĐI MUA) vì hai bên
 // lọc theo hai khoá khác nhau: buyer_id với /orders, shop_id với route này.
 router.use('/seller/orders', sellerOrdersRouter);
+router.use('/seller/printer', sellerPrinterRouter);
 
 
 router.use('/cart', cartRouter);

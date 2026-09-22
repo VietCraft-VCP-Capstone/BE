@@ -71,7 +71,7 @@ export class SellerOrdersService {
         const page = Math.max(1, Number(query.page) || 1);
         const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(query.pageSize) || DEFAULT_PAGE_SIZE));
         const emptyCounts: SellerOrderCountsDTO = {
-            all: 0, ORDERED: 0, PENDING_DESIGN: 0, PROCESSING: 0, SHIPPING: 0, DELIVERED: 0, CANCELLED: 0
+            all: 0, PENDING_APPROVAL: 0, ORDERED: 0, PENDING_DESIGN: 0, PROCESSING: 0, SHIPPING: 0, DELIVERED: 0, CANCELLED: 0
         };
 
         const shopId = await this.findShopId(ownerId);
@@ -98,11 +98,12 @@ export class SellerOrdersService {
 
         const listMatch = { ...baseMatch };
         if (query.status === 'TODO') listMatch.order_status = { $in: TODO_STATUSES };
+        else if (query.status === 'PENDING_APPROVAL') listMatch.seller_approval_status = 'PENDING_APPROVAL';
         else if (isValidStatus(query.status)) listMatch.order_status = query.status;
 
         const sort = SORTS[String(query.sort || 'newest')] || SORTS.newest;
 
-        const [total, docs, grouped] = await Promise.all([
+        const [total, docs, grouped, pendingApprovalCount] = await Promise.all([
             Order.countDocuments(listMatch),
             Order.find(listMatch)
                 .populate('buyer_id', 'full_name email')
@@ -119,10 +120,12 @@ export class SellerOrdersService {
                         payout: { $sum: '$financial_breakdown.seller_payout_amount' }
                     }
                 }
-            ])
+            ]),
+            Order.countDocuments({ ...baseMatch, seller_approval_status: 'PENDING_APPROVAL' })
         ]);
 
         const counts = { ...emptyCounts };
+        counts.PENDING_APPROVAL = pendingApprovalCount;
         let settled = 0;
         let pending = 0;
         for (const row of grouped) {
@@ -257,15 +260,47 @@ export class SellerOrdersService {
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
 
-        await dispatchToPrinter(order);
-
+        // Cập nhật trạng thái duyệt của người bán
+        order.seller_approval_status = 'APPROVED';
+        if (order.fulfillment_status === 'PENDING_APPROVAL' || !order.fulfillment_status) {
+            order.fulfillment_status = 'QUEUED';
+        }
         if (['ORDERED', 'PENDING_DESIGN'].includes(order.order_status)) {
             order.order_status = 'PROCESSING';
         }
         order.status_history.push({
             status: order.order_status,
             changed_at: new Date(),
-            note: 'Người bán đã chuyển đơn và file thiết kế sang xưởng in.'
+            note: 'Người bán đã duyệt đơn và chuyển file thiết kế sang hệ thống xưởng in.'
+        });
+        await order.save();
+
+        await dispatchToPrinter(order);
+
+        const saved = await Order.findById(order._id).populate('buyer_id', 'full_name email').lean();
+        return mapDbOrderToSellerDTO(saved || order.toObject());
+    }
+
+    static async rejectOrder(ownerId: string, id: string, reason?: string): Promise<SellerOrderDTO> {
+        const shopId = await this.findShopId(ownerId);
+        if (!shopId) throw new Error('Không tìm thấy cửa hàng của bạn');
+
+        const order = await Order.findOne({
+            shop_id: shopId,
+            $or: [
+                { order_code: id },
+                { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
+            ]
+        });
+        if (!order) throw new Error('Không tìm thấy đơn hàng');
+
+        order.seller_approval_status = 'REJECTED';
+        order.order_status = 'CANCELLED';
+        order.fulfillment_status = 'CANCELLED';
+        order.status_history.push({
+            status: 'CANCELLED',
+            changed_at: new Date(),
+            note: `Người bán từ chối duyệt đơn: ${reason || 'File thiết kế không phù hợp hoặc xưởng tạm ngưng nhận phôi'}`
         });
         await order.save();
 

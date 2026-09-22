@@ -6,6 +6,17 @@ export interface IBankInfo {
     account_holder: string;
 }
 
+export interface IPrinterPartner {
+    printer_id?: string;
+    printer_name: string;
+    api_url: string;
+    api_key?: string;
+    webhook_secret?: string;
+    is_connected: boolean;
+    connected_at?: Date;
+    auto_approve?: boolean;
+}
+
 export interface IShop extends Document {
     owner_id: mongoose.Types.ObjectId;
     shop_name: string;
@@ -16,6 +27,7 @@ export interface IShop extends Document {
     return_policy?: string;
     wallet_balance: mongoose.Types.Decimal128;
     bank_info?: IBankInfo;
+    printer_partner?: IPrinterPartner;
     average_response_time_seconds?: number;
     performance_benchmarks?: Record<string, any>;
     listing_count: number;
@@ -33,6 +45,17 @@ const BankInfoSchema = new Schema<IBankInfo>({
     account_holder: { type: String, required: true }
 }, { _id: false });
 
+const PrinterPartnerSchema = new Schema<IPrinterPartner>({
+    printer_id: { type: String },
+    printer_name: { type: String, required: true },
+    api_url: { type: String, required: true },
+    api_key: { type: String },
+    webhook_secret: { type: String },
+    is_connected: { type: Boolean, default: false },
+    connected_at: { type: Date },
+    auto_approve: { type: Boolean, default: false }
+}, { _id: false });
+
 const ShopSchema = new Schema<IShop>({
     owner_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true, index: true },
     shop_name: { type: String, required: true },
@@ -43,6 +66,7 @@ const ShopSchema = new Schema<IShop>({
     return_policy: { type: String },
     wallet_balance: { type: Schema.Types.Decimal128, default: 0.0 },
     bank_info: { type: BankInfoSchema },
+    printer_partner: { type: PrinterPartnerSchema },
     average_response_time_seconds: { type: Number, default: 0 },
     performance_benchmarks: { type: Schema.Types.Mixed, default: {} },
     settings: { type: Schema.Types.Mixed, default: {} },

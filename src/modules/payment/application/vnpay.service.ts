@@ -151,19 +151,28 @@ export class VNPayService {
 
             // 7. Xử lý trạng thái giao dịch
             if (responseCode === '00') {
+                // Kiểm tra xem Shop có cấu hình tự động duyệt in không
+                const preOrder = await Order.findOne({ order_code: orderCode }).populate('shop_id');
+                const shopData = preOrder?.shop_id as any;
+                const isAutoApprove = Boolean(shopData?.printer_partner?.auto_approve);
+
                 // Giao dịch thành công -> Sử dụng Atomic Update
                 const updatedOrder = await Order.findOneAndUpdate(
                     { order_code: orderCode, payment_status: 'PENDING' },
                     {
                         $set: {
                             payment_status: 'PAID',
-                            order_status: 'PROCESSING'
+                            order_status: isAutoApprove ? 'PROCESSING' : 'ORDERED',
+                            seller_approval_status: isAutoApprove ? 'APPROVED' : 'PENDING_APPROVAL',
+                            fulfillment_status: isAutoApprove ? 'QUEUED' : 'PENDING_APPROVAL'
                         },
                         $push: {
                             status_history: {
-                                status: 'PROCESSING',
+                                status: isAutoApprove ? 'PROCESSING' : 'ORDERED',
                                 changed_at: new Date(),
-                                note: `VNPay IPN: Thanh toán thành công (Mã GD: ${transactionNo})`
+                                note: isAutoApprove
+                                    ? `VNPay IPN: Thanh toán thành công (Mã GD: ${transactionNo}). Đã tự động duyệt đơn và chuyển sang xưởng in.`
+                                    : `VNPay IPN: Thanh toán thành công (Mã GD: ${transactionNo}). Đơn hàng đang chờ người bán duyệt in.`
                             }
                         }
                     },
@@ -192,10 +201,12 @@ export class VNPayService {
                     note: `Thanh toán thành công qua VNPay #${transactionNo}`
                 });
 
-                // Đẩy đơn tự động sang nhà xưởng in ấn (POD)
-                dispatchToPrinter(updatedOrder).catch((err: any) =>
-                    logger.error(`[VNPay Dispatch] Lỗi gửi đơn sang xưởng in: ${err?.message || err}`)
-                );
+                // Nếu shop bật tự động duyệt -> Đẩy đơn sang nhà xưởng in ấn (POD)
+                if (isAutoApprove) {
+                    dispatchToPrinter(updatedOrder).catch((err: any) =>
+                        logger.error(`[VNPay Dispatch] Lỗi gửi đơn sang xưởng in: ${err?.message || err}`)
+                    );
+                }
 
                 // Gửi thông báo Realtime cho Người mua & Người bán
                 try {
@@ -203,9 +214,11 @@ export class VNPayService {
                         user_id: updatedOrder.buyer_id.toString(),
                         type: 'ORDER_UPDATE',
                         title: 'Thanh toán thành công',
-                        content: `Đơn hàng #${updatedOrder.order_code} đã thanh toán thành công qua VNPay và chuyển sang xưởng sản xuất.`,
+                        content: isAutoApprove
+                            ? `Đơn hàng #${updatedOrder.order_code} đã thanh toán thành công qua VNPay và chuyển sang xưởng sản xuất.`
+                            : `Đơn hàng #${updatedOrder.order_code} đã thanh toán thành công qua VNPay và đang chờ người bán xác nhận thiết kế trước khi in.`,
                         link: `/orders/${updatedOrder._id}`,
-                        metadata: { orderId: updatedOrder._id.toString(), orderCode: updatedOrder.order_code, status: 'PROCESSING' }
+                        metadata: { orderId: updatedOrder._id.toString(), orderCode: updatedOrder.order_code, status: updatedOrder.order_status }
                     });
 
                     if (updatedOrder.shop_id) {
@@ -214,10 +227,12 @@ export class VNPayService {
                             await notificationService.createNotification({
                                 user_id: shop.owner_id.toString(),
                                 type: 'ORDER_UPDATE',
-                                title: 'Đơn hàng mới đã thanh toán',
-                                content: `Đơn hàng #${updatedOrder.order_code} (${vnpAmount.toLocaleString('vi-VN')}₫) đã được thanh toán qua VNPay.`,
+                                title: isAutoApprove ? 'Đơn hàng mới đã thanh toán' : 'Đơn hàng mới cần duyệt in',
+                                content: isAutoApprove
+                                    ? `Đơn hàng #${updatedOrder.order_code} (${vnpAmount.toLocaleString('vi-VN')}₫) đã được thanh toán và tự động gửi xưởng in.`
+                                    : `Đơn hàng #${updatedOrder.order_code} (${vnpAmount.toLocaleString('vi-VN')}₫) đã được thanh toán qua VNPay và đang chờ bạn duyệt để gửi sang xưởng in.`,
                                 link: `/seller/orders`,
-                                metadata: { orderId: updatedOrder._id.toString(), orderCode: updatedOrder.order_code }
+                                metadata: { orderId: updatedOrder._id.toString(), orderCode: updatedOrder.order_code, status: 'PENDING_APPROVAL' }
                             });
                         }
                     }
