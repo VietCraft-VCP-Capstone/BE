@@ -95,6 +95,16 @@ router.get('/:id', authenticate, async (req: AuthenticatedRequest, res) => {
     }
 });
 
+router.post('/:id/confirm-delivery', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const buyerId = req.user!.id;
+        const result = await OrdersService.confirmDeliveryByBuyer(req.params.id, buyerId);
+        res.json(result);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi xác nhận nhận hàng.' });
+    }
+});
+
 router.post('/callback/:id', verifyPaymentCallback, async (req, res) => {
     try {
         const { status } = req.body;

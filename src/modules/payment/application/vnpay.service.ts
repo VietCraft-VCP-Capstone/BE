@@ -154,7 +154,8 @@ export class VNPayService {
                 // Kiểm tra xem Shop có cấu hình tự động duyệt in không
                 const preOrder = await Order.findOne({ order_code: orderCode }).populate('shop_id');
                 const shopData = preOrder?.shop_id as any;
-                const isAutoApprove = Boolean(shopData?.printer_partner?.auto_approve);
+                const isPod = Boolean(preOrder?.is_pod || preOrder?.order_type === 'POD' || preOrder?.items?.some((it: any) => it.design_file_url));
+                const isAutoApprove = isPod && Boolean(shopData?.printer_partner?.auto_approve);
 
                 // Giao dịch thành công -> Sử dụng Atomic Update
                 const updatedOrder = await Order.findOneAndUpdate(
@@ -164,7 +165,7 @@ export class VNPayService {
                             payment_status: 'PAID',
                             order_status: isAutoApprove ? 'PROCESSING' : 'ORDERED',
                             seller_approval_status: isAutoApprove ? 'APPROVED' : 'PENDING_APPROVAL',
-                            fulfillment_status: isAutoApprove ? 'QUEUED' : 'PENDING_APPROVAL'
+                            fulfillment_status: isAutoApprove ? 'QUEUED' : (isPod ? 'PENDING_APPROVAL' : 'UNFULFILLED')
                         },
                         $push: {
                             status_history: {
@@ -172,7 +173,9 @@ export class VNPayService {
                                 changed_at: new Date(),
                                 note: isAutoApprove
                                     ? `VNPay IPN: Thanh toán thành công (Mã GD: ${transactionNo}). Đã tự động duyệt đơn và chuyển sang xưởng in.`
-                                    : `VNPay IPN: Thanh toán thành công (Mã GD: ${transactionNo}). Đơn hàng đang chờ người bán duyệt in.`
+                                    : isPod
+                                    ? `VNPay IPN: Thanh toán thành công (Mã GD: ${transactionNo}). Đơn hàng POD đang chờ người bán duyệt in.`
+                                    : `VNPay IPN: Thanh toán thành công (Mã GD: ${transactionNo}). Đơn hàng đang chờ người bán duyệt đơn chuẩn bị hàng.`
                             }
                         }
                     },
@@ -201,8 +204,8 @@ export class VNPayService {
                     note: `Thanh toán thành công qua VNPay #${transactionNo}`
                 });
 
-                // Nếu shop bật tự động duyệt -> Đẩy đơn sang nhà xưởng in ấn (POD)
-                if (isAutoApprove) {
+                // Nếu là đơn POD và shop bật tự động duyệt -> Đẩy đơn sang nhà xưởng in ấn (POD)
+                if (isPod && isAutoApprove) {
                     dispatchToPrinter(updatedOrder).catch((err: any) =>
                         logger.error(`[VNPay Dispatch] Lỗi gửi đơn sang xưởng in: ${err?.message || err}`)
                     );

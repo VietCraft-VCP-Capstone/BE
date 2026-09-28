@@ -37,6 +37,15 @@ router.patch('/:id/status', authenticate, requireRole(['seller', 'admin']), asyn
     }
 });
 
+router.post('/:id/approve', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const order = await SellerOrdersService.approveOrder(req.user!.id, req.params.id);
+        res.json({ message: 'Đã duyệt đơn hàng thành công.', order });
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi duyệt đơn hàng.' });
+    }
+});
+
 router.post('/:id/dispatch-printer', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const order = await SellerOrdersService.dispatchOrderToPrinter(req.user!.id, req.params.id);

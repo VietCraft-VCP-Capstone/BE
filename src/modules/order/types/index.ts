@@ -39,6 +39,16 @@ export interface OrderResponse {
     shippingFee?: number;
     paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
     is_reviewed?: boolean;
+    isPod?: boolean;
+    orderType?: string;
+    fulfillmentStatus?: string;
+    printerInfo?: {
+        printerId?: string;
+        printerName?: string;
+        supplierOrderId?: string;
+        printerStatus?: string;
+        rejectionReason?: string;
+    };
     shippingAddress?: {
         recipient_name: string;
         phone: string;

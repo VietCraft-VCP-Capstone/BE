@@ -61,10 +61,12 @@ export interface IOrder extends Document {
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
     order_status: 'ORDERED' | 'PENDING_DESIGN' | 'PROCESSING' | 'SHIPPING' | 'DELIVERED' | 'CANCELLED';
     seller_approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
+    is_pod?: boolean;
+    order_type?: 'POD' | 'READY_TO_SHIP' | 'STANDARD';
     shipping_address: IShippingAddress;
     shipping_details: IShippingDetails;
     supplier_order_id?: string;
-    fulfillment_status?: 'UNFULFILLED' | 'PENDING_APPROVAL' | 'QUEUED' | 'SUBMITTED' | 'RECEIVED' | 'PRINTING' | 'PACKAGED' | 'SHIPPED' | 'FAILED' | 'CANCELLED';
+    fulfillment_status?: 'UNFULFILLED' | 'PENDING_APPROVAL' | 'QUEUED' | 'SUBMITTED' | 'RECEIVED' | 'PRINTING' | 'PACKAGED' | 'SHIPPED' | 'DELIVERED' | 'FAILED' | 'CANCELLED';
     printer_info?: IPrinterOrderInfo;
     items: IOrderItem[];
     financial_breakdown: IFinancialBreakdown;
@@ -140,12 +142,14 @@ const OrderSchema = new Schema<IOrder>({
         default: 'PENDING_APPROVAL',
         index: true
     },
+    is_pod: { type: Boolean, default: false, index: true },
+    order_type: { type: String, enum: ['POD', 'READY_TO_SHIP', 'STANDARD'], default: 'STANDARD', index: true },
     shipping_address: { type: ShippingAddressSchema, required: true },
     shipping_details: { type: ShippingDetailsSchema, required: true },
     supplier_order_id: { type: String, index: true },
     fulfillment_status: {
         type: String,
-        enum: ['UNFULFILLED', 'PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'RECEIVED', 'PRINTING', 'PACKAGED', 'SHIPPED', 'FAILED', 'CANCELLED'],
+        enum: ['UNFULFILLED', 'PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'RECEIVED', 'PRINTING', 'PACKAGED', 'SHIPPED', 'DELIVERED', 'FAILED', 'CANCELLED'],
         default: 'UNFULFILLED',
         index: true
     },

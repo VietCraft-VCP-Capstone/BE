@@ -45,6 +45,8 @@ export interface SellerOrderDTO {
         rejectionReason?: string;
     };
     canApprove?: boolean;
+    isPod: boolean;
+    orderType: 'POD' | 'READY_TO_SHIP' | 'STANDARD';
     paymentStatus: 'PENDING' | 'PAID' | 'REFUNDED';
     paymentMethod: 'VNPAY' | 'MOMO' | 'COD';
     createdAt: string;
@@ -83,6 +85,7 @@ export interface SellerOrderDTO {
 export interface SellerOrderCountsDTO {
     all: number;
     PENDING_APPROVAL: number;
+    POD_ORDERS: number;
     ORDERED: number;
     PENDING_DESIGN: number;
     PROCESSING: number;
@@ -142,22 +145,41 @@ export function mapDbOrderToSellerDTO(dbOrder: any): SellerOrderDTO {
     const approvalStatus = dbOrder.seller_approval_status || (dbOrder.fulfillment_status === 'PENDING_APPROVAL' ? 'PENDING_APPROVAL' : 'APPROVED');
     const canApprove = approvalStatus === 'PENDING_APPROVAL' && ['ORDERED', 'PENDING_DESIGN'].includes(dbOrder.order_status);
 
+    const isPod = Boolean(
+        dbOrder.is_pod ||
+        dbOrder.order_type === 'POD' ||
+        rawItems.some(it => !!it.design_file_url) ||
+        Boolean(dbOrder.supplier_order_id || dbOrder.printer_info?.supplier_order_id)
+    );
+    const orderType: 'POD' | 'READY_TO_SHIP' | 'STANDARD' = dbOrder.order_type || (isPod ? 'POD' : 'READY_TO_SHIP');
+
+    let printerStatus = dbOrder.printer_info?.printer_status;
+    if (dbOrder.order_status === 'DELIVERED') {
+        printerStatus = 'DELIVERED';
+    } else if (dbOrder.order_status === 'SHIPPING' && (!printerStatus || ['RECEIVED', 'PRINTING', 'PACKAGED'].includes(printerStatus))) {
+        printerStatus = 'SHIPPED';
+    } else if (!printerStatus && ['RECEIVED', 'PRINTING', 'PACKAGED', 'SHIPPED', 'DELIVERED', 'REJECTED'].includes(dbOrder.fulfillment_status)) {
+        printerStatus = dbOrder.fulfillment_status;
+    }
+
     return {
         id: dbOrder.order_code,
         orderCode: dbOrder.order_code,
         status: dbOrder.order_status,
         approvalStatus,
         fulfillmentStatus: dbOrder.fulfillment_status,
-        supplierOrderId: dbOrder.supplier_order_id,
-        printerInfo: dbOrder.printer_info ? {
-            printerId: dbOrder.printer_info.printer_id,
-            printerName: dbOrder.printer_info.printer_name,
-            supplierOrderId: dbOrder.printer_info.supplier_order_id,
-            printerStatus: dbOrder.printer_info.printer_status,
-            dispatchedAt: dbOrder.printer_info.dispatched_at ? iso(dbOrder.printer_info.dispatched_at) : undefined,
-            rejectionReason: dbOrder.printer_info.rejection_reason
+        supplierOrderId: dbOrder.supplier_order_id || dbOrder.printer_info?.supplier_order_id,
+        printerInfo: (dbOrder.printer_info || printerStatus || dbOrder.supplier_order_id) ? {
+            printerId: dbOrder.printer_info?.printer_id || 'PRINTER_SHOP',
+            printerName: dbOrder.printer_info?.printer_name || 'Xưởng In VietCraft',
+            supplierOrderId: dbOrder.printer_info?.supplier_order_id || dbOrder.supplier_order_id,
+            printerStatus,
+            dispatchedAt: dbOrder.printer_info?.dispatched_at ? iso(dbOrder.printer_info.dispatched_at) : undefined,
+            rejectionReason: dbOrder.printer_info?.rejection_reason
         } : undefined,
         canApprove,
+        isPod,
+        orderType,
         paymentStatus: dbOrder.payment_status,
         paymentMethod: dbOrder.payment_method,
         createdAt: iso(dbOrder.created_at),

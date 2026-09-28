@@ -86,6 +86,13 @@ export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>
 
     const isOrderReviewed = items.length > 0 && items.every((it: any) => it.is_reviewed);
 
+    const isPod = Boolean(
+        dbOrder.is_pod ||
+        dbOrder.order_type === 'POD' ||
+        dbOrder.items?.some((it: any) => it.design_file_url) ||
+        Boolean(dbOrder.supplier_order_id || dbOrder.printer_info?.supplier_order_id)
+    );
+
     return {
         id: dbOrder.order_code,
         _id: orderMongoId,
@@ -104,6 +111,16 @@ export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>
         paymentStatus: dbOrder.payment_status,
         createdAt: dbOrder.created_at || dbOrder.createdAt || new Date(),
         is_reviewed: isOrderReviewed,
+        isPod,
+        orderType: dbOrder.order_type || (isPod ? 'POD' : 'READY_TO_SHIP'),
+        fulfillmentStatus: dbOrder.fulfillment_status,
+        printerInfo: dbOrder.printer_info ? {
+            printerId: dbOrder.printer_info.printer_id,
+            printerName: dbOrder.printer_info.printer_name,
+            supplierOrderId: dbOrder.printer_info.supplier_order_id || dbOrder.supplier_order_id,
+            printerStatus: dbOrder.printer_info.printer_status,
+            rejectionReason: dbOrder.printer_info.rejection_reason
+        } : undefined,
         shippingAddress: {
             recipient_name: dbOrder.shipping_address?.recipient_name || '',
             phone: dbOrder.shipping_address?.phone || '',
