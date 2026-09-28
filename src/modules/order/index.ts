@@ -1,4 +1,9 @@
 export * from './presentation/order.router';
+export * from './presentation/refund-request.router';
+export * from './infrastructure/models/refund-request.model';
+export { RefundRequestService } from './application/refund-request.service';
+export { RefundStateMachine } from './application/refund-state-machine';
+export { RefundTimeoutJob } from './application/refund-timeout.job';
 export * from './types/index';
 export * from './infrastructure/models/order.model';
 export * from './infrastructure/models/payout-request.model';

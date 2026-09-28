@@ -9,7 +9,7 @@ import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter, sellerPromot
 
 import { cartRouter } from '../modules/cart';
 import { productsRouter, wishlistRouter } from '../modules/product';
-import { ordersRouter } from '../modules/order';
+import { ordersRouter, refundRequestRouter } from '../modules/order';
 import { paymentRouter } from '../modules/payment';
 import { promotionRouter } from '../modules/promotion';
 
@@ -40,6 +40,7 @@ router.use('/seller/orders', sellerOrdersRouter);
 router.use('/cart', cartRouter);
 router.use('/products', productsRouter);
 router.use('/orders', ordersRouter);
+router.use('/', refundRequestRouter);
 router.use('/payment', paymentRouter);
 
 router.use('/favorites', wishlistRouter);

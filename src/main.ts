@@ -23,6 +23,9 @@ async function bootstrap() {
     const { FulfillmentQueueService } = await import('./modules/order/application/fulfillment-queue.service');
     FulfillmentQueueService.startWorker();
 
+    const { RefundTimeoutJob } = await import('./modules/order/application/refund-timeout.job');
+    RefundTimeoutJob.start();
+
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);
         logger.info(` VietCraft Backend Monolith Running...`);
