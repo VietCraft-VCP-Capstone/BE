@@ -13,7 +13,7 @@ import { ordersRouter } from '../modules/order';
 import { paymentRouter } from '../modules/payment';
 import { promotionRouter } from '../modules/promotion';
 
-import { analyticsRouter } from '../modules/analytics';
+import { analyticsRouter, sellerAnalyticsRouter } from '../modules/analytics';
 import { designsRouter } from '../modules/design/presentation/design.router';
 import { chatRouter } from '../modules/chat';
 import { notificationRouter } from '../modules/notification';
@@ -35,6 +35,8 @@ router.use('/seller/promotions', sellerPromotionsRouter);
 // Đơn BÁN được của gian hàng. Tách khỏi '/orders' (đơn người dùng ĐI MUA) vì hai bên
 // lọc theo hai khoá khác nhau: buyer_id với /orders, shop_id với route này.
 router.use('/seller/orders', sellerOrdersRouter);
+// 16 tính năng phân tích (F26–F41): BE xác thực seller, tra shop, rồi gọi service AI.
+router.use('/seller/analytics', sellerAnalyticsRouter);
 
 
 router.use('/cart', cartRouter);
