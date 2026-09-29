@@ -128,4 +128,26 @@ router.get('/files/:filename', async (req: any, res: Response) => {
     }
 });
 
+/**
+ * 8. Quét OCR CCCD & kiểm tra thật/giả bằng AI EasyOCR
+ */
+router.post('/scan-cccd', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const { filename, side = 'front' } = req.body;
+        if (!filename) {
+            return res.status(400).json({ success: false, error: 'Thiếu tên file ảnh CCCD để quét.' });
+        }
+        if (side !== 'front' && side !== 'back') {
+            return res.status(400).json({ success: false, error: 'Tham số side phải là "front" hoặc "back".' });
+        }
+
+        const result = await SellerKycService.scanCccd(filename, side);
+        res.status(200).json(result);
+    } catch (error: any) {
+        logger.error(`[Seller KYC Scan CCCD Error] User ${req.user?.id}: ${error.message}`);
+        res.status(400).json({ success: false, error: error.message });
+    }
+});
+
 export const sellerKycRouter = router;
+

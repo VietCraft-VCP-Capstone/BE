@@ -41,6 +41,7 @@ export function mapDbOrderToResponse(dbOrder: any): OrderResponse {
     return {
         id: dbOrder.order_code,
         buyerId: dbOrder.buyer_id?.toString() || '',
+        shopId: (dbOrder.shop_id?._id || dbOrder.shop_id)?.toString() || '',
         shopName: dbOrder.shop_id?.shop_name || 'VietCraft Shop',
         shopLogo: dbOrder.shop_id?.logo || PLACEHOLDER_SHOP_LOGO,
         items: (dbOrder.items || []).map((it: any) => {
@@ -72,6 +73,7 @@ export function mapDbOrderToResponse(dbOrder: any): OrderResponse {
         status: feStatus,
         paymentGateway: dbOrder.payment_method?.toLowerCase() || 'vnpay',
         paymentMethod: dbOrder.payment_method,
+        couponCode: dbOrder.coupon_code || null,
         shippingProvider: dbOrder.shipping_details?.carrier?.toLowerCase() || 'ghn',
         shippingCode: dbOrder.shipping_details?.tracking_number,
         paymentStatus: dbOrder.payment_status,

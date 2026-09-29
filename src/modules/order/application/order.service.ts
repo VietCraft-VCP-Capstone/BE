@@ -140,6 +140,7 @@ export class OrdersService {
     let discount = 0;
     const couponCode = payload.couponCode || payload.coupon_code;
     let isPlatformCoupon = true;
+    let cleanCouponCode: string | undefined;
 
     if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
       const applyResult = await PromotionService.validateAndApply(
@@ -161,6 +162,11 @@ export class OrdersService {
 
       discount = applyResult.discount;
       isPlatformCoupon = applyResult.coupon?.is_platform ?? true;
+      cleanCouponCode = couponCode.trim().toUpperCase();
+
+      // Atomic claim: tăng used_count trước khi tạo order để tránh race condition
+      // Nếu hết lượt hoặc user đã dùng → throw Error, dừng tạo order
+      await PromotionService.claimUsage(cleanCouponCode, buyerId);
     }
 
     const platformFee = subtotal * PLATFORM_FEE_RATE;
@@ -175,6 +181,10 @@ export class OrdersService {
     const paymentMethod = PAYMENT_METHODS.includes(gateway) ? gateway : "COD";
 
     if (hasPodItem && paymentMethod === "COD") {
+      // Hoàn lại lượt dùng voucher nếu đơn bị reject ở bước này
+      if (cleanCouponCode) {
+        await PromotionService.releaseUsage(cleanCouponCode).catch(() => {});
+      }
       throw new Error(
         "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc MOMO.",
       );
@@ -216,17 +226,12 @@ export class OrdersService {
         platform_fee: dec(platformFee),
         seller_payout_amount: dec(sellerPayoutAmount),
       },
+      coupon_code: cleanCouponCode || null,
       status_history: [
         { status: "ORDERED", changed_at: now, note: "Đơn được tạo" },
       ],
       order_hour_of_week: now.getDay() * 24 + now.getHours(),
     });
-
-    if (couponCode) {
-      await PromotionService.recordUsage(couponCode).catch(err => {
-        console.error('Lỗi khi ghi nhận lượt sử dụng coupon:', err);
-      });
-    }
 
 
     // Phát thông báo Realtime cho Người mua & Người bán
@@ -358,6 +363,13 @@ export class OrdersService {
         note: "Thanh toán thất bại hoặc người dùng huỷ.",
       });
       await order.save();
+
+      // Hoàn lại lượt dùng voucher khi đơn bị huỷ
+      if (order.coupon_code) {
+        await PromotionService.releaseUsage(order.coupon_code).catch(err =>
+          console.error('[COUPON] Lỗi hoàn lượt dùng voucher:', err?.message || err)
+        );
+      }
 
       try {
         await notificationService.createNotification({

@@ -18,6 +18,7 @@ import {
     verifyPresignedToken
 } from '../../../shared/utils/crypto.service';
 import { resolveKycFilePath, KYC_STORAGE_ROOT } from '../../../shared/upload/kyc-storage.middleware';
+import { config } from '../../../app/config';
 import { generateSlug } from '../../../shared/utils/slug';
 import { logger } from '../../../shared/utils/logger';
 import { sendPhoneVerificationOtpEmail } from '../../../shared/utils/email.service';
@@ -35,16 +36,14 @@ export class SellerKycService {
 
         let fileUrls: Record<string, string> = {};
         if (application?.kyc_data) {
-            const { front_id_image, back_id_image, portrait_image, business_license_image } = application.kyc_data;
+            const { front_id_image, back_id_image, business_license_image } = application.kyc_data;
             if (front_id_image) {
                 fileUrls.front_id_url = `/api/seller/kyc/files/${front_id_image}?token=${generatePresignedToken(front_id_image).token}`;
             }
             if (back_id_image) {
                 fileUrls.back_id_url = `/api/seller/kyc/files/${back_id_image}?token=${generatePresignedToken(back_id_image).token}`;
             }
-            if (portrait_image) {
-                fileUrls.portrait_url = `/api/seller/kyc/files/${portrait_image}?token=${generatePresignedToken(portrait_image).token}`;
-            }
+
             if (business_license_image) {
                 fileUrls.business_license_url = `/api/seller/kyc/files/${business_license_image}?token=${generatePresignedToken(business_license_image).token}`;
             }
@@ -290,7 +289,7 @@ export class SellerKycService {
                 tax_code: kyc.tax_code,
                 front_id_image: kyc.front_id_image,
                 back_id_image: kyc.back_id_image,
-                portrait_image: kyc.portrait_image,
+
                 company_name: kyc.company_name,
                 business_license_number_encrypted: encryptedBusinessLicense,
                 business_license_image: kyc.business_license_image,
@@ -375,7 +374,7 @@ export class SellerKycService {
         const filesToDelete = [
             app.kyc_data?.front_id_image,
             app.kyc_data?.back_id_image,
-            app.kyc_data?.portrait_image,
+
             app.kyc_data?.business_license_image
         ].filter(Boolean) as string[];
 
@@ -416,4 +415,51 @@ export class SellerKycService {
 
         return null;
     }
+
+    static async scanCccd(filename: string, side: 'front' | 'back' = 'front') {
+        const absPath = resolveKycFilePath(filename);
+        if (!absPath || !fs.existsSync(absPath)) {
+            throw new Error('Không tìm thấy file ảnh tài liệu để quét.');
+        }
+
+        const fileBuffer = fs.readFileSync(absPath);
+        const ext = path.extname(filename).toLowerCase();
+        let mimeType = 'image/jpeg';
+        if (ext === '.png') mimeType = 'image/png';
+        if (ext === '.webp') mimeType = 'image/webp';
+
+        const formData = new FormData();
+        const blob = new Blob([fileBuffer], { type: mimeType });
+        formData.append('file', blob, filename);
+        formData.append('side', side);
+
+        const aiUrl = `${config.aiAnalyticsUrl}/api/v1/ocr/cccd/`;
+        logger.info(`[Seller KYC] Sending CCCD scan request to AI service: ${aiUrl} (side=${side})`);
+
+        try {
+            const response = await fetch(aiUrl, {
+                method: 'POST',
+                body: formData,
+                signal: AbortSignal.timeout(30000), // OCR quét ảnh tiếng Việt mất 5-15s trên CPU
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                logger.error(`[Seller KYC] AI OCR Service Error (${response.status}): ${errText}`);
+                throw new Error(`AI OCR Service trả về lỗi: ${errText}`);
+            }
+
+            const data = await response.json();
+            return data;
+        } catch (error: any) {
+            const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+            if (timedOut) {
+                logger.error('[Seller KYC] AI OCR Service timeout sau 30s');
+                throw new Error('Hệ thống AI xử lý quá thời gian quy định (timeout 30s). Vui lòng thử lại.');
+            }
+            throw error;
+        }
+    }
+
 }
+
