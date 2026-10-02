@@ -5,11 +5,12 @@ import { adminRouter, adminPromotionsRouter } from '../modules/admin';
 import { categoryRouter } from '../modules/category';
 import { tagsRouter } from '../modules/tags';
 import { userRouter } from '../modules/user';
-import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter, sellerPromotionsRouter } from '../modules/seller';
+import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter, sellerPromotionsRouter, sellerPrinterRouter } from '../modules/seller';
 
 import { cartRouter } from '../modules/cart';
-import { productsRouter, wishlistRouter } from '../modules/product';
-import { ordersRouter } from '../modules/order';
+import { productsRouter, wishlistRouter, shopRouter } from '../modules/product';
+import { ordersRouter, reviewRouter } from '../modules/order';
+
 import { paymentRouter } from '../modules/payment';
 import { promotionRouter } from '../modules/promotion';
 
@@ -22,8 +23,6 @@ import { uploadRouter } from '../modules/upload';
 const router = Router();
 
 router.use('/auth', authRouter);
-// Category/Tag/Promotion đã tách thành module riêng. Mount TRƯỚC '/admin' để router cụ thể
-// thắng router tổng. URL giữ nguyên /api/admin/categories, /api/admin/tags, /api/admin/promotions.
 router.use('/admin/categories', categoryRouter);
 router.use('/admin/tags', tagsRouter);
 router.use('/admin/promotions', adminPromotionsRouter);
@@ -32,16 +31,16 @@ router.use('/users', userRouter);
 router.use('/seller/kyc', sellerKycRouter);
 router.use('/seller/settings', sellerSettingsRouter);
 router.use('/seller/promotions', sellerPromotionsRouter);
-// Đơn BÁN được của gian hàng. Tách khỏi '/orders' (đơn người dùng ĐI MUA) vì hai bên
-// lọc theo hai khoá khác nhau: buyer_id với /orders, shop_id với route này.
 router.use('/seller/orders', sellerOrdersRouter);
-// 16 tính năng phân tích (F26–F41): BE xác thực seller, tra shop, rồi gọi service AI.
 router.use('/seller/analytics', sellerAnalyticsRouter);
+router.use('/seller/printer', sellerPrinterRouter);
 
 
 router.use('/cart', cartRouter);
 router.use('/products', productsRouter);
+router.use('/shops', shopRouter);
 router.use('/orders', ordersRouter);
+router.use('/reviews', reviewRouter);
 router.use('/payment', paymentRouter);
 
 router.use('/favorites', wishlistRouter);

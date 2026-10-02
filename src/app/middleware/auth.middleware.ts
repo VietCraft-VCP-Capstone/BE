@@ -43,3 +43,17 @@ export function requireRole(roles: Role[]) {
         next();
     };
 }
+
+export function optionalAuthenticate(req: AuthenticatedRequest, _res: Response, next: NextFunction) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.split(' ')[1];
+        try {
+            const decoded = jwt.verify(token, config.jwtSecret) as any;
+            req.user = { id: decoded.id, email: decoded.email, role: decoded.role };
+        } catch {
+            // Không ngắt luồng nếu token không hợp lệ hoặc hết hạn ở route public
+        }
+    }
+    next();
+}

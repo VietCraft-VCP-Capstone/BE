@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { PromotionService } from '../application/promotion.service';
 import { Coupon } from '../infrastructure/models/coupon.model';
+import { authenticate } from '../../../app/middleware/auth.middleware';
 
 const router = Router();
 
@@ -42,7 +43,7 @@ router.get('/', async (req, res) => {
 });
 
 // Lấy danh sách voucher khả dụng cho Buyer tại trang Checkout
-router.get('/available', async (req, res) => {
+router.get('/available', authenticate, async (req, res) => {
     try {
         const shopId = req.query.shopId as string | undefined;
         const productId = req.query.productId as string | undefined;
@@ -61,7 +62,7 @@ router.get('/available', async (req, res) => {
 });
 
 // Áp dụng mã giảm giá và tính toán số tiền giảm
-router.post('/apply', async (req, res) => {
+router.post('/apply', authenticate, async (req, res) => {
     try {
         const { code, subtotal, shippingFee, shopId, productId, items } = req.body || {};
         const result = await PromotionService.validateAndApply(
