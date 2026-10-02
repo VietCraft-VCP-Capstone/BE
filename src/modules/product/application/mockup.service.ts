@@ -36,12 +36,13 @@ async function loadImage(url: string): Promise<Buffer> {
         return sharp(abs).toBuffer();
     }
     if (url.startsWith('/images/')) {
-        const localPath = path.join(process.cwd(), '..', 'frontend', 'public', url);
+        const localPath = path.join(process.cwd(), '..', 'FE', 'public', url);
         if (fs.existsSync(localPath)) {
             return sharp(localPath).toBuffer();
         }
     }
-    const full = url.startsWith('http') ? url : (url.startsWith('/') ? `http://localhost:5173${url}` : `${config.printerApiUrl}${url}`);
+    const frontendOrigin = config.frontendUrl || 'http://localhost:3000';
+    const full = url.startsWith('http') ? url : (url.startsWith('/') ? `${frontendOrigin}${url}` : `${config.printerApiUrl}${url}`);
     const res = await fetch(full);
     if (!res.ok) throw new Error(`Không tải được ảnh phôi (${res.status})`);
     return Buffer.from(await res.arrayBuffer());

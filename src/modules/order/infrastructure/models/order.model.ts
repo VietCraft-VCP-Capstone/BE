@@ -57,6 +57,7 @@ export interface IOrder extends Document {
     fulfillment_status?: 'UNFULFILLED' | 'QUEUED' | 'SUBMITTED' | 'RECEIVED' | 'PRINTING' | 'PACKAGED' | 'SHIPPED' | 'FAILED' | 'CANCELLED';
     items: IOrderItem[];
     financial_breakdown: IFinancialBreakdown;
+    coupon_code?: string;
     status_history: IStatusHistory[];
     order_hour_of_week: number;
     created_at: Date;
@@ -134,6 +135,7 @@ const OrderSchema = new Schema<IOrder>({
     },
     items: { type: [OrderItemSchema], required: true },
     financial_breakdown: { type: FinancialBreakdownSchema, required: true },
+    coupon_code: { type: String, default: null, index: true },
     status_history: { type: [StatusHistorySchema], default: [] },
     order_hour_of_week: { type: Number, required: true, index: true }
 }, {

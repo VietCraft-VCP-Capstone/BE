@@ -21,9 +21,11 @@ export interface OrderResponse {
     shippingProvider: 'ghn' | 'ghtk';
     shippingCode?: string;
     createdAt: Date;
+    shopId?: string;
     shopName?: string;
     shopLogo?: string;
     shippingFee?: number;
+    couponCode?: string | null;
     paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
     shippingAddress?: {
         recipient_name: string;

@@ -74,15 +74,17 @@ export class PromotionService {
         }
 
         // Tự động phân giải shopId từ productId hoặc items nếu chưa có shopId
-        if (!shopId && productId && mongoose.Types.ObjectId.isValid(productId)) {
-            const product = await Product.findById(productId).select('shop_id').lean();
-            if (product?.shop_id) {
-                shopId = product.shop_id as mongoose.Types.ObjectId;
-            }
-        } else if (!shopId && items && items.length > 0 && mongoose.Types.ObjectId.isValid(items[0].productId)) {
-            const product = await Product.findById(items[0].productId).select('shop_id').lean();
-            if (product?.shop_id) {
-                shopId = product.shop_id as mongoose.Types.ObjectId;
+        if (!shopId) {
+            if (productId && mongoose.Types.ObjectId.isValid(productId)) {
+                const product = await Product.findById(productId).select('shop_id').lean();
+                if (product?.shop_id) {
+                    shopId = product.shop_id as mongoose.Types.ObjectId;
+                }
+            } else if (items && items.length > 0 && mongoose.Types.ObjectId.isValid(items[0].productId)) {
+                const product = await Product.findById(items[0].productId).select('shop_id').lean();
+                if (product?.shop_id) {
+                    shopId = product.shop_id as mongoose.Types.ObjectId;
+                }
             }
         }
 
@@ -304,7 +306,6 @@ export class PromotionService {
             ]
         })
         .populate('shop_id', 'shop_name logo')
-        .populate('applicable_product_ids', 'title thumbnail_url images')
         .sort({ end_date: 1 })
         .lean();
 
@@ -370,7 +371,62 @@ export class PromotionService {
     }
 
     /**
-     * Tăng số lần sử dụng sau khi đơn hàng tạo thành công
+     * Atomic: claim 1 lượt sử dụng voucher.
+     * Dùng findOneAndUpdate với điều kiện used_count < usage_limit
+     * để tránh race condition khi nhiều buyer đặt đồng thời.
+     *
+     * @param buyerId - ID người mua (kiểm tra per-user limit)
+     */
+    static async claimUsage(code: string, buyerId?: string): Promise<void> {
+        if (!code) return;
+        const cleanCode = code.trim().toUpperCase();
+
+        // Per-user limit: kiểm tra buyer đã dùng mã này chưa
+        if (buyerId) {
+            const { Order } = await import('../../order/infrastructure/models/order.model');
+            const existingOrder = await Order.findOne({
+                buyer_id: new mongoose.Types.ObjectId(buyerId),
+                coupon_code: cleanCode,
+                order_status: { $ne: 'CANCELLED' }
+            }).select('_id').lean();
+
+            if (existingOrder) {
+                throw new Error('Bạn đã sử dụng mã giảm giá này ở đơn hàng trước đó.');
+            }
+        }
+
+        // Atomic increment: chỉ tăng nếu chưa vượt giới hạn
+        const updated = await Coupon.findOneAndUpdate(
+            {
+                code: cleanCode,
+                is_active: true,
+                $or: [
+                    { usage_limit: null },
+                    { $expr: { $lt: ['$used_count', '$usage_limit'] } }
+                ]
+            },
+            { $inc: { used_count: 1 } },
+            { new: true }
+        );
+
+        if (!updated) {
+            throw new Error('Mã giảm giá đã hết lượt sử dụng hoặc không còn hoạt động.');
+        }
+    }
+
+    /**
+     * Hoàn lại 1 lượt sử dụng (khi hủy đơn hàng có dùng voucher).
+     */
+    static async releaseUsage(code: string): Promise<void> {
+        if (!code) return;
+        await Coupon.findOneAndUpdate(
+            { code: code.trim().toUpperCase(), used_count: { $gt: 0 } },
+            { $inc: { used_count: -1 } }
+        );
+    }
+
+    /**
+     * @deprecated Dùng claimUsage() thay thế để tránh race condition
      */
     static async recordUsage(code: string) {
         if (!code) return;
