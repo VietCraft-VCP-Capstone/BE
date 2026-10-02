@@ -79,6 +79,14 @@ export class FulfillmentQueueService {
             // Cập nhật trạng thái đơn hàng khi thành công
             order.supplier_order_id = result.supplier_order_id;
             order.fulfillment_status = 'SUBMITTED';
+            order.seller_approval_status = 'APPROVED';
+            order.printer_info = {
+                printer_id: result.printer_id,
+                printer_name: result.printer_name,
+                supplier_order_id: result.supplier_order_id,
+                dispatched_at: new Date(),
+                printer_status: 'RECEIVED'
+            };
             if (['ORDERED', 'PENDING_DESIGN'].includes(order.order_status)) {
                 order.order_status = 'PROCESSING';
             }

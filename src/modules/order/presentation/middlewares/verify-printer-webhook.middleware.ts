@@ -56,6 +56,11 @@ export async function verifyPrinterWebhook(req: WebhookVerifiedRequest, res: Res
     }
 
     if (!signature) {
+        if (config.nodeEnv !== 'production') {
+            logger.warn('[PRINTER WEBHOOK] Dev mode: Bỏ qua kiểm tra thiếu signature.');
+            req.webhookVerified = true;
+            return next();
+        }
         logger.warn('[PRINTER WEBHOOK] Thiếu header x-webhook-signature.');
         await WebhookLog.create({
             provider: 'PRINTING_SHOP',
@@ -90,6 +95,11 @@ export async function verifyPrinterWebhook(req: WebhookVerifiedRequest, res: Res
                         (sigBuf.length === expBuf2.length && crypto.timingSafeEqual(sigBuf, expBuf2));
 
         if (!isValid) {
+            if (config.nodeEnv !== 'production') {
+                logger.warn(`[PRINTER WEBHOOK] Dev mode: Chữ ký HMAC không khớp nhưng cho phép qua. Received: ${signature}`);
+                req.webhookVerified = true;
+                return next();
+            }
             logger.error(`[PRINTER WEBHOOK] Sai chữ ký điện tử HMAC. Received: ${signature}`);
             await WebhookLog.create({
                 provider: 'PRINTING_SHOP',
@@ -111,6 +121,11 @@ export async function verifyPrinterWebhook(req: WebhookVerifiedRequest, res: Res
         req.webhookVerified = true;
         next();
     } catch (err: any) {
+        if (config.nodeEnv !== 'production') {
+            logger.warn(`[PRINTER WEBHOOK] Dev mode: Lỗi xác thực chữ ký: ${err.message}, vẫn cho phép qua.`);
+            req.webhookVerified = true;
+            return next();
+        }
         logger.error(`[PRINTER WEBHOOK ERROR] Lỗi xác thực chữ ký: ${err.message}`);
         return res.status(500).json({ error: 'Internal error during signature validation' });
     }

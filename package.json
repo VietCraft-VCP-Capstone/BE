@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",
-    "dev": "ts-node-dev --respawn --transpile-only src/main.ts"
+    "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
+    "seed": "ts-node-dev --transpile-only src/shared/utils/seed_realistic_data.ts"
   },
   "dependencies": {
     "@types/bcryptjs": "^2.4.6",

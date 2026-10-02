@@ -50,6 +50,8 @@ export interface ProductItemResponseDTO {
     shopInfo?: ShopInfoDTO;
     sellerId?: string;
     tags?: string[];
+    rating?: number;
+    ratingCount?: number;
     allowCustomization?: boolean;
     customizationType?: string;
     createdAt: string;
