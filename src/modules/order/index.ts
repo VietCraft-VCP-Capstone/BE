@@ -1,5 +1,6 @@
 export * from './presentation/order.router';
 export * from './presentation/refund-request.router';
+export * from './presentation/review.router';
 export * from './infrastructure/models/refund-request.model';
 export { RefundRequestService } from './application/refund-request.service';
 export { RefundStateMachine } from './application/refund-state-machine';
@@ -10,5 +11,6 @@ export * from './infrastructure/models/payout-request.model';
 export * from './infrastructure/models/return-request.model';
 export * from './infrastructure/models/review.model';
 export * from './infrastructure/models/transaction.model';
-export { OrdersService, } from './application/order.service';
+export { OrdersService } from './application/order.service';
+export { ReviewService } from './application/review.service';
 // export { dispatchToPrinter } from './application/printer-dispatch.service';

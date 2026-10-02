@@ -1,10 +1,28 @@
 import dotenv from 'dotenv';
+import dns from 'dns';
 import { Pool } from 'pg';
 import mongoose from 'mongoose';
 import { createClient } from 'redis';
 import { logger } from '../../shared/utils/logger';
 
 dotenv.config();
+
+/**
+ * Đọc `AI_SHOP_MAP` dạng `email=shop,email2=shop2` thành map email đã hạ chữ thường.
+ *
+ * Bỏ qua mục sai cú pháp thay vì ném lỗi: một dấu phẩy thừa trong .env không đáng để
+ * làm sập cả server, và phần còn lại của map vẫn dùng được.
+ */
+function parseShopMap(raw?: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const pair of (raw || '').split(',')) {
+        const [email, shop] = pair.split('=').map(s => s?.trim());
+        if (!email || !shop) continue;
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(shop)) continue;
+        out[email.toLowerCase()] = shop;
+    }
+    return out;
+}
 
 export const config = {
     port: process.env.PORT || 8080,
@@ -14,6 +32,17 @@ export const config = {
     redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
     jwtSecret: process.env.JWT_SECRET || '',
     aiAnalyticsUrl: process.env.AI_ANALYTICS_URL || 'http://localhost:8000',
+    // Bí mật dùng chung BE <-> service AI. Phải trùng AI_GATEWAY_SECRET bên AI-Analysic.
+    aiGatewaySecret: process.env.AI_GATEWAY_SECRET || '',
+    // Shop mẫu trong dữ liệu mồi (vd shp_00017). Có giá trị = chế độ demo: mọi seller xem
+    // số liệu của shop mẫu, FE hiện nhãn "shop mẫu". Để trống = gửi shop thật của seller.
+    aiDemoShopId: process.env.AI_DEMO_SHOP_ID || '',
+    // Ánh xạ RIÊNG từng người bán sang một shop mẫu, dạng `email=shp_00017,email2=shp_00005`.
+    // Dùng khi một account cần xem đủ 16 màn hình để demo hoặc kiểm thử, mà không phải
+    // bật chế độ shop mẫu cho toàn bộ người bán. Ưu tiên cao hơn AI_DEMO_SHOP_ID.
+    aiShopMap: parseShopMap(process.env.AI_SHOP_MAP),
+    // SRS MSG132: service AI trả chậm hơn 5 giây là lỗi.
+    aiTimeoutMs: Number(process.env.AI_TIMEOUT_MS) || 5000,
     googleClientId: process.env.GOOGLE_CLIENT_ID || '',
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
     mailUser: process.env.MAIL_USER || '',
@@ -92,6 +121,11 @@ export async function connectMongo() {
         ? config.mongoUri.replace('/?', '/vietcraft?')
         : config.mongoUri;
     try {
+        try {
+            dns.setServers(['8.8.8.8', '1.1.1.1']);
+        } catch {
+            // ignore if not supported in environment
+        }
         mongoose.set('strictQuery', false);
         mongoose.set('bufferCommands', false);  // Fail immediately if not connected
         await mongoose.connect(uri, {

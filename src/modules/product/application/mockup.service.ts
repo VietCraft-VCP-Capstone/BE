@@ -49,7 +49,6 @@ async function loadImage(url: string): Promise<Buffer> {
 }
 
 
-
 export async function generateMockup(
     blankImageUrl: string,
     designUrl: string,
