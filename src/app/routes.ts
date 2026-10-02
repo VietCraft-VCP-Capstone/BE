@@ -18,6 +18,7 @@ import { designsRouter } from '../modules/design/presentation/design.router';
 import { chatRouter } from '../modules/chat';
 import { notificationRouter } from '../modules/notification';
 import { uploadRouter } from '../modules/upload';
+import { refundRouter } from '../modules/refund';
 
 const router = Router();
 
@@ -43,6 +44,7 @@ router.use('/cart', cartRouter);
 router.use('/products', productsRouter);
 router.use('/orders', ordersRouter);
 router.use('/payment', paymentRouter);
+router.use('/refunds', refundRouter);
 
 router.use('/favorites', wishlistRouter);
 router.use('/analytics', analyticsRouter);

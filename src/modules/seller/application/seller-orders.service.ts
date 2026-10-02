@@ -208,6 +208,7 @@ export class SellerOrdersService {
 
         if (next === 'DELIVERED' && order.payment_method === 'COD' && order.payment_status === 'PENDING') {
             order.payment_status = 'PAID';
+            order.paid_at = new Date();
         }
 
         order.order_status = next;
@@ -275,4 +276,3 @@ export class SellerOrdersService {
 }
 
 export default SellerOrdersService;
-

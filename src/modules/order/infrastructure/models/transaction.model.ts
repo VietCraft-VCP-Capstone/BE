@@ -13,6 +13,7 @@ export interface ITransaction extends Document {
     status: 'SUCCESS' | 'FAILED' | 'PENDING';
     callback_payload?: Record<string, any>;
     refund_request_id?: string;
+    payment_date?: Date;
     note?: string;
     created_at: Date;
 }
@@ -39,9 +40,21 @@ const TransactionSchema = new Schema<ITransaction>({
     },
     callback_payload: { type: Schema.Types.Mixed, default: {} },
     refund_request_id: { type: String, index: true },
+    payment_date: { type: Date },
     note: { type: String }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: false }
 });
+
+// Một lần thực thi refund chỉ được ghi đúng một transaction, kể cả settle/reconcile
+// được gọi đồng thời hoặc chạy lại sau khi tiến trình bị gián đoạn.
+TransactionSchema.index(
+    { refund_request_id: 1, type: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { refund_request_id: { $type: 'string' } },
+        name: 'uniq_refund_execution',
+    },
+);
 
 export const Transaction = mongoose.model<ITransaction>('Transaction', TransactionSchema, 'transactions');

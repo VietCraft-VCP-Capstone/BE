@@ -50,6 +50,8 @@ export interface IOrder extends Document {
     order_code: string;
     payment_method: 'VNPAY' | 'MOMO' | 'COD';
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
+    /** Thời điểm provider xác nhận tiền về; refund window tính từ mốc này. */
+    paid_at?: Date;
     order_status: 'ORDERED' | 'PENDING_DESIGN' | 'PROCESSING' | 'SHIPPING' | 'DELIVERED' | 'CANCELLED';
     shipping_address: IShippingAddress;
     shipping_details: IShippingDetails;
@@ -117,6 +119,7 @@ const OrderSchema = new Schema<IOrder>({
     order_code: { type: String, required: true, unique: true, index: true },
     payment_method: { type: String, required: true, enum: ['VNPAY', 'MOMO', 'COD'] },
     payment_status: { type: String, required: true, enum: ['PENDING', 'PAID', 'REFUNDED'], default: 'PENDING' },
+    paid_at: { type: Date, index: true },
     order_status: {
         type: String,
         required: true,

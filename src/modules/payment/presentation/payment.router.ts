@@ -13,8 +13,8 @@ paymentRouter.get('/vnpay/ipn', paymentController.handleIpn);
 // 3. Xử lý khi người dùng redirect về từ VNPay (Public)
 paymentRouter.get('/vnpay/return', paymentController.handleReturn);
 
-// 4. API Hoàn tiền qua VNPay (Cần quyền đăng nhập/Admin)
-paymentRouter.post('/vnpay/refund', authenticate, paymentController.refund);
+// Không expose lệnh refund provider trực tiếp. Mọi hoàn tiền phải đi qua /api/refunds
+// để có idempotency, phân quyền theo shop, state machine và ledger.
 
 export { paymentRouter };
 export default paymentRouter;

@@ -65,6 +65,30 @@ export const config = {
     },
     // Shared secret cổng thanh toán dùng để ký webhook POST /orders/callback/:id.
     paymentCallbackSecret: process.env.PAYMENT_CALLBACK_SECRET || '',
+    refund: {
+        // Cửa sổ buyer được phép tạo yêu cầu hoàn tiền, mặc định 5 phút.
+        windowSeconds: Math.max(1, Number(process.env.REFUND_WINDOW_SECONDS) || 300),
+        // Tổng số lần gọi provider tối đa, gồm cả lần đầu.
+        maxAttempts: Math.max(1, Number(process.env.REFUND_MAX_ATTEMPTS) || 3),
+        mode: String(process.env.REFUND_MODE || 'PAYOUT').toUpperCase() === 'MANUAL' ? 'MANUAL' : 'PAYOUT',
+        payoutTimeoutSeconds: Math.max(30, Number(process.env.PAYOS_PAYOUT_TIMEOUT_SECONDS) || 900),
+        // Tài khoản nhận tiền của nền tảng. Buyer nhập trùng tài khoản này thì tiền chạy vòng,
+        // nên bị chặn với lý do dest_is_merchant (ngoài tài khoản ngân hàng của shop).
+        merchantBankBin: (process.env.MERCHANT_BANK_BIN || '').trim(),
+        merchantAccountNo: (process.env.MERCHANT_ACCOUNT_NO || '').replace(/\s+/g, ''),
+    },
+    payos: {
+        clientId: process.env.PAYOS_CLIENT_ID || '',
+        apiKey: process.env.PAYOS_API_KEY || '',
+        checksumKey: process.env.PAYOS_CHECKSUM_KEY || '',
+        baseUrl: process.env.PAYOS_BASE_URL || 'https://api-merchant.payos.vn',
+        payoutClientId: process.env.PAYOS_PAYOUT_CLIENT_ID || '',
+        payoutApiKey: process.env.PAYOS_PAYOUT_API_KEY || '',
+        payoutChecksumKey: process.env.PAYOS_PAYOUT_CHECKSUM_KEY || '',
+        payoutBaseUrl: process.env.PAYOS_PAYOUT_BASE_URL || 'https://api-merchant.payos.vn',
+        payoutWebhookSecret: process.env.PAYOS_PAYOUT_WEBHOOK_SECRET || '',
+        stub: String(process.env.STUB_PAYOS || 'false').toLowerCase() === 'true',
+    },
     speedSmsAccessToken: process.env.SPEEDSMS_ACCESS_TOKEN || '',
     speedSmsType: Number(process.env.SPEEDSMS_SMS_TYPE) || 2,
     vnpay: {

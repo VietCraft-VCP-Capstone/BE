@@ -33,7 +33,6 @@ export interface OrderResponse {
 }
 
 
-export const PLATFORM_FEE_RATE = 0.05;
 export const DEFAULT_SHIPPING_FEE = 30000;
 export const PAYMENT_METHODS = ['VNPAY', 'MOMO',];
 export const SHIPPING_CARRIERS = ['ghn', 'ghtk'];

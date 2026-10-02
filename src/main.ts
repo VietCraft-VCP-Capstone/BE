@@ -5,6 +5,7 @@ import { config, initializeDatabases } from './app/config';
 import { logger } from './shared/utils/logger';
 import { ChatGateway } from './modules/chat';
 import { NotificationGateway } from './modules/notification';
+import { payosPayoutService, RefundReconcileService } from './modules/refund';
 
 async function bootstrap() {
     const server = http.createServer(app);
@@ -19,6 +20,11 @@ async function bootstrap() {
     NotificationGateway.setIO(io);
 
     await initializeDatabases();
+
+    // Health-check payout trước khi nhận request. Nếu credential/IP whitelist/channel
+    // chưa sẵn sàng, service tự hạ xuống MANUAL_VIETQR thay vì làm refund treo.
+    await payosPayoutService.initialize();
+    RefundReconcileService.startWorker();
 
     const { FulfillmentQueueService } = await import('./modules/order/application/fulfillment-queue.service');
     FulfillmentQueueService.startWorker();

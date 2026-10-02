@@ -8,7 +8,9 @@ import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
 import { dispatchToPrinter } from "./printer-dispatch.service";
 import { PromotionService } from "../../promotion/application/promotion.service";
-import { OrderResponse, DEFAULT_SHIPPING_FEE, PLATFORM_FEE_RATE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
+import { OrderResponse, DEFAULT_SHIPPING_FEE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
+import { CommissionSetting } from "../../../shared/services/commission-setting.service";
+import { commissionFromGross } from "../../../shared/utils/commission";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
 import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
 
@@ -36,6 +38,10 @@ export class OrdersService {
     let shopId: mongoose.Types.ObjectId | null = null;
     const orderItems: any[] = [];
     let subtotal = 0;
+    // Mỗi dòng hàng có thể chịu mức hoa hồng khác nhau (luật theo danh mục + loại), nên phí
+    // sàn phải cộng dồn theo từng dòng. Nhân một mức phẳng lên subtotal là tính sai ngay khi
+    // đơn có hai mặt hàng khác danh mục.
+    let platformFee = 0;
     let hasPodItem = false;
 
     for (const it of items) {
@@ -90,7 +96,17 @@ export class OrdersService {
       shopId = product.shop_id;
       if (product.product_type === "POD_TEMPLATE") hasPodItem = true;
 
-      subtotal += num(variant.retail_price) * qty;
+      const lineTotal = num(variant.retail_price) * qty;
+      subtotal += lineTotal;
+      // Giá niêm yết đã gồm hoa hồng (cộng vào lúc tạo/sửa giá), nên phí sàn phải BÓC LẠI
+      // từ giá đó chứ không nhân thêm — nhân thêm là trừ người bán hai lần.
+      platformFee += commissionFromGross(
+        lineTotal,
+        await CommissionSetting.resolvePercent(
+          product.category_ids?.[0] ? String(product.category_ids[0]) : null,
+          product.product_type,
+        ),
+      );
 
       const placement = product.design_placements?.[0];
       let designUrl: string | undefined;
@@ -163,7 +179,10 @@ export class OrdersService {
       isPlatformCoupon = applyResult.coupon?.is_platform ?? true;
     }
 
-    const platformFee = subtotal * PLATFORM_FEE_RATE;
+    // ponytail: phí sàn dùng luật HIỆN HÀNH, không chụp lại luật lúc niêm yết. Admin đổi mức
+    // giữa lúc sản phẩm đã lên sàn và lúc khách đặt thì phần chênh lệch lệch về phía sàn hoặc
+    // người bán. Cần chính xác tuyệt đối thì snapshot commission_percent xuống product_variants
+    // lúc ghi giá, rồi đọc lại ở đây.
     // Nếu là Shop coupon, shop chịu trừ tiền. Nếu là Platform coupon, sàn bù tiền cho shop.
     const sellerPayoutAmount = isPlatformCoupon
       ? Math.max(0, subtotal - platformFee)
@@ -323,6 +342,7 @@ export class OrdersService {
 
     if (gatewayStatus === "success") {
       order.payment_status = "PAID";
+      order.paid_at = order.paid_at || new Date();
       order.order_status = "PROCESSING";
       order.status_history.push({
         status: "PROCESSING",
