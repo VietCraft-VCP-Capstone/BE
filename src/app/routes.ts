@@ -14,7 +14,7 @@ import { ordersRouter, reviewRouter } from '../modules/order';
 import { paymentRouter } from '../modules/payment';
 import { promotionRouter } from '../modules/promotion';
 
-import { analyticsRouter } from '../modules/analytics';
+import { analyticsRouter, sellerAnalyticsRouter } from '../modules/analytics';
 import { designsRouter } from '../modules/design/presentation/design.router';
 import { chatRouter } from '../modules/chat';
 import { notificationRouter } from '../modules/notification';
@@ -23,8 +23,6 @@ import { uploadRouter } from '../modules/upload';
 const router = Router();
 
 router.use('/auth', authRouter);
-// Category/Tag/Promotion đã tách thành module riêng. Mount TRƯỚC '/admin' để router cụ thể
-// thắng router tổng. URL giữ nguyên /api/admin/categories, /api/admin/tags, /api/admin/promotions.
 router.use('/admin/categories', categoryRouter);
 router.use('/admin/tags', tagsRouter);
 router.use('/admin/promotions', adminPromotionsRouter);
@@ -33,9 +31,8 @@ router.use('/users', userRouter);
 router.use('/seller/kyc', sellerKycRouter);
 router.use('/seller/settings', sellerSettingsRouter);
 router.use('/seller/promotions', sellerPromotionsRouter);
-// Đơn BÁN được của gian hàng. Tách khỏi '/orders' (đơn người dùng ĐI MUA) vì hai bên
-// lọc theo hai khoá khác nhau: buyer_id với /orders, shop_id với route này.
 router.use('/seller/orders', sellerOrdersRouter);
+router.use('/seller/analytics', sellerAnalyticsRouter);
 router.use('/seller/printer', sellerPrinterRouter);
 
 
