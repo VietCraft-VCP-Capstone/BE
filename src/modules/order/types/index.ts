@@ -9,6 +9,7 @@ export interface OrderItemReview {
 }
 
 export interface OrderItem {
+    order_item_id?: string;
     productId: string;
     variantId: string;
     quantity: number;

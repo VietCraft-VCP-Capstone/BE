@@ -64,6 +64,7 @@ export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>
         const isReviewed = Boolean(matchedReview);
 
         return {
+            order_item_id: it.order_item_id ?? undefined,
             productId: prodId,
             variantId: it.variant_id?.toString() || '',
             title: it.title,
