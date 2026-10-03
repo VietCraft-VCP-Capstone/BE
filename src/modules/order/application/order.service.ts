@@ -8,6 +8,7 @@ import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
 import { dispatchToPrinter } from "./printer-dispatch.service";
 import { PromotionService } from "../../promotion/application/promotion.service";
+import { Review } from "../infrastructure/models/review.model";
 import { OrderResponse, DEFAULT_SHIPPING_FEE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
 import { CommissionSetting } from "../../../shared/services/commission-setting.service";
 import { commissionFromGross } from "../../../shared/utils/commission";
@@ -156,6 +157,7 @@ export class OrdersService {
     let discount = 0;
     const couponCode = payload.couponCode || payload.coupon_code;
     let isPlatformCoupon = true;
+    let cleanCouponCode: string | undefined;
 
     if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
       const applyResult = await PromotionService.validateAndApply(
@@ -177,6 +179,11 @@ export class OrdersService {
 
       discount = applyResult.discount;
       isPlatformCoupon = applyResult.coupon?.is_platform ?? true;
+      cleanCouponCode = couponCode.trim().toUpperCase();
+
+      // Atomic claim: tăng used_count trước khi tạo order để tránh race condition
+      // Nếu hết lượt hoặc user đã dùng → throw Error, dừng tạo order
+      await PromotionService.claimUsage(cleanCouponCode, buyerId);
     }
 
     // ponytail: phí sàn dùng luật HIỆN HÀNH, không chụp lại luật lúc niêm yết. Admin đổi mức
@@ -194,6 +201,10 @@ export class OrdersService {
     const paymentMethod = PAYMENT_METHODS.includes(gateway) ? gateway : "COD";
 
     if (hasPodItem && paymentMethod === "COD") {
+      // Hoàn lại lượt dùng voucher nếu đơn bị reject ở bước này
+      if (cleanCouponCode) {
+        await PromotionService.releaseUsage(cleanCouponCode).catch(() => {});
+      }
       throw new Error(
         "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc MOMO.",
       );
@@ -207,6 +218,7 @@ export class OrdersService {
       : "ghn";
 
     const now = new Date();
+    const isPodOrder = Boolean(hasPodItem);
     const order = await OrderModel.create({
       buyer_id: buyerObjectId,
       shop_id: shopId,
@@ -214,6 +226,10 @@ export class OrdersService {
       payment_method: paymentMethod,
       payment_status: "PENDING",
       order_status: "ORDERED",
+      is_pod: isPodOrder,
+      order_type: isPodOrder ? "POD" : "READY_TO_SHIP",
+      seller_approval_status: "PENDING_APPROVAL",
+      fulfillment_status: isPodOrder ? "PENDING_APPROVAL" : "UNFULFILLED",
       shipping_address: {
         recipient_name: address.recipient_name,
         phone: address.phone,
@@ -235,17 +251,12 @@ export class OrdersService {
         platform_fee: dec(platformFee),
         seller_payout_amount: dec(sellerPayoutAmount),
       },
+      coupon_code: cleanCouponCode || null,
       status_history: [
         { status: "ORDERED", changed_at: now, note: "Đơn được tạo" },
       ],
       order_hour_of_week: now.getDay() * 24 + now.getHours(),
     });
-
-    if (couponCode) {
-      await PromotionService.recordUsage(couponCode).catch(err => {
-        console.error('Lỗi khi ghi nhận lượt sử dụng coupon:', err);
-      });
-    }
 
 
     // Phát thông báo Realtime cho Người mua & Người bán
@@ -292,7 +303,23 @@ export class OrdersService {
       .populate("shop_id")
       .populate({ path: 'items.product_id', select: 'images title' });
     if (!order) throw new Error("Không tìm thấy đơn hàng");
-    return mapDbOrderToResponse(order);
+
+    const reviews = await Review.find({
+      order_id: order._id,
+      buyer_id: toBuyerObjectId(buyerId)
+    }).lean();
+
+    const reviewsMap = new Map<string, any>();
+    for (const rev of reviews) {
+      if (rev.order_id && rev.product_id) {
+        reviewsMap.set(`${rev.order_id.toString()}_${rev.product_id.toString()}`, rev);
+        if (order.order_code) {
+          reviewsMap.set(`${order.order_code}_${rev.product_id.toString()}`, rev);
+        }
+      }
+    }
+
+    return mapDbOrderToResponse(order, reviewsMap);
   }
 
   static async getOrdersByBuyer(
@@ -326,7 +353,34 @@ export class OrdersService {
       .populate({ path: 'items.product_id', select: 'images title' })
       .sort({ created_at: -1 })
       .lean();
-    return orders.map(mapDbOrderToResponse);
+
+    const orderIds = orders.map(o => o._id);
+    const reviews = await Review.find({
+      order_id: { $in: orderIds },
+      buyer_id: toBuyerObjectId(buyerId)
+    }).lean();
+
+    const reviewsMap = new Map<string, any>();
+    const orderCodeMap = new Map<string, string>();
+    for (const ord of orders) {
+      if (ord._id && ord.order_code) {
+        orderCodeMap.set(ord._id.toString(), ord.order_code);
+      }
+    }
+
+    for (const rev of reviews) {
+      if (rev.order_id && rev.product_id) {
+        const oIdStr = rev.order_id.toString();
+        const pIdStr = rev.product_id.toString();
+        reviewsMap.set(`${oIdStr}_${pIdStr}`, rev);
+        const code = orderCodeMap.get(oIdStr);
+        if (code) {
+          reviewsMap.set(`${code}_${pIdStr}`, rev);
+        }
+      }
+    }
+
+    return orders.map(ord => mapDbOrderToResponse(ord, reviewsMap));
   }
 
   /*
@@ -343,31 +397,109 @@ export class OrdersService {
     if (gatewayStatus === "success") {
       order.payment_status = "PAID";
       order.paid_at = order.paid_at || new Date();
-      order.order_status = "PROCESSING";
-      order.status_history.push({
-        status: "PROCESSING",
-        changed_at: new Date(),
-        note: "Thanh toán thành công. Đơn hàng chuyển sang sản xuất.",
-      });
-      await order.save();
-      dispatchToPrinter(order).catch((err: any) =>
-        console.error(
-          "[DISPATCH] lỗi gửi đơn sang Printer:",
-          err?.message || err,
-        ),
-      );
+      const shop = order.shop_id as any;
+      const isPod = Boolean(order.is_pod || order.order_type === 'POD' || order.items?.some((it: any) => it.design_file_url));
 
-      try {
-        await notificationService.createNotification({
-          user_id: order.buyer_id.toString(),
-          type: 'ORDER_UPDATE',
-          title: 'Thanh toán thành công',
-          content: `Đơn hàng #${order.order_code} đã thanh toán thành công và chuyển sang xử lý sản xuất.`,
-          link: `/orders/${order._id}`,
-          metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: 'PROCESSING' }
+      if (isPod) {
+        order.is_pod = true;
+        order.order_type = 'POD';
+        const isAutoApprove = Boolean(shop?.printer_partner?.auto_approve);
+
+        if (isAutoApprove) {
+          order.order_status = "PROCESSING";
+          order.seller_approval_status = "APPROVED";
+          order.status_history.push({
+            status: "PROCESSING",
+            changed_at: new Date(),
+            note: "Thanh toán thành công. Đơn hàng POD được tự động duyệt và chuyển xưởng in.",
+          });
+          await order.save();
+          dispatchToPrinter(order).catch((err: any) =>
+            console.error("[DISPATCH] lỗi gửi đơn sang Printer:", err?.message || err),
+          );
+        } else {
+          order.seller_approval_status = "PENDING_APPROVAL";
+          order.fulfillment_status = "PENDING_APPROVAL";
+          order.status_history.push({
+            status: order.order_status,
+            changed_at: new Date(),
+            note: "Thanh toán thành công. Đơn hàng POD đang chờ người bán kiểm tra thiết kế và duyệt đơn.",
+          });
+          await order.save();
+        }
+
+        try {
+          await notificationService.createNotification({
+            user_id: order.buyer_id.toString(),
+            type: 'ORDER_UPDATE',
+            title: 'Thanh toán thành công',
+            content: isAutoApprove
+              ? `Đơn hàng POD #${order.order_code} đã thanh toán thành công và chuyển sang xưởng sản xuất.`
+              : `Đơn hàng POD #${order.order_code} đã thanh toán thành công và đang chờ người bán kiểm tra thiết kế trước khi in.`,
+            link: `/orders/${order._id}`,
+            metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: order.order_status, isPod: true }
+          });
+        } catch (err: any) {
+          console.error('[NOTIFICATION] Lỗi gửi thông báo thanh toán thành công cho Buyer:', err?.message || err);
+        }
+
+        if (shop?.owner_id) {
+          try {
+            await notificationService.createNotification({
+              user_id: shop.owner_id.toString(),
+              type: 'ORDER_UPDATE',
+              title: isAutoApprove ? 'Đơn hàng POD đã chuyển xưởng in' : 'Đơn hàng POD mới cần duyệt in',
+              content: isAutoApprove
+                ? `Đơn hàng POD #${order.order_code} đã được tự động chuyển sang xưởng in.`
+                : `Đơn hàng POD #${order.order_code} đã thanh toán và đang chờ bạn kiểm tra thiết kế, duyệt gửi sang xưởng in.`,
+              link: `/seller/orders`,
+              metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: order.seller_approval_status, isPod: true }
+            });
+          } catch (err: any) {
+            console.error('[NOTIFICATION] Lỗi gửi thông báo cho Seller:', err?.message || err);
+          }
+        }
+      } else {
+        // Hàng có sẵn của người bán: không gửi xưởng in, seller là người duyệt đơn và trực tiếp cập nhật trạng thái
+        order.is_pod = false;
+        order.order_type = 'READY_TO_SHIP';
+        order.order_status = "ORDERED";
+        order.seller_approval_status = "PENDING_APPROVAL";
+        order.fulfillment_status = "UNFULFILLED";
+        order.status_history.push({
+          status: "ORDERED",
+          changed_at: new Date(),
+          note: "Thanh toán thành công. Đơn hàng có sẵn đang chờ người bán duyệt đơn và chuẩn bị hàng.",
         });
-      } catch (err: any) {
-        console.error('[NOTIFICATION] Lỗi gửi thông báo thanh toán thành công:', err?.message || err);
+        await order.save();
+
+        try {
+          await notificationService.createNotification({
+            user_id: order.buyer_id.toString(),
+            type: 'ORDER_UPDATE',
+            title: 'Thanh toán thành công',
+            content: `Đơn hàng #${order.order_code} đã thanh toán thành công và đang chờ người bán duyệt đơn chuẩn bị hàng.`,
+            link: `/orders/${order._id}`,
+            metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: order.order_status, isPod: false }
+          });
+        } catch (err: any) {
+          console.error('[NOTIFICATION] Lỗi gửi thông báo thanh toán thành công cho Buyer:', err?.message || err);
+        }
+
+        if (shop?.owner_id) {
+          try {
+            await notificationService.createNotification({
+              user_id: shop.owner_id.toString(),
+              type: 'ORDER_UPDATE',
+              title: 'Đơn hàng mới cần duyệt',
+              content: `Đơn hàng #${order.order_code} đã được thanh toán. Hãy kiểm tra kho và duyệt đơn để chuẩn bị hàng.`,
+              link: `/seller/orders`,
+              metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: 'PENDING_APPROVAL', isPod: false }
+            });
+          } catch (err: any) {
+            console.error('[NOTIFICATION] Lỗi gửi thông báo cho Seller:', err?.message || err);
+          }
+        }
       }
     } else {
       order.payment_status = "PENDING";
@@ -378,6 +510,13 @@ export class OrdersService {
         note: "Thanh toán thất bại hoặc người dùng huỷ.",
       });
       await order.save();
+
+      // Hoàn lại lượt dùng voucher khi đơn bị huỷ
+      if (order.coupon_code) {
+        await PromotionService.releaseUsage(order.coupon_code).catch(err =>
+          console.error('[COUPON] Lỗi hoàn lượt dùng voucher:', err?.message || err)
+        );
+      }
 
       try {
         await notificationService.createNotification({
@@ -418,19 +557,42 @@ export class OrdersService {
     let buyerTitle = `Tiến độ đơn hàng #${order.order_code}`;
     let buyerContent = '';
 
-    if (pStatus === 'PRINTING') {
+    order.is_pod = true;
+    order.order_type = 'POD';
+
+    if (!order.printer_info) order.printer_info = {};
+    order.printer_info.printer_status = pStatus;
+
+    if (pStatus === 'RECEIVED') {
+      order.fulfillment_status = 'RECEIVED';
+      note = 'Xưởng in đã tiếp nhận file thiết kế và chuẩn bị in ấn.';
+      buyerContent = `Đơn hàng #${order.order_code} của bạn đã được xưởng in tiếp nhận.`;
+    } else if (pStatus === 'PRINTING') {
+      order.fulfillment_status = 'PRINTING';
       if (['ORDERED', 'PENDING_DESIGN'].includes(order.order_status)) {
         order.order_status = 'PROCESSING';
       }
       note = 'Xưởng in đã tiếp nhận file thiết kế và đang tiến hành in ấn.';
       buyerContent = `Đơn hàng #${order.order_code} của bạn đang được xưởng in ấn và sản xuất.`;
     } else if (pStatus === 'PACKAGED') {
+      order.fulfillment_status = 'PACKAGED';
+      if (['ORDERED', 'PENDING_DESIGN'].includes(order.order_status)) {
+        order.order_status = 'PROCESSING';
+      }
       note = 'Xưởng in đã hoàn tất in ấn và đang đóng gói sản phẩm.';
       buyerContent = `Đơn hàng #${order.order_code} của bạn đã in xong và đang được đóng gói chờ giao.`;
     } else if (pStatus === 'SHIPPED') {
+      order.fulfillment_status = 'SHIPPED';
       order.order_status = 'SHIPPING';
       note = 'Xưởng in đã hoàn tất đóng gói và xuất kho giao hàng.';
       buyerContent = `Đơn hàng #${order.order_code} của bạn đã được xuất kho và bàn giao cho đơn vị vận chuyển.`;
+    } else if (pStatus === 'REJECTED') {
+      order.fulfillment_status = 'FAILED';
+      const reason = (payload as any).rejection_reason || 'File in không đạt chuẩn hoặc lỗi kỹ thuật từ xưởng';
+      order.printer_info.rejection_reason = reason;
+      note = `Xưởng in từ chối đơn in: ${reason}`;
+      buyerTitle = `Thông báo sự cố đơn #${order.order_code}`;
+      buyerContent = `Đơn hàng #${order.order_code} gặp sự cố in ấn: ${reason}. Người bán sẽ kiểm tra và hỗ trợ bạn.`;
     }
 
     order.status_history.push({
@@ -495,6 +657,16 @@ export class OrdersService {
     const carrier = (payload.carrier || 'GHN').toUpperCase();
     const tracking = payload.tracking_number || '';
 
+    order.is_pod = true;
+    order.order_type = 'POD';
+    order.order_status = 'SHIPPING';
+    order.fulfillment_status = 'SHIPPED';
+    if (!order.printer_info) order.printer_info = {};
+    order.printer_info.printer_status = 'SHIPPED';
+    order.printer_info.supplier_order_id = payload.vietcraft_order_id || order.supplier_order_id;
+    order.shipping_details.carrier = carrier;
+    order.shipping_details.tracking_number = tracking;
+
     order.shipping_details = {
       ...(order.shipping_details || {}),
       carrier: carrier.toLowerCase(),
@@ -503,6 +675,7 @@ export class OrdersService {
     };
 
     order.order_status = 'SHIPPING';
+    order.markModified('printer_info');
     order.status_history.push({
       status: 'SHIPPING',
       changed_at: new Date(),
@@ -606,6 +779,14 @@ export class OrdersService {
       order.order_status = 'SHIPPING';
       statusNote = `Xưởng in đã xuất kho và giao cho hãng vận chuyển${carrier ? ` ${carrier}` : ''}${tracking ? ` (Mã: ${tracking})` : ''}.`;
       buyerContent = `Đơn hàng #${order.order_code} đã xuất kho và đang được giao đến bạn.`;
+    } else if (pStatus === 'DELIVERED') {
+      order.fulfillment_status = 'DELIVERED';
+      order.order_status = 'DELIVERED';
+      if (order.payment_method === 'COD' && order.payment_status === 'PENDING') {
+        order.payment_status = 'PAID';
+      }
+      statusNote = 'Đơn vị vận chuyển đã giao hàng thành công đến người nhận.';
+      buyerContent = `Đơn hàng #${order.order_code} đã được giao thành công đến bạn.`;
     } else if (pStatus === 'CANCELLED') {
       order.fulfillment_status = 'CANCELLED';
       statusNote = 'Xưởng in đã hủy sản xuất đơn hàng.';
@@ -618,9 +799,27 @@ export class OrdersService {
         tracking_number: tracking,
         shipping_fee: order.shipping_details?.shipping_fee || (mongoose.Types.Decimal128.fromString('0.0'))
       };
-      order.order_status = 'SHIPPING';
-      order.fulfillment_status = 'SHIPPED';
+      if (order.order_status !== 'DELIVERED') {
+        order.order_status = 'SHIPPING';
+        order.fulfillment_status = 'SHIPPED';
+      }
     }
+
+    order.is_pod = true;
+    order.order_type = 'POD';
+    if (!order.printer_info) {
+      order.printer_info = {
+        printer_id: 'PRINTER_SHOP',
+        printer_name: 'Xưởng In VietCraft',
+        supplier_order_id: payload.supplier_order_id || order.supplier_order_id,
+        printer_status: pStatus,
+        dispatched_at: new Date()
+      };
+    } else {
+      order.printer_info.printer_status = pStatus;
+      if (payload.supplier_order_id) order.printer_info.supplier_order_id = payload.supplier_order_id;
+    }
+    order.markModified('printer_info');
 
     order.status_history.push({
       status: order.order_status,
@@ -679,6 +878,68 @@ export class OrdersService {
       success: true,
       message: `Đã cập nhật trạng thái đơn ${order.order_code} thành ${order.fulfillment_status || order.order_status}`
     };
+  }
+
+  /**
+   * Người mua xác nhận đã nhận được hàng (DELIVERED)
+   */
+  static async confirmDeliveryByBuyer(orderIdOrCode: string, buyerId: string) {
+    const query: any = {
+      buyer_id: new mongoose.Types.ObjectId(buyerId),
+      $or: [
+        { order_code: orderIdOrCode },
+        { _id: mongoose.Types.ObjectId.isValid(orderIdOrCode) ? new mongoose.Types.ObjectId(orderIdOrCode) : null }
+      ]
+    };
+
+    const order = await OrderModel.findOne(query).populate('shop_id');
+    if (!order) {
+      throw new Error('Không tìm thấy đơn hàng của bạn.');
+    }
+
+    if (order.order_status === 'DELIVERED') {
+      return { success: true, message: 'Đơn hàng đã được xác nhận giao thành công trước đó.', order };
+    }
+
+    if (order.order_status !== 'SHIPPING') {
+      throw new Error('Chỉ có thể xác nhận đã nhận hàng khi đơn hàng đang trong trạng thái Đang giao.');
+    }
+
+    order.order_status = 'DELIVERED';
+    order.fulfillment_status = 'DELIVERED';
+    if (!order.printer_info) order.printer_info = {};
+    order.printer_info.printer_status = 'DELIVERED';
+    order.markModified('printer_info');
+
+    if (order.payment_method === 'COD' && order.payment_status === 'PENDING') {
+      order.payment_status = 'PAID';
+    }
+
+    order.status_history.push({
+      status: 'DELIVERED',
+      changed_at: new Date(),
+      note: 'Khách hàng đã bấm xác nhận nhận được hàng thành công.'
+    });
+    await order.save();
+
+    // Thông báo realtime cho Người bán
+    const shopOwnerId = (order.shop_id as any)?.owner_id;
+    if (shopOwnerId) {
+      try {
+        await notificationService.createNotification({
+          user_id: shopOwnerId.toString(),
+          type: 'ORDER_UPDATE',
+          title: `Đơn hàng #${order.order_code} đã giao thành công`,
+          content: `Khách hàng đã bấm xác nhận nhận được đơn hàng #${order.order_code}. Doanh thu đã được cộng vào tài khoản của bạn.`,
+          link: `/seller/orders`,
+          metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: 'DELIVERED' }
+        });
+      } catch (err: any) {
+        console.error('[CONFIRM DELIVERY NOTIFY] Lỗi gửi thông báo cho Seller:', err?.message || err);
+      }
+    }
+
+    return { success: true, message: 'Đã xác nhận nhận hàng thành công.', order };
   }
 }
 export default OrdersService;

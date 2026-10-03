@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import dns from 'dns';
 import { Pool } from 'pg';
 import mongoose from 'mongoose';
 import { createClient } from 'redis';
@@ -143,6 +144,11 @@ export async function connectMongo() {
         ? config.mongoUri.replace('/?', '/vietcraft?')
         : config.mongoUri;
     try {
+        try {
+            dns.setServers(['8.8.8.8', '1.1.1.1']);
+        } catch {
+            // ignore if not supported in environment
+        }
         mongoose.set('strictQuery', false);
         mongoose.set('bufferCommands', false);  // Fail immediately if not connected
         await mongoose.connect(uri, {

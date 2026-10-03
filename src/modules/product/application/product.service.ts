@@ -135,6 +135,8 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         } : undefined,
         sellerId: product.shop_id ? product.shop_id.toString() : undefined,
         tags: product.tags || [],
+        rating: typeof product.average_rating === 'number' ? product.average_rating : 5.0,
+        ratingCount: typeof product.rating_count === 'number' ? product.rating_count : 0,
         allowCustomization: Boolean(product.allow_customization),
         customizationType: product.customization_type || 'NONE',
         createdAt: product.created_at ? new Date(product.created_at).toISOString() : new Date().toISOString(),
@@ -583,8 +585,15 @@ export class ProductsService {
                 const sellerShop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(filter.sellerId) }).lean();
                 if (!sellerShop) return { items: [], total: 0, page: 1, limit: Number(filter?.limit || filter?.pageSize) || 6, totalPages: 0 };
                 base.shop_id = sellerShop._id;
-            } else if (filter?.shopId && mongoose.Types.ObjectId.isValid(filter.shopId)) {
-                base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+            } else if (filter?.shopId) {
+                if (mongoose.Types.ObjectId.isValid(filter.shopId)) {
+                    base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+                } else {
+                    const shopBySlug = await Shop.findOne({ slug: filter.shopId }).lean();
+                    if (shopBySlug) {
+                        base.shop_id = shopBySlug._id;
+                    }
+                }
             }
 
             return ProductsService.page(ProductsService.buildQuery(base, filter), filter);

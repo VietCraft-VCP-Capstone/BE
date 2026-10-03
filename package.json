@@ -8,7 +8,8 @@
     "start": "node dist/main.js",
     "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
     "test:refund": "npm run build && node --test \"tests/refund-*.test.js\"",
-    "env:import-payos": "node scripts/import-payos-env.js"
+    "env:import-payos": "node scripts/import-payos-env.js",
+    "seed": "ts-node-dev --transpile-only src/shared/utils/seed_realistic_data.ts"
   },
   "dependencies": {
     "@payos/node": "^2.0.5",

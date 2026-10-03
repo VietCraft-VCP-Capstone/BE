@@ -262,7 +262,13 @@ class AdminService implements IAdminService {
 
         let documentUrls: Record<string, string> = {};
         if (app.kyc_data) {
-            const { front_id_image, back_id_image, portrait_image, business_license_image } = app.kyc_data;
+            const { front_id_image, back_id_image, business_license_image } = app.kyc_data;
+            // `portrait_image` đã bị gỡ khỏi schema KYC ở nhánh dev (luồng đăng ký không còn
+            // thu ảnh chân dung), nhưng hồ sơ nộp trước đó vẫn còn trường này trong DB và
+            // findById().lean() vẫn trả về. Đọc rời ra để admin xem được hồ sơ cũ mà không
+            // phụ thuộc vào kiểu đã xoá. Khi dữ liệu cũ hết giá trị sử dụng thì xoá cả khối
+            // này lẫn phần hiển thị portrait_url bên AdminSellers.tsx.
+            const portrait_image = (app.kyc_data as { portrait_image?: string }).portrait_image;
             if (front_id_image) {
                 documentUrls.front_id_url = `/api/seller/kyc/files/${front_id_image}?token=${generatePresignedToken(front_id_image).token}`;
             }

@@ -1,4 +1,13 @@
 
+export interface OrderItemReview {
+    id: string;
+    rating: number;
+    comment: string;
+    images: string[];
+    createdAt?: Date | string;
+    updatedAt?: Date | string;
+}
+
 export interface OrderItem {
     productId: string;
     variantId: string;
@@ -8,10 +17,14 @@ export interface OrderItem {
     color?: string;
     size?: string;
     image?: string;
+    is_reviewed?: boolean;
+    review?: OrderItemReview | null;
 }
 
 export interface OrderResponse {
     id: string;
+    _id?: string;
+    orderCode?: string;
     buyerId: string;
     items: OrderItem[];
     totalAmount: number;
@@ -21,10 +34,23 @@ export interface OrderResponse {
     shippingProvider: 'ghn' | 'ghtk';
     shippingCode?: string;
     createdAt: Date;
+    shopId?: string;
     shopName?: string;
     shopLogo?: string;
     shippingFee?: number;
+    couponCode?: string | null;
     paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
+    is_reviewed?: boolean;
+    isPod?: boolean;
+    orderType?: string;
+    fulfillmentStatus?: string;
+    printerInfo?: {
+        printerId?: string;
+        printerName?: string;
+        supplierOrderId?: string;
+        printerStatus?: string;
+        rejectionReason?: string;
+    };
     shippingAddress?: {
         recipient_name: string;
         phone: string;
