@@ -1,8 +1,10 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { OrdersService } from '../application/order.service';
-import { authenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { config } from '../../../app/config';
+import { authenticate, AuthenticatedRequest, requireRole } from '../../../app/middleware/auth.middleware';
+
+import { MongoOrderStatusSimulatorRepository, OrderStatusSimulationError, OrderStatusSimulationService, SIMULATABLE_ORDER_STATUSES } from '../application/order-status-simulator.service';
 import { logger } from '../../../shared/utils/logger';
 
 const router = Router();
@@ -84,6 +86,25 @@ router.post('/webhook/tracking', verifyPrinterWebhook, async (req: Request, res:
         res.status(400).json({ error: error.message });
     }
 });
+
+if (process.env.NODE_ENV === 'development' && process.env.ENABLE_DEV_ORDER_SIMULATION === 'true') {
+    router.post('/:id/status-simulation', authenticate, requireRole(['buyer']), async (req: AuthenticatedRequest, res: Response) => {
+        if (!SIMULATABLE_ORDER_STATUSES.includes(req.body?.target)) {
+            return res.status(400).json({ error: 'Trạng thái mô phỏng không hợp lệ.' });
+        }
+        try {
+            const result = await new OrderStatusSimulationService(new MongoOrderStatusSimulatorRepository(), config.nodeEnv, undefined, process.env.ENABLE_DEV_ORDER_SIMULATION || '').simulate({
+                orderId: req.params.id,
+                buyerId: req.user!.id,
+                target: req.body.target,
+            });
+            return res.json({ success: true, data: { order_id: result.orderId, order_code: result.orderCode, order_status: result.orderStatus, payment_status: result.paymentStatus } });
+        } catch (error) {
+            const statusCode = error instanceof OrderStatusSimulationError ? error.statusCode : 500;
+            return res.status(statusCode).json({ error: error instanceof Error ? error.message : 'Không thể mô phỏng trạng thái đơn hàng.' });
+        }
+    });
+}
 
 router.get('/:id', authenticate, async (req: AuthenticatedRequest, res) => {
     try {

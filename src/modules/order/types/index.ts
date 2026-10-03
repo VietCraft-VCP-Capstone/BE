@@ -40,6 +40,7 @@ export interface OrderResponse {
     shippingFee?: number;
     couponCode?: string | null;
     paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
+    isStatusSimulation?: boolean;
     is_reviewed?: boolean;
     isPod?: boolean;
     orderType?: string;

@@ -57,6 +57,8 @@ export interface IOrder extends Document {
     buyer_id: mongoose.Types.ObjectId;
     shop_id: mongoose.Types.ObjectId;
     order_code: string;
+    simulation_source_id?: mongoose.Types.ObjectId;
+    is_simulated?: boolean;
     payment_method: 'VNPAY' | 'MOMO' | 'COD';
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
     refund_status: 'NONE' | 'REQUESTED' | 'UNDER_REVIEW' | 'DISPUTED' | 'REFUNDED' | 'REFUND_REJECTED';
@@ -130,6 +132,8 @@ const OrderSchema = new Schema<IOrder>({
     buyer_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     shop_id: { type: Schema.Types.ObjectId, ref: 'Shop', required: true, index: true },
     order_code: { type: String, required: true, unique: true, index: true },
+    simulation_source_id: { type: Schema.Types.ObjectId, ref: 'Order', index: true },
+    is_simulated: { type: Boolean, default: false, index: true },
     payment_method: { type: String, required: true, enum: ['VNPAY', 'MOMO', 'COD'] },
     payment_status: { type: String, required: true, enum: ['PENDING', 'PAID', 'REFUNDED'], default: 'PENDING' },
     refund_status: { type: String, required: true, enum: ['NONE', 'REQUESTED', 'UNDER_REVIEW', 'DISPUTED', 'REFUNDED', 'REFUND_REJECTED'], default: 'NONE', index: true },
@@ -166,6 +170,7 @@ const OrderSchema = new Schema<IOrder>({
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
+OrderSchema.index({ simulation_source_id: 1, buyer_id: 1 }, { unique: true, partialFilterExpression: { is_simulated: true } });
 OrderSchema.index({ buyer_id: 1, created_at: -1 });
 OrderSchema.index({ shop_id: 1, created_at: -1 });
 

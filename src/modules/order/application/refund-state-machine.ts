@@ -9,8 +9,8 @@ export type RefundActor = 'buyer-dispute' | 'seller-dispute' | 'seller-triage' |
 
 const transitions: Record<RefundActor, Partial<Record<RefundStatus, RefundStatus[]>>> = {
     'buyer-dispute': { SELLER_REJECTED: ['DISPUTED'], PRINTER_APPROVED: ['DISPUTED'], PRINTER_REJECTED: ['DISPUTED'], TIMEOUT_ESCALATED: ['DISPUTED'] },
-    'seller-dispute': { PRINTER_APPROVED: ['DISPUTED'], PRINTER_REJECTED: ['DISPUTED'] },
-    'seller-triage': { PENDING_SELLER: ['PENDING_SELLER', 'PENDING_PRINTER'] },
+    'seller-dispute': {},
+    'seller-triage': {},
     'seller-decision': { PENDING_SELLER: ['SELLER_APPROVED', 'SELLER_REJECTED'] },
     'printer-response': { PENDING_PRINTER: ['PRINTER_APPROVED', 'PRINTER_REJECTED'] },
     'admin-resolve': { DISPUTED: ['ADMIN_APPROVED', 'ADMIN_REJECTED'] },

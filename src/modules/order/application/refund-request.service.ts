@@ -8,9 +8,9 @@ import { User } from '../../user/infrastructure/models/user.model';
 import { notificationService } from '../../notification';
 import { logger } from '../../../shared/utils/logger';
 import { config } from '../../../app/config';
-
+import { initialRefundStatus, sellerCanActOnRefund, buyerCanDispute } from './refund-actor-policy';
+import { validateRefundEvidence } from './refund-evidence-policy';
 const DAY = 24 * 60 * 60 * 1000;
-const PHYSICAL_REASONS = new Set(['DAMAGED', 'PRINT_DEFECT', 'MISSING_ITEM']);
 const VALID_REASONS = new Set(['DAMAGED', 'WRONG_DESCRIPTION', 'PRINT_DEFECT', 'MISSING_ITEM', 'OTHER']);
 import { buildTestDeliveredOrder } from './test-order.factory';
 import { byCodeOrId } from '../utils';
@@ -36,13 +36,10 @@ export class RefundRequestService {
         return notificationService.createNotification({ user_id: userId, type: 'ORDER_UPDATE', title, content, link, metadata });
     }
 
-    static async create(orderId: string, buyerId: string, input: CreateRefundRequestInput) {
+    static async create(orderId: string, buyerId: string, input: CreateRefundRequestInput, options: { allowEmptyEvidenceForTest?: boolean } = {}) {
         if (!mongoose.Types.ObjectId.isValid(orderId) || !mongoose.Types.ObjectId.isValid(buyerId)) throw new Error('ID không hợp lệ');
         if (!VALID_REASONS.has(input.reason_category)) throw new Error('reason_category không hợp lệ');
-        if (!input.description?.trim() || input.description.trim().length < 5) throw new Error('Mô tả phải có ít nhất 5 ký tự');
-        const evidence = input.evidence || [];
-        if (!Array.isArray(evidence) || evidence.some(url => typeof url !== 'string' || !/^https?:\/\//i.test(url))) throw new Error('Evidence phải là danh sách URL HTTP/HTTPS hợp lệ');
-        if (PHYSICAL_REASONS.has(input.reason_category) && evidence.length === 0) throw new Error('Lý do này bắt buộc đính kèm bằng chứng');
+        const evidence = validateRefundEvidence(input.reason_category, input.description, input.evidence, options);
         if (input.refund_type !== 'FULL' && input.refund_type !== 'PARTIAL') throw new Error('refund_type không hợp lệ');
 
         const order = await Order.findOne({ _id: orderId, buyer_id: buyerId });
@@ -63,19 +60,61 @@ export class RefundRequestService {
         if (!Number.isFinite(amount) || amount <= 0 || amount > maxRefund) throw new Error('Số tiền hoàn không hợp lệ');
         if (input.refund_type === 'PARTIAL' && !input.refund_amount) throw new Error('PARTIAL cần refund_amount');
 
+        const productType = products.some(product => product.product_type === 'POD_TEMPLATE') ? 'POD' : 'NORMAL';
+        const initialStatus = initialRefundStatus(productType);
+        const printerDeadline = initialStatus === 'PENDING_PRINTER' ? new Date(now.getTime() + 48 * 60 * 60 * 1000) : undefined;
         const doc = await RefundRequest.create({
             order_id: order._id, buyer_id: order.buyer_id, seller_id: shop.owner_id,
-            product_type: products.some(p => p.product_type === 'POD_TEMPLATE') ? 'POD' : 'NORMAL',
+            product_type: productType,
             reason_category: input.reason_category, description: input.description.trim(), evidence,
-            refund_type: input.refund_type, refund_amount: amount, status: 'PENDING_SELLER',
-            sla_deadlines: { seller_deadline: new Date(now.getTime() + 48 * 60 * 60 * 1000) },
+            refund_type: input.refund_type, refund_amount: amount, status: initialStatus,
+            responsible_party: productType === 'POD' ? 'PRINTER' : null,
+            printer_id: productType === 'POD' ? 'PRINTING_SHOP_MOCK' : undefined,
+            sla_deadlines: productType === 'POD' ? { seller_deadline: new Date(now.getTime() + 48 * 60 * 60 * 1000), printer_deadline: printerDeadline } : { seller_deadline: new Date(now.getTime() + 48 * 60 * 60 * 1000) },
         });
         const changed = await Order.updateOne({ _id: order._id, refund_status: 'NONE' }, { $set: { refund_status: 'REQUESTED' } });
         if (!changed.modifiedCount) {
             await RefundRequest.deleteOne({ _id: doc._id });
             throw new Error('Đơn hàng đã có yêu cầu hoàn tiền');
         }
-        void this.notify(shop.owner_id.toString(), 'Yêu cầu hoàn tiền mới', `Có yêu cầu hoàn tiền cho đơn ${order.order_code}.`, '/seller/refund-requests', { refundRequestId: doc._id.toString() }).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
+        if (productType === 'POD') {
+            if (!config.printerRefundApiKey) {
+                await RefundRequest.deleteOne({ _id: doc._id });
+                await Order.updateOne({ _id: order._id, refund_status: 'REQUESTED' }, { $set: { refund_status: 'NONE' } });
+                const error = new Error('Thiếu cấu hình gửi yêu cầu POD tới xưởng in.');
+                (error as Error & { statusCode?: number }).statusCode = 503;
+                throw error;
+            }
+            try {
+                const response = await fetch(`${config.printerApiUrl}/api/orders/refund-requests`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'x-vietcraft-refund-key': config.printerRefundApiKey },
+                    body: JSON.stringify({
+                        refund_request_id: doc._id.toString(), order_code: order.order_code,
+                        reason_category: doc.reason_category, description: doc.description,
+                        evidence: doc.evidence, refund_type: doc.refund_type, refund_amount: doc.refund_amount,
+                        sla_deadline: printerDeadline,
+                    }),
+                });
+                if (!response.ok) {
+                    let detail = '';
+                    try { detail = (await response.json() as { error?: string }).error || ''; } catch { /* upstream may return non-JSON */ }
+                    const error = new Error(detail || `Xưởng in từ chối yêu cầu (${response.status}).`);
+                    (error as Error & { statusCode?: number }).statusCode = 502;
+                    throw error;
+                }
+            } catch (cause) {
+                await RefundRequest.deleteOne({ _id: doc._id });
+                await Order.updateOne({ _id: order._id, refund_status: 'REQUESTED' }, { $set: { refund_status: 'NONE' } });
+                if (cause instanceof Error && 'statusCode' in cause) throw cause;
+                const error = new Error('Không kết nối được xưởng in. Yêu cầu chưa được gửi, vui lòng thử lại.');
+                (error as Error & { statusCode?: number }).statusCode = 503;
+                throw error;
+            }
+        }
+        const title = productType === 'POD' ? 'Yêu cầu hoàn tiền POD mới · chỉ theo dõi' : 'Yêu cầu hoàn tiền mới';
+        const content = productType === 'POD' ? `Yêu cầu cho đơn ${order.order_code} đã được gửi trực tiếp tới xưởng in; Seller chỉ theo dõi.` : `Có yêu cầu hoàn tiền cho đơn ${order.order_code}.`;
+        void this.notify(shop.owner_id.toString(), title, content, '/seller/refund-requests', { refundRequestId: doc._id.toString() }).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
         return doc;
     }
 
@@ -96,15 +135,12 @@ export class RefundRequestService {
             order_hour_of_week: source.order_hour_of_week,
         }));
         try {
-            const amount = Number(testOrder.financial_breakdown.subtotal.toString()) + Number(testOrder.financial_breakdown.shipping_fee.toString()) - Number(testOrder.financial_breakdown.coupon_discount.toString());
-            const request = await RefundRequest.create({
-                order_id: testOrder._id, buyer_id: testOrder.buyer_id, seller_id: shop.owner_id,
-                product_type: productType, reason_category: 'OTHER',
+            const request = await this.create(testOrder._id.toString(), buyerId, {
+                reason_category: 'OTHER',
                 description: 'Luồng test Refund/Dispute; không phát sinh giao dịch hoàn tiền.',
-                evidence: [], refund_type: 'FULL', refund_amount: amount,
-                status: 'PENDING_SELLER', sla_deadlines: { seller_deadline: new Date(Date.now() + 48 * 60 * 60 * 1000) },
-            });
-            await Order.updateOne({ _id: testOrder._id }, { $set: { refund_status: 'REQUESTED' } });
+                evidence: [],
+                refund_type: 'FULL',
+            }, { allowEmptyEvidenceForTest: true });
             return { order_id: testOrder.order_code, refund_request_id: request._id.toString(), order_status: testOrder.order_status, payment_status: testOrder.payment_status, refund_status: 'REQUESTED' };
         } catch (error) {
             await Order.deleteOne({ _id: testOrder._id });
@@ -145,44 +181,17 @@ export class RefundRequestService {
         return doc;
     }
 
-    static async triage(requestId: string, sellerId: string, result: string, checklist?: { evidence_reviewed: boolean; order_verified: boolean; artwork_checked: boolean; seller_terms_checked: boolean; note: string }) {
+    static async triage(requestId: string, sellerId: string, _result: string, _checklist?: { evidence_reviewed: boolean; order_verified: boolean; artwork_checked: boolean; seller_terms_checked: boolean; note: string }) {
         const doc = await this.assertSellerOwnership(requestId, sellerId);
-        if (doc.product_type !== 'POD') throw new Error('Triage chỉ áp dụng cho POD');
-        if (doc.status !== 'PENDING_SELLER' || doc.triage_result) throw new Error('Request không còn ở trạng thái chờ triage');
-        if (!['SELLER_RESPONSIBILITY', 'PRINTER_RESPONSIBILITY'].includes(result)) throw new Error('triage_result không hợp lệ');
-        const checks = ['evidence_reviewed', 'order_verified', 'artwork_checked', 'seller_terms_checked'] as const;
-        if (!checklist || checks.some(key => checklist[key] !== true) || !checklist.note?.trim()) throw new Error('Hoàn thành toàn bộ checklist POD và ghi chú trước khi triage');
-        const next = result === 'PRINTER_RESPONSIBILITY' ? 'PENDING_PRINTER' : 'PENDING_SELLER';
-        RefundStateMachine.assertTransition(doc.status, 'seller-triage', next);
-        const set: Record<string, unknown> = { triage_result: result, triage_checklist: { ...checklist, note: checklist.note.trim() } };
-        if (next === 'PENDING_PRINTER') {
-            const order = await Order.findById(doc.order_id).select('order_code').lean();
-            if (!config.printerRefundApiKey) throw new Error('Printing mock chưa được cấu hình để nhận yêu cầu');
-            const response = await fetch(`${config.printerApiUrl}/api/orders/refund-requests`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-vietcraft-refund-key': config.printerRefundApiKey },
-                body: JSON.stringify({
-                    refund_request_id: doc._id.toString(), order_code: order?.order_code,
-                    reason_category: doc.reason_category, description: doc.description,
-                    evidence: doc.evidence, refund_type: doc.refund_type, refund_amount: doc.refund_amount,
-                    triage_result: result, seller_response: doc.seller_response,
-                    sla_deadline: new Date(Date.now() + 48 * 60 * 60 * 1000),
-                }),
-            });
-            if (!response.ok) throw new Error(`Printing mock từ chối request (${response.status})`);
-            set.status = next;
-            set['sla_deadlines.printer_deadline'] = new Date(Date.now() + 48 * 60 * 60 * 1000);
-            set.printer_id = 'PRINTING_SHOP_MOCK';
-        }
-        const updated = await RefundRequest.findOneAndUpdate({ _id: doc._id, status: 'PENDING_SELLER', triage_result: null }, { $set: { ...set, ...(next === 'PENDING_PRINTER' ? { status: next } : {}) } }, { new: true });
-        if (!updated) throw new Error('Request đã được cập nhật đồng thời; hãy tải lại');
-        return updated;
+        if (doc.product_type === 'POD') throw new Error('Seller chỉ có quyền xem yêu cầu POD; request đã được gửi trực tiếp tới xưởng in');
+        throw new Error('Triage chỉ áp dụng cho POD');
     }
 
     static async sellerDecision(requestId: string, sellerId: string, decision: 'APPROVE' | 'REJECT', note?: string) {
         if (!['APPROVE', 'REJECT'].includes(decision)) throw new Error('decision không hợp lệ');
         const doc = await this.assertSellerOwnership(requestId, sellerId);
-        if (doc.status !== 'PENDING_SELLER' || (doc.product_type === 'POD' && doc.triage_result !== 'SELLER_RESPONSIBILITY')) throw new Error('Request chưa đủ điều kiện để seller quyết định');
+        if (!sellerCanActOnRefund(doc.product_type)) throw new Error('POD được gửi thẳng tới xưởng in; seller chỉ có quyền xem');
+        if (doc.status !== 'PENDING_SELLER') throw new Error('Request chưa đủ điều kiện để seller quyết định');
         const status: RefundRequestStatus = decision === 'APPROVE' ? 'SELLER_APPROVED' : 'SELLER_REJECTED';
         RefundStateMachine.assertTransition(doc.status, 'seller-decision', status);
         const updated = await RefundRequest.findOneAndUpdate({ _id: doc._id, status: 'PENDING_SELLER' }, { $set: { status, responsible_party: 'SELLER', seller_response: { decision, note, responded_at: new Date() } } }, { new: true });
@@ -194,27 +203,13 @@ export class RefundRequestService {
         return updated;
     }
 
-    static async printerRespond(requestId: string, decision: 'APPROVE' | 'REJECT', note?: string) {
-        if (!['APPROVE', 'REJECT'].includes(decision)) throw new Error('decision không hợp lệ');
-        const doc = await RefundRequest.findOne({ _id: requestId, status: 'PENDING_PRINTER' });
-        if (!doc) throw new Error('Không tìm thấy request đang chờ Printer');
-        const next: RefundRequestStatus = decision === 'APPROVE' ? 'PRINTER_APPROVED' : 'PRINTER_REJECTED';
-        RefundStateMachine.assertTransition(doc.status, 'printer-response', next);
-        const updated = await RefundRequest.findOneAndUpdate({ _id: doc._id, status: 'PENDING_PRINTER', printer_response: { $exists: false } }, { $set: { status: next, responsible_party: 'PRINTER', printer_response: { decision, note, responded_at: new Date() } } }, { new: true });
-        if (!updated) throw new Error('Printer response đã được xử lý');
-        await Order.updateOne({ _id: doc.order_id }, { $set: { refund_status: decision === 'APPROVE' ? 'UNDER_REVIEW' : 'REFUND_REJECTED' } });
-        if (decision === 'APPROVE') await this.executeRefund(updated);
-        else void this.notify(doc.buyer_id.toString(), 'Printer từ chối yêu cầu hoàn tiền', 'Bạn có thể mở dispute với quản trị viên.', `/refund-requests/${doc._id}`, { refundRequestId: doc._id.toString() }).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
-        return updated;
-    }
-
     static async dispute(requestId: string, buyerId: string, reason: string) {
         if (typeof reason !== 'string' || reason.trim().length < 5) throw new Error('Lý do tranh chấp cần ít nhất 5 ký tự');
         const doc = await RefundRequest.findOne({ _id: requestId, buyer_id: buyerId });
         if (!doc) throw new Error('Không tìm thấy yêu cầu hoàn tiền');
+        if (!buyerCanDispute(doc.product_type, doc.status)) throw new Error('Chỉ có thể mở dispute sau khi bên xử lý từ chối hoặc quá hạn phản hồi');
         RefundStateMachine.assertTransition(doc.status, 'buyer-dispute', 'DISPUTED');
-        const prior = doc.status;
-        const updated = await RefundRequest.findOneAndUpdate({ _id: doc._id, status: prior, dispute: { $exists: false } }, { $set: { status: 'DISPUTED', dispute: { opened_by: new mongoose.Types.ObjectId(buyerId), reason: reason.trim(), opened_at: new Date() } } }, { new: true });
+        const updated = await RefundRequest.findOneAndUpdate({ _id: doc._id, status: doc.status, dispute: { $exists: false } }, { $set: { status: 'DISPUTED', dispute: { opened_by: new mongoose.Types.ObjectId(buyerId), reason: reason.trim(), opened_at: new Date() } } }, { new: true });
         if (!updated) throw new Error('Dispute đã mở hoặc request được cập nhật đồng thời');
         await Order.updateOne({ _id: doc.order_id }, { $set: { refund_status: 'DISPUTED' } });
         const admins = await User.find({ role: 'ADMIN' }).select('_id').lean();
@@ -222,21 +217,25 @@ export class RefundRequestService {
         return updated;
     }
 
-    static async sellerDispute(requestId: string, sellerId: string, reason: string) {
-        const doc = await this.assertSellerOwnership(requestId, sellerId);
-        if (!reason?.trim()) throw new Error('Cần ghi lý do tranh chấp');
-        if (doc.product_type !== 'POD' || doc.triage_result !== 'PRINTER_RESPONSIBILITY') throw new Error('Chỉ POD đã chuyển Printer mới được seller tranh chấp');
-        RefundStateMachine.assertTransition(doc.status, 'seller-dispute', 'DISPUTED');
-        const updated = await RefundRequest.findOneAndUpdate(
-            { _id: doc._id, status: doc.status, dispute: { $exists: false } },
-            { $set: { status: 'DISPUTED', dispute: { opened_by: new mongoose.Types.ObjectId(sellerId), reason: reason.trim(), opened_at: new Date() } } },
-            { new: true },
-        );
-        if (!updated) throw new Error('Dispute đã mở hoặc request được cập nhật đồng thời');
-        await Order.updateOne({ _id: doc.order_id }, { $set: { refund_status: 'DISPUTED' } });
-        const admins = await User.find({ role: 'ADMIN' }).select('_id').lean();
-        await Promise.allSettled(admins.map(admin => this.notify(admin._id.toString(), 'POD cần Admin phân xử', `Seller yêu cầu Admin phân xử refund ${doc._id}.`, '/admin/refund-requests?status=DISPUTED', { refundRequestId: doc._id.toString() })));
+    static async printerRespond(requestId: string, decision: 'APPROVE' | 'REJECT', note?: string) {
+        if (!['APPROVE', 'REJECT'].includes(decision)) throw new Error('decision không hợp lệ');
+        if (decision === 'REJECT' && (!note?.trim() || note.trim().length < 3)) throw new Error('Khi từ chối, cần ghi rõ lý do (ít nhất 3 ký tự)');
+        const doc = await RefundRequest.findOne({ _id: requestId, status: 'PENDING_PRINTER' });
+        if (!doc) throw new Error('Không tìm thấy request đang chờ Printer');
+        if (doc.product_type !== 'POD') throw new Error('Chỉ yêu cầu POD được chuyển tới xưởng in');
+        const next: RefundRequestStatus = decision === 'APPROVE' ? 'PRINTER_APPROVED' : 'PRINTER_REJECTED';
+        RefundStateMachine.assertTransition(doc.status, 'printer-response', next);
+        const updated = await RefundRequest.findOneAndUpdate({ _id: doc._id, status: 'PENDING_PRINTER', printer_response: { $exists: false } }, { $set: { status: next, responsible_party: 'PRINTER', printer_response: { decision, note: note?.trim(), responded_at: new Date() } } }, { new: true });
+        if (!updated) throw new Error('Printer response đã được xử lý');
+        await Order.updateOne({ _id: doc.order_id }, { $set: { refund_status: decision === 'APPROVE' ? 'UNDER_REVIEW' : 'REFUND_REJECTED' } });
+        if (decision === 'APPROVE') await this.executeRefund(updated);
+        else void this.notify(doc.buyer_id.toString(), 'Xưởng in từ chối yêu cầu hoàn tiền', `Lý do: ${note!.trim()}. Bạn có thể mở dispute với quản trị viên.`, `/refund-requests/${doc._id}`, { refundRequestId: doc._id.toString() }).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
         return updated;
+    }
+
+    static async sellerDispute(requestId: string, sellerId: string, _reason: string) {
+        await this.assertSellerOwnership(requestId, sellerId);
+        throw new Error('Seller chỉ có quyền xem yêu cầu POD');
     }
 
     static async adminList(status = 'DISPUTED') {

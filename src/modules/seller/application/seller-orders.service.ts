@@ -83,7 +83,7 @@ export class SellerOrdersService {
             };
         }
 
-        const baseMatch: Record<string, any> = { shop_id: shopId };
+        const baseMatch: Record<string, any> = { shop_id: shopId, is_simulated: { $ne: true } };
         const search = String(query.search || '').trim();
         if (search) {
             const rx = new RegExp(escapeRegex(search), 'i');
@@ -169,6 +169,7 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
@@ -194,6 +195,7 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
@@ -291,6 +293,7 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
@@ -350,6 +353,7 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
@@ -399,6 +403,7 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }

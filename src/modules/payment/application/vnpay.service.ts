@@ -327,6 +327,7 @@ export class VNPayService {
         if (!order) {
             throw new Error(`Không tìm thấy đơn hàng: ${input.orderId}`);
         }
+        if (order.is_simulated) throw new Error('Không hỗ trợ hoàn tiền cho đơn mô phỏng.');
 
         if (order.payment_status !== 'PAID') {
             throw new Error(`Chỉ có thể hoàn tiền cho đơn hàng đã thanh toán thành công (Trạng thái hiện tại: ${order.payment_status})`);
