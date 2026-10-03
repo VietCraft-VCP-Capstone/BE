@@ -63,6 +63,7 @@ test('copy is marked, detached from seller and contains no payment references', 
     try {
         await new MongoOrderStatusSimulatorRepository(3).createOwnedTestOrderCopy('VC-1', buyerId.toString(), new Date());
         assert.equal(created.is_simulated, true); assert.notEqual(created.shop_id.toString(), sourceShop.toString());
+        assert.match(created.items[0].order_item_id, /^[0-9a-f-]{36}$/i); assert.ok(created.items[0].item_snapshot);
         assert.equal(created.payment_status, 'PENDING'); assert.equal(created.transaction_id, undefined); assert.equal(created.payment_reference, undefined); assert.equal(created.vnpay_transaction_no, undefined);
     } finally { (Order as any).findOne = originalFindOne; (Order as any).create = originalCreate; (Order as any).countDocuments = originalCount; }
 });

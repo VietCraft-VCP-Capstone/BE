@@ -10,6 +10,9 @@ import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter, sellerPromot
 import { cartRouter } from '../modules/cart';
 import { productsRouter, wishlistRouter, shopRouter } from '../modules/product';
 import { ordersRouter, refundRequestRouter, reviewRouter } from '../modules/order';
+import { createReturnRequestRouter } from '../modules/order/presentation/return-request.router';
+import { createReturnRequestService, createReturnClock } from '../modules/order/application/return-request.runtime';
+import { authenticate } from './middleware/auth.middleware';
 import { paymentRouter } from '../modules/payment';
 import { promotionRouter } from '../modules/promotion';
 
@@ -39,6 +42,8 @@ router.use('/cart', cartRouter);
 router.use('/products', productsRouter);
 router.use('/shops', shopRouter);
 router.use('/orders', ordersRouter);
+const returnClock = { now: () => new Date() };
+router.use('/returns/v3', createReturnRequestRouter({ service: createReturnRequestService(returnClock), authenticate, clock: createReturnClock(returnClock) }));
 router.use('/', refundRequestRouter);
 router.use('/reviews', reviewRouter);
 router.use('/payment', paymentRouter);

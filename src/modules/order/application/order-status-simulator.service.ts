@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import { Order } from '../infrastructure/models/order.model';
 import { byCodeOrId, toBuyerObjectId } from '../utils';
 
@@ -93,7 +94,7 @@ export class MongoOrderStatusSimulatorRepository implements OrderStatusSimulator
                 order_type: source.order_type,
                 shipping_address: source.shipping_address,
                 shipping_details: source.shipping_details,
-                items: source.items,
+                items: source.items.map(item => ({ ...item, order_item_id: crypto.randomUUID(), item_snapshot: item.item_snapshot || { product_id: String(item.product_id), variant_id: String(item.variant_id), title: item.title, color: item.color, size: item.size, image: item.image, design_file_url: item.design_file_url, custom_notes: item.custom_notes } })),
                 financial_breakdown: source.financial_breakdown,
                 status_history: [{ status: 'ORDERED', changed_at: at, note: 'Bản sao test; trạng thái thanh toán không mô phỏng.' }],
                 order_hour_of_week: source.order_hour_of_week,

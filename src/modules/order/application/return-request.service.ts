@@ -121,6 +121,14 @@ export class ReturnRequestApplicationService {
         const to: ReturnState = approve && current.requested_resolution === 'REFUND' ? 'AWAITING_ADMIN_REFUND' : approve ? 'APPROVED' : 'REJECTED';
         return this.commit(current,input.actorId,'PRINTER',approve?'PRINTER_APPROVE':'PRINTER_REJECT',to,input.reason,{ final_resolution:current.requested_resolution },null,undefined,[],auditRole,actingAs);
     }
+    async addEvidence(input:{actorId:string;requestId:string;role:'SELLER'|'PRINTER';evidence:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestV3Data>{
+        const current=await this.requireRequest(input.requestId); const action=input.role==='SELLER'?'SELLER_ADD_EVIDENCE':'PRINTER_ADD_EVIDENCE'; this.authorize(action,current,input.actorId,input.role);
+        const existing=await this.deps.repository.listEvidence(current.id);
+        const all=[...existing.map(item=>({id:item.evidence_id,kind:item.kind==='PHOTO'?'IMAGE' as const:'VIDEO' as const,uri:item.storage_ref})),...input.evidence];
+        const validated=validateReturnEvidence({reasonCode:current.reason_code,description:current.reason_description,evidence:all}); if(validated.kind!=='VALID') throw new Error(validated.reason);
+        const rows=input.evidence.map(item=>({request_id:current.id,evidence_id:item.id,kind:item.kind==='IMAGE'?'PHOTO' as const:'VIDEO' as const,storage_ref:item.uri,uploaded_by:input.actorId,created_at:this.now()}));
+        return this.deps.repository.transitionWithAudit(current.id,current.version,{updated_at:this.now()},{request_id:current.id,actor_id:input.actorId,actor_role:input.role,from_status:current.status,to_status:current.status,reason:`${input.role} added evidence references.`,event_id:null,created_at:this.now()},rows);
+    }
     async buyerAddEvidence(input:{actorId:string;requestId:string;evidence:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestV3Data>{
         const current=await this.requireRequest(input.requestId); this.authorize('BUYER_ADD_EVIDENCE',current,input.actorId,'BUYER');
         if(current.status!=='PENDING_PRINTER'||!current.evidence_requested_at||!current.evidence_deadline_at||current.buyer_evidence_submitted_at) throw new Error('No open one-time P16 evidence request.');

@@ -16,6 +16,8 @@ export interface IShippingDetails {
 }
 
 export interface IOrderItem {
+    order_item_id?: string;
+    item_snapshot?: Record<string, unknown>;
     product_id: mongoose.Types.ObjectId;
     variant_id: mongoose.Types.ObjectId;
     title: string;
@@ -96,6 +98,8 @@ const ShippingDetailsSchema = new Schema<IShippingDetails>({
 }, { _id: false });
 
 const OrderItemSchema = new Schema<IOrderItem>({
+    order_item_id: { type: String, immutable: true, index: true },
+    item_snapshot: { type: Schema.Types.Mixed, immutable: true },
     product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
     variant_id: { type: Schema.Types.ObjectId, ref: 'ProductVariant', required: true },
     title: { type: String, required: true },
