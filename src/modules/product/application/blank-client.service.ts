@@ -160,11 +160,27 @@ async function fetchBlanksFromUrl(apiUrl: string, apiKey?: string, printerId?: s
     });
     if (!res.ok) throw new Error(`Printer trả về ${res.status}`);
     const data = await res.json() as Blank[];
-    return (data || []).map(b => ({
-        ...b,
-        printer_id: printerId || (b as any).printer_id || 'vietcraft-direct',
-        printer_name: printerName || (b as any).printer_name || 'Xưởng in đối tác'
-    }));
+    return (data || []).map(b => {
+        let printAreas = b.print_areas || [];
+        if (!printAreas || printAreas.length === 0) {
+            printAreas = [{
+                key: 'front',
+                label: 'Mặt trước',
+                image: b.default_image,
+                x: 275,
+                y: 220,
+                width: 250,
+                height: 330,
+                surface: 'flat'
+            }];
+        }
+        return {
+            ...b,
+            print_areas: printAreas,
+            printer_id: printerId || (b as any).printer_id || 'vietcraft-direct',
+            printer_name: printerName || (b as any).printer_name || 'Xưởng in đối tác'
+        };
+    });
 }
 
 export class BlankClient {
@@ -177,7 +193,8 @@ export class BlankClient {
                 : (shop?.printer_partner?.is_connected && shop?.printer_partner?.api_url ? [shop.printer_partner] : []);
 
             if (activePrinters.length === 0) {
-                return [];
+                // Nếu chưa liên kết xưởng in nào hoặc không có xưởng online, lấy danh sách phôi mặc định/hệ thống
+                return BlankClient.listSystemBlanks();
             }
 
             const allBlanks: Blank[] = [];
@@ -202,30 +219,92 @@ export class BlankClient {
                     // Tiếp tục với xưởng khác nếu một xưởng offline
                 }
             }
-            return allBlanks;
+            if (allBlanks.length > 0) return allBlanks;
+            return BlankClient.listSystemBlanks();
         }
 
-        // Mặc định hoặc dành cho Admin kiểm tra
+        return BlankClient.listSystemBlanks();
+    }
+
+    private static async listSystemBlanks(): Promise<Blank[]> {
         if (cache && Date.now() - cache.at < TTL_MS) return cache.data;
         try {
             const data = await fetchBlanksFromUrl(config.printerApiUrl || 'http://localhost:8880', config.printerApiKey);
-            cache = { at: Date.now(), data };
-            return data;
+            if (data && data.length > 0) {
+                cache = { at: Date.now(), data };
+                return data;
+            }
+            return DEFAULT_BLANKS;
         } catch {
-            return [];
+            return DEFAULT_BLANKS;
         }
     }
 
-    static async getBlank(id: string): Promise<Blank | undefined> {
-        const blanks = await BlankClient.listBlanks();
-        const found = blanks.find(b => b._id === id);
-        if (found) return found;
-        // Dự phòng: nếu không tìm thấy trong danh sách phôi từ xưởng thì tìm trong phôi dự phòng
-        return DEFAULT_BLANKS.find(b => b._id === id);
+    static async getBlank(id: string, sellerId?: string): Promise<Blank | undefined> {
+        // 1. Thử tìm trong danh sách phôi của seller (nếu có sellerId)
+        if (sellerId) {
+            try {
+                const blanks = await BlankClient.listBlanks(sellerId);
+                const found = blanks.find(b => b._id === id || String(b._id) === String(id));
+                if (found) return found;
+            } catch {
+                // Tiếp tục fallback
+            }
+        }
+
+        // 2. Thử tìm trong danh sách phôi hệ thống / cache
+        try {
+            const sysBlanks = await BlankClient.listBlanks();
+            const foundSys = sysBlanks.find(b => b._id === id || String(b._id) === String(id));
+            if (foundSys) return foundSys;
+        } catch {
+            // Tiếp tục fallback
+        }
+
+        // 3. Thử gọi trực tiếp endpoint GET /api/blanks/:id từ Printing Shop
+        try {
+            const apiUrl = config.printerApiUrl || 'http://localhost:8880';
+            const res = await fetch(`${apiUrl}/api/blanks/${id}`, {
+                signal: AbortSignal.timeout(5000),
+                headers: {
+                    'Accept': 'application/json',
+                    ...(config.printerApiKey ? { 'X-API-Key': config.printerApiKey } : {})
+                }
+            });
+            if (res.ok) {
+                const b = await res.json() as Blank;
+                if (b && b._id) {
+                    let printAreas = b.print_areas || [];
+                    if (!printAreas || printAreas.length === 0) {
+                        printAreas = [{
+                            key: 'front',
+                            label: 'Mặt trước',
+                            image: b.default_image,
+                            x: 275,
+                            y: 220,
+                            width: 250,
+                            height: 330,
+                            surface: 'flat'
+                        }];
+                    }
+                    return {
+                        ...b,
+                        print_areas: printAreas,
+                        printer_id: b.printer_id || 'vietcraft-direct',
+                        printer_name: b.printer_name || 'Xưởng in đối tác'
+                    };
+                }
+            }
+        } catch {
+            // Tiếp tục fallback
+        }
+
+        // 4. Dự phòng: nếu không tìm thấy trong danh sách phôi từ xưởng thì tìm trong phôi dự phòng mặc định sàn
+        return DEFAULT_BLANKS.find(b => b._id === id || String(b._id) === String(id));
     }
 
-    static async findVariation(blankId: string, sku: string): Promise<BlankVariation | undefined> {
-        const blank = await BlankClient.getBlank(blankId);
+    static async findVariation(blankId: string, sku: string, sellerId?: string): Promise<BlankVariation | undefined> {
+        const blank = await BlankClient.getBlank(blankId, sellerId);
         return blank?.variations.find(v => v.sku === sku);
     }
 }

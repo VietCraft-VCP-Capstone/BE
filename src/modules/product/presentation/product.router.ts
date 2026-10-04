@@ -94,12 +94,16 @@ router.get('/meta/blanks', authenticate, requireRole(['seller', 'admin']), async
 
 router.post('/preview-mockup', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
     try {
-        const images = await ProductsService.previewMockups(
+        const result = await ProductsService.previewMockups(
             req.user!.id,
             req.body?.blankId,
-            req.body?.designPlacements || []
+            req.body?.designPlacements || [],
+            {
+                colorHex: req.body?.colorHex,
+                colors: req.body?.colors
+            }
         );
-        res.json({ images });
+        res.json(result);
     } catch (error: any) {
         handleError(res, error);
     }
