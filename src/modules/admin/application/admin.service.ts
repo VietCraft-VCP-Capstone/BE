@@ -244,7 +244,7 @@ class AdminService implements IAdminService {
 
         let documentUrls: Record<string, string> = {};
         if (app.kyc_data) {
-            const { front_id_image, back_id_image, portrait_image, business_license_image } = app.kyc_data;
+            const { front_id_image, back_id_image, portrait_image, business_license_image } = app.kyc_data as any;
             if (front_id_image) {
                 documentUrls.front_id_url = `/api/seller/kyc/files/${front_id_image}?token=${generatePresignedToken(front_id_image).token}`;
             }

@@ -5,7 +5,7 @@ import { config, initializeDatabases } from './app/config';
 import { logger } from './shared/utils/logger';
 import { ChatGateway } from './modules/chat';
 import { NotificationGateway } from './modules/notification';
-
+// Khởi động server
 async function bootstrap() {
     const server = http.createServer(app);
     const io = new SocketIOServer(server, {

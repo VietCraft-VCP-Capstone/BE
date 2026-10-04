@@ -83,9 +83,10 @@ router.get('/mine', authenticate, requireRole(['seller', 'admin']), async (req: 
     }
 });
 
-router.get('/meta/blanks', authenticate, requireRole(['seller', 'admin']), async (req, res) => {
+router.get('/meta/blanks', authenticate, requireRole(['seller', 'admin']), async (req: any, res) => {
     try {
-        res.json(await BlankClient.listBlanks());
+        const sellerId = req.user?.id;
+        res.json(await BlankClient.listBlanks(sellerId));
     } catch (error: any) {
         res.status(502).json({ error: error.message });
     }

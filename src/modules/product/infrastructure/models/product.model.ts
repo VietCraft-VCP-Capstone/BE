@@ -36,6 +36,8 @@ export interface IProduct extends Document {
     is_hidden: boolean;
     // POD: phôi in (id bên Printer) + cách đặt design lên phôi.
     blank_id?: string;
+    printer_id?: string;
+    printer_name?: string;
     design_placements?: {
         design_id?: mongoose.Types.ObjectId;
         print_area_key: string;
@@ -144,6 +146,8 @@ const ProductSchema = new Schema<IProduct>({
     rejection_reason: { type: String },
     is_hidden: { type: Boolean, default: false },
     blank_id: { type: String, index: true },
+    printer_id: { type: String, index: true },
+    printer_name: { type: String },
     design_placements: { type: [DesignPlacementSchema], default: [] },
     average_rating: { type: Number, default: 5.0, min: 0, max: 5, index: true },
     rating_count: { type: Number, default: 0 }

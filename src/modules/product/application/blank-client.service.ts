@@ -17,6 +17,8 @@ export interface Blank {
     variations: BlankVariation[];
     print_areas?: { key: string; label?: string; image?: string; x: number; y: number; width: number; height: number; surface?: 'flat' | 'wrap'; template_w?: number; template_h?: number; arc?: number }[];
     is_active?: boolean;
+    printer_id?: string;
+    printer_name?: string;
 }
 
 export const DEFAULT_BLANKS: Blank[] = [
@@ -142,37 +144,75 @@ export const DEFAULT_BLANKS: Blank[] = [
     }
 ];
 
+import mongoose from 'mongoose';
+import { Shop } from '../infrastructure/models/shop.model';
+
 let cache: { at: number; data: Blank[] } | null = null;
 const TTL_MS = 1_000;
 
-async function fetchBlanks(): Promise<Blank[]> {
-    const res = await fetch(`${config.printerApiUrl}/api/blanks`, {
+async function fetchBlanksFromUrl(apiUrl: string, apiKey?: string, printerId?: string, printerName?: string): Promise<Blank[]> {
+    const res = await fetch(`${apiUrl}/api/blanks`, {
         signal: AbortSignal.timeout(5000),
         headers: {
             'Accept': 'application/json',
-            ...(config.printerApiKey ? { 'X-API-Key': config.printerApiKey } : {}),
+            ...(apiKey ? { 'X-API-Key': apiKey } : {}),
         },
     });
     if (!res.ok) throw new Error(`Printer trả về ${res.status}`);
-    return res.json() as Promise<Blank[]>;
+    const data = await res.json() as Blank[];
+    return (data || []).map(b => ({
+        ...b,
+        printer_id: printerId || (b as any).printer_id || 'vietcraft-direct',
+        printer_name: printerName || (b as any).printer_name || 'Xưởng in đối tác'
+    }));
 }
 
 export class BlankClient {
-    static async listBlanks(): Promise<Blank[]> {
+    static async listBlanks(sellerId?: string): Promise<Blank[]> {
+        if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+            const shop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(sellerId) }).lean();
+            // Lấy danh sách tất cả các xưởng in đang liên kết của Seller
+            const activePrinters = (shop?.printer_partners && shop.printer_partners.length > 0)
+                ? shop.printer_partners.filter(p => p.is_connected && p.api_url)
+                : (shop?.printer_partner?.is_connected && shop?.printer_partner?.api_url ? [shop.printer_partner] : []);
+
+            if (activePrinters.length === 0) {
+                return [];
+            }
+
+            const allBlanks: Blank[] = [];
+            const seenKeys = new Set<string>();
+
+            for (const printer of activePrinters) {
+                try {
+                    const blanks = await fetchBlanksFromUrl(
+                        printer.api_url,
+                        printer.api_key,
+                        printer.printer_id,
+                        printer.printer_name
+                    );
+                    for (const b of blanks) {
+                        const uniqueKey = `${b._id}_${b.printer_id}`;
+                        if (!seenKeys.has(uniqueKey)) {
+                            seenKeys.add(uniqueKey);
+                            allBlanks.push(b);
+                        }
+                    }
+                } catch (err: any) {
+                    // Tiếp tục với xưởng khác nếu một xưởng offline
+                }
+            }
+            return allBlanks;
+        }
+
+        // Mặc định hoặc dành cho Admin kiểm tra
         if (cache && Date.now() - cache.at < TTL_MS) return cache.data;
         try {
-            const data = await fetchBlanks();
-            if (!Array.isArray(data) || data.length === 0) {
-                // Nếu xưởng in trả về danh sách rỗng -> tự động fallback về bộ phôi dự phòng
-                cache = { at: Date.now(), data: DEFAULT_BLANKS };
-                return DEFAULT_BLANKS;
-            }
+            const data = await fetchBlanksFromUrl(config.printerApiUrl || 'http://localhost:8880', config.printerApiKey);
             cache = { at: Date.now(), data };
             return data;
         } catch {
-            // Khi không fetch được phôi của xưởng (lỗi mạng, timeout hoặc xưởng in chưa bật) -> trả về phôi dự phòng
-            cache = { at: Date.now(), data: DEFAULT_BLANKS };
-            return DEFAULT_BLANKS;
+            return [];
         }
     }
 

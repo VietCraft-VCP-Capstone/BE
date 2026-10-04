@@ -722,6 +722,8 @@ export class ProductsService {
                 product_type: 'POD_TEMPLATE',
                 customization_type: 'ONLINE_MOCKUP',
                 blank_id: payload.blankId,
+                printer_id: payload.printerId || (data.blank as any)?.printer_id || shop.printer_partner?.printer_id,
+                printer_name: payload.printerName || (data.blank as any)?.printer_name || shop.printer_partner?.printer_name || 'Xưởng in đối tác',
                 design_placements: data.designPlacements!.map((p: any) => ({
                     ...p,
                     design_id: p.design_id ? new mongoose.Types.ObjectId(p.design_id) : undefined,
