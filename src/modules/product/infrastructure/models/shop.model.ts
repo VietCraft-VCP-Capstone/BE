@@ -11,6 +11,7 @@ export interface IPrinterPartner {
     printer_name: string;
     api_url: string;
     api_key?: string;
+    seller_printing_email?: string;
     webhook_secret?: string;
     is_connected: boolean;
     connected_at?: Date;
@@ -28,6 +29,7 @@ export interface IShop extends Document {
     wallet_balance: mongoose.Types.Decimal128;
     bank_info?: IBankInfo;
     printer_partner?: IPrinterPartner;
+    printer_partners?: IPrinterPartner[];
     average_response_time_seconds?: number;
     performance_benchmarks?: Record<string, any>;
     listing_count: number;
@@ -50,6 +52,7 @@ const PrinterPartnerSchema = new Schema<IPrinterPartner>({
     printer_name: { type: String, required: true },
     api_url: { type: String, required: true },
     api_key: { type: String },
+    seller_printing_email: { type: String },
     webhook_secret: { type: String },
     is_connected: { type: Boolean, default: false },
     connected_at: { type: Date },
@@ -67,6 +70,7 @@ const ShopSchema = new Schema<IShop>({
     wallet_balance: { type: Schema.Types.Decimal128, default: 0.0 },
     bank_info: { type: BankInfoSchema },
     printer_partner: { type: PrinterPartnerSchema },
+    printer_partners: { type: [PrinterPartnerSchema], default: [] },
     average_response_time_seconds: { type: Number, default: 0 },
     performance_benchmarks: { type: Schema.Types.Mixed, default: {} },
     settings: { type: Schema.Types.Mixed, default: {} },
