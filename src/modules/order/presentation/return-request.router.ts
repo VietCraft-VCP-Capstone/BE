@@ -30,6 +30,11 @@ const sendError = (res: any, error: any) => res.status(error?.statusCode || (/no
 export function createReturnRequestRouter({ service, authenticate, clock }: ReturnRequestRouteDependencies) {
     const router=Router();
     router.use(authenticate);
+    router.get('/eligibility', asyncRoute(async(req,res)=>{
+        if(String(req.user?.role||'').toLowerCase()!=='buyer') return res.status(req.user?403:401).json({error:'Buyer role required.'});
+        if(typeof req.query.orderId!=='string'||!req.query.orderId.trim()) return res.status(400).json({error:'orderId is required.'});
+        const data=await service.evaluateBuyerEligibility(req.user.id,req.query.orderId.trim()); return res.json({data:{items:data}});
+    }));
     router.get('/requests', asyncRoute(async(req,res)=>{
         const role=roleMap[String(req.user?.role||'').toLowerCase()] as ReturnRequestV3ActorRole|undefined;
         if(!role) return res.status(req.user?403:401).json({error:'Buyer, Seller, Printer or Admin role required.'});

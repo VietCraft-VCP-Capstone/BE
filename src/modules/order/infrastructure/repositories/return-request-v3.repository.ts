@@ -37,6 +37,7 @@ export interface ReturnRequestV3Repository {
     createWithAudit(request: ReturnRequestV3Data, evidence: ReturnEvidenceV3Data[], log: ReturnRequestLogV3Data): Promise<ReturnRequestV3Data>;
     findById(id: string): Promise<ReturnRequestV3Data | null>;
     findActiveByItem(orderItemId: string): Promise<ReturnRequestV3Data | null>;
+    listActiveByOrder(orderId: string): Promise<ReturnRequestV3Data[]>;
     casTransition(id: string, expectedVersion: number, patch: ReturnRequestV3Patch, log: ReturnRequestLogV3Data): Promise<ReturnRequestV3Data>;
     transitionWithAudit(id: string, expectedVersion: number, patch: ReturnRequestV3Patch, log: ReturnRequestLogV3Data, evidence?: ReturnEvidenceV3Data[]): Promise<ReturnRequestV3Data>;
     appendEvidence(evidence: ReturnEvidenceV3Data): Promise<void>;
@@ -93,9 +94,10 @@ export class InMemoryReturnRequestV3Repository implements ReturnRequestV3Reposit
     }
     async findById(id: string): Promise<ReturnRequestV3Data | null> { const value = this.requests.get(id); return value ? structuredClone(value) : null; }
     async findActiveByItem(item: string): Promise<ReturnRequestV3Data | null> {
-        const value = [...this.requests.values()].find(request => request.order_item_id === item && (['SUBMITTED','PENDING_PRINTER','PRINTER_PROPOSED_FAULT_CHANGE','APPROVED','REJECTED','DISPUTED','AWAITING_ADMIN_REFUND','WAITING_BUYER_CHOICE','WAITING_STOCK'] as string[]).includes(request.status));
+        const value = [...this.requests.values()].find(request => request.order_item_id === item && ACTIVE_STATUS_VALUES.has(request.status));
         return value ? structuredClone(value) : null;
     }
+    async listActiveByOrder(orderId: string): Promise<ReturnRequestV3Data[]> { return [...this.requests.values()].filter(request => request.order_id === orderId && ACTIVE_STATUS_VALUES.has(request.status)).map(request => structuredClone(request)); }
     async transitionWithAudit(id: string, expectedVersion: number, patch: ReturnRequestV3Patch, log: ReturnRequestLogV3Data, evidence: ReturnEvidenceV3Data[] = []): Promise<ReturnRequestV3Data> {
         const current = this.requests.get(id);
         if (!current || current.version !== expectedVersion) throw new ReturnRequestV3ConflictError();
@@ -168,7 +170,8 @@ export class MongoReturnRequestV3Repository implements ReturnRequestV3Repository
         return { request, timeline, evidence };
     }
     async findById(id: string): Promise<ReturnRequestV3Data | null> { const doc = await ReturnRequestV3.findById(id).lean(); return doc ? asRequest(doc) : null; }
-    async findActiveByItem(item: string): Promise<ReturnRequestV3Data | null> { const doc = await ReturnRequestV3.findOne({ order_item_id: item, status: { $in: ['SUBMITTED','PENDING_PRINTER','PRINTER_PROPOSED_FAULT_CHANGE','APPROVED','REJECTED','DISPUTED','AWAITING_ADMIN_REFUND','WAITING_BUYER_CHOICE','WAITING_STOCK'] } }).lean(); return doc ? asRequest(doc) : null; }
+    async findActiveByItem(item: string): Promise<ReturnRequestV3Data | null> { const doc = await ReturnRequestV3.findOne({ order_item_id: item, status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES] } }).lean(); return doc ? asRequest(doc) : null; }
+    async listActiveByOrder(orderId: string): Promise<ReturnRequestV3Data[]> { return (await ReturnRequestV3.find({ order_id: orderId, status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES] } }).lean()).map(asRequest); }
     async transitionWithAudit(id: string, expectedVersion: number, patch: ReturnRequestV3Patch, log: ReturnRequestLogV3Data, evidence: ReturnEvidenceV3Data[] = []): Promise<ReturnRequestV3Data> {
         const session = await mongoose.startSession(); let saved: ReturnRequestV3Data | null = null;
         try {

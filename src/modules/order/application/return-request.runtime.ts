@@ -8,6 +8,7 @@ import { createLinkedRefundExecution } from './return-refund-bridge.service';
 import { OrderStatusSimulationDeliveredEventSource } from './order-status-simulator-delivered-event-source';
 import type { DeliveredEventSourceV3, OrderReturnSnapshotSource, ReturnRequestClock, ReturnRequestRefundBridge } from './return-request.service';
 import { ReturnRequestApplicationService } from './return-request.service';
+import { eligibilityItemSource } from './return-eligibility-source';
 
 export function isDevOrderSimulationEnabled(env: NodeJS.ProcessEnv = process.env): boolean { return env.NODE_ENV==='development' && env.ENABLE_DEV_ORDER_SIMULATION==='true'; }
 export function createReturnClock(realClock: ReturnRequestClock, env: NodeJS.ProcessEnv = process.env): ReturnRequestClock {
@@ -31,5 +32,5 @@ export function createReturnRequestService(realClock: ReturnRequestClock = { now
     const enabled=isDevOrderSimulationEnabled(env);
     const bridgeRepository=new MongooseReturnRefundExecutionRepository();
     const bridge: ReturnRequestRefundBridge={ async createLinkedRefund(input){ return createLinkedRefundExecution(bridgeRepository,input); } };
-    return new ReturnRequestApplicationService({ repository:new MongoReturnRequestV3Repository(),snapshotSource,deliveredEventSource:enabled?new OrderStatusSimulationDeliveredEventSource(true):noDeliveredEvents,bridge,clock:createReturnClock(realClock,env),id:()=>crypto.randomUUID() });
+    return new ReturnRequestApplicationService({ repository:new MongoReturnRequestV3Repository(),snapshotSource,eligibilityItemSource,deliveredEventSource:enabled?new OrderStatusSimulationDeliveredEventSource(true):noDeliveredEvents,bridge,clock:createReturnClock(realClock,env),id:()=>crypto.randomUUID() });
 }

@@ -12,8 +12,16 @@ export interface OrderReturnSnapshotSource {
 }
 export interface ReturnRequestRefundBridge { /** Must be idempotent on requestId because retry may follow a timeout after remote create. */ createLinkedRefund(input: {requestId:string;orderItemId:string;orderId:string;resolution:'REFUND';faultParty:ReturnV3FaultParty;amountMinor:number;currency:string;adminDecisionId:string;finalizedByAdmin:true}): Promise<{ id:string; status:'PENDING_INTEGRATION' }> }
 export interface ReturnRequestClock { now(): Date }
+export interface ReturnEligibilityItemSource {
+    getItems(orderId: string): Promise<Array<{ orderItemId?: string | null; buyerId:string; cohort:'POD'|'NORMAL'; itemStatus:'DELIVERED'|'SHIPPING'|'OTHER'; orderedQuantity:number; replacedQuantity:number; refundedQuantity:number; activeReservedQuantity:number }>>;
+}
+export interface ReturnEligibilityItem {
+    orderItemId: string | null; eligible: boolean; reasonIfNot: { code:'NOT_DELIVERED'|'MISSING_ORDER_ITEM_ID'|'NORMAL_UNSUPPORTED'|'ACTIVE_REQUEST'|'EXPIRED'|'QUANTITY_EXHAUSTED'; label:string } | null;
+    deadline: Date | null; remainingQuantity:number; activeRequestId?:string;
+}
 export interface ReturnRequestServiceDependencies {
     repository: ReturnRequestV3Repository; snapshotSource: OrderReturnSnapshotSource; deliveredEventSource: DeliveredEventSourceV3;
+    eligibilityItemSource?: ReturnEligibilityItemSource;
     bridge: ReturnRequestRefundBridge; clock: ReturnRequestClock; id: () => string; r06DeliveredWindowHours?: number;
 }
 export type PrinterDecisionAction = 'APPROVE'|'REJECT'|'REQUEST_EVIDENCE'|'PROPOSE_FAULT_CHANGE';
@@ -192,6 +200,33 @@ export class ReturnRequestApplicationService {
         const decisionId=this.deps.id(); const notifiedAt=input.faultParty==='SELLER'?this.now():null; const appealWindow=notifiedAt?evaluateAnchoredWindow('P05',notifiedAt,this.now()):null;
         const saved=await this.commit(current,input.actorId,'ADMIN',action,to,input.reason,{correction_used:true,final_resolution:input.resolution,fault_party:input.faultParty,fault_source:'ADMIN',admin_decision_id:decisionId,refund_admin_confirmed:input.resolution==='REFUND',refund_admin_confirmed_by:input.resolution==='REFUND'?input.actorId:null,refund_admin_confirmed_at:input.resolution==='REFUND'?this.now():null,refund_amount_minor:input.resolution==='REFUND'?input.amountMinor:null,refund_currency:input.resolution==='REFUND'?input.currency:null,seller_fault_notified_at:notifiedAt,seller_appeal_deadline_at:appealWindow?.kind==='OPEN'?appealWindow.deadline:null});
         if(input.resolution==='REFUND') return this.createBridge(saved); return saved;
+    }
+    async evaluateBuyerEligibility(actorId:string, orderId:string):Promise<ReturnEligibilityItem[]> {
+        if(!this.deps.eligibilityItemSource) throw new Error('Buyer eligibility source is not configured.');
+        const rows=await this.deps.eligibilityItemSource.getItems(orderId);
+        const [activeRequests, snapshots]=await Promise.all([this.deps.repository.listActiveByOrder(orderId),Promise.all(rows.map(row=>row.orderItemId ? this.deps.snapshotSource.getSnapshot(orderId,row.orderItemId) : Promise.resolve(null)))]);
+        if(!rows.length || rows.some(row=>row.buyerId!==actorId)) throw Object.assign(new Error('Buyer does not own this order.'),{statusCode:403});
+        return Promise.all(rows.map(async(row,index)=>{
+            const itemId=row.orderItemId || null; const snapshot=snapshots[index]; const active=itemId ? activeRequests.find(request=>request.order_item_id===itemId) : undefined;
+            const remaining=Math.max(0,row.orderedQuantity-row.replacedQuantity-row.refundedQuantity-row.activeReservedQuantity);
+            let deadline:Date|null=null;
+            if(itemId && row.itemStatus==='DELIVERED' && row.cohort==='POD') {
+                try { const delivered=await this.deps.deliveredEventSource.getVerifiedDeliveredEvent(orderId,itemId); const result=evaluatePodEligibility({reasonCode:'R02',now:this.now(),deliveredEvent:delivered,r06DeliveredWindowHours:this.deps.r06DeliveredWindowHours}); if(result.kind==='ELIGIBLE'||result.kind==='EXPIRED') deadline=result.deadline; } catch { deadline=null; }
+            }
+            let reasonIfNot:ReturnEligibilityItem['reasonIfNot']=null;
+            if(!itemId) reasonIfNot={code:'MISSING_ORDER_ITEM_ID',label:'Thiếu mã sản phẩm trong đơn'};
+            else if(row.cohort==='NORMAL') reasonIfNot={code:'NORMAL_UNSUPPORTED',label:'Sản phẩm thường chưa hỗ trợ đổi/trả trực tuyến'};
+            else if(active) reasonIfNot={code:'ACTIVE_REQUEST',label:'Đã có yêu cầu đang xử lý'};
+            else if(remaining<=0) reasonIfNot={code:'QUANTITY_EXHAUSTED',label:'Đã dùng hết số lượng'};
+            else if(row.itemStatus!=='DELIVERED') reasonIfNot={code:'NOT_DELIVERED',label:'Đơn hàng chưa giao'};
+            else {
+                const delivered=itemId ? await this.deps.deliveredEventSource.getVerifiedDeliveredEvent(orderId,itemId).catch(()=>null) : null;
+                const policy=evaluatePodEligibility({reasonCode:'R02',now:this.now(),deliveredEvent:delivered,r06DeliveredWindowHours:this.deps.r06DeliveredWindowHours});
+                if(policy.kind==='EXPIRED') reasonIfNot={code:'EXPIRED',label:'Đã quá hạn gửi yêu cầu'};
+                else if(policy.kind!=='ELIGIBLE') reasonIfNot={code:'NOT_DELIVERED',label:'Chưa có dữ liệu giao hàng hợp lệ'};
+            }
+            return {orderItemId:itemId,eligible:!reasonIfNot,reasonIfNot,deadline:deadline&&Number.isFinite(deadline.getTime())?deadline:null,remainingQuantity:remaining,...(active?{activeRequestId:active.id}:{})};
+        }));
     }
     async listRequests(query: ReturnRequestV3ListQuery) { return this.deps.repository.listByRole(query); }
     async getRequestDetail(actorId: string, role: ReturnActor, requestId: string): Promise<ReturnRequestV3Detail | null> {

@@ -9,13 +9,14 @@ import { InMemoryReturnRequestV3Repository } from '../infrastructure/repositorie
 
 const now = new Date('2026-05-02T00:00:00Z');
 const evidence = [{ id: 'e1', kind: 'IMAGE' as const, uri: '/uploads/refunds/e1.jpg' }];
-function setup() {
+function setup(options: { eligibilityItems?: Array<{orderItemId?:string|null;buyerId:string;cohort:'POD'|'NORMAL';itemStatus:'DELIVERED'|'SHIPPING'|'OTHER';orderedQuantity:number;replacedQuantity:number;refundedQuantity:number;activeReservedQuantity:number}>; deliveredAt?:Date; clockNow?:Date } = {}) {
     let seq = 0;
     const repository = new InMemoryReturnRequestV3Repository();
     const snapshotSource: OrderReturnSnapshotSource = { async getSnapshot(orderId, orderItemId) { return { orderId, orderItemId, buyerId:'buyer', sellerId:'seller', printerId:'printer', cohort:'POD', itemStatus:'DELIVERED', itemSnapshot:{ title:'POD item' }, valid:true, orderedQuantity:1, replacedQuantity:0, refundedQuantity:0, activeReservedQuantity:0, policyVersion:'v1', schemaVersion:'v3' }; } };
+    const eligibilityItemSource = { async getItems(){ return options.eligibilityItems || [{orderItemId:'item-1',buyerId:'buyer',cohort:'POD' as const,itemStatus:'DELIVERED' as const,orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0}]; } };
     const bridgeCalls: unknown[] = [];
     const bridge: ReturnRequestRefundBridge = { async createLinkedRefund(input) { bridgeCalls.push(input); return { id:'execution-1', status:'PENDING_INTEGRATION' }; } };
-    const service = new ReturnRequestApplicationService({ repository, snapshotSource, deliveredEventSource:{ async getVerifiedDeliveredEvent(){ return { eventId:'delivered-1', occurredAt:new Date('2026-05-01T00:00:00Z'), verified:true }; } }, bridge, clock:{ now:()=>now }, id:()=>`req-${++seq}` });
+    const service = new ReturnRequestApplicationService({ repository, snapshotSource, eligibilityItemSource, deliveredEventSource:{ async getVerifiedDeliveredEvent(_orderId:string,itemId:string){ return { eventId:`delivered-${itemId}`, occurredAt:itemId==='expired-1'?options.deliveredAt || new Date('2026-04-20T00:00:00Z'):new Date('2026-05-01T00:00:00Z'), verified:true }; } }, bridge, clock:{ now:()=>options.clockNow || now }, id:()=>`req-${++seq}` });
     const app = express(); app.use(express.json());
     const auth: Parameters<typeof createReturnRequestRouter>[0]['authenticate'] = (req:any,_res,next) => { req.user = req.headers['x-user'] ? { id:String(req.headers['x-user']), role:String(req.headers['x-role'] || '') } : undefined; next(); };
     app.use('/returns/v3', createReturnRequestRouter({ service, authenticate:auth, clock:{ now:()=>now } }));
@@ -32,6 +33,27 @@ async function request(server: http.Server, method: string, path: string, role: 
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 }
 const createBody = { orderId:'order-1', orderItemId:'item-1', quantity:1, reasonCode:'R02', description:'item defect', resolution:'REFUND', evidence };
+
+test('Buyer eligibility returns policy deadline, missing IDs, NORMAL, active request, exhausted quantity and expired deadline', async () => {
+    const f=setup({eligibilityItems:[
+        {orderItemId:'item-1',buyerId:'buyer',cohort:'POD',itemStatus:'DELIVERED',orderedQuantity:2,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0},
+        {orderItemId:null,buyerId:'buyer',cohort:'POD',itemStatus:'DELIVERED',orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0},
+        {orderItemId:'normal-1',buyerId:'buyer',cohort:'NORMAL',itemStatus:'DELIVERED',orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0},
+        {orderItemId:'active-1',buyerId:'buyer',cohort:'POD',itemStatus:'DELIVERED',orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:1},
+        {orderItemId:'expired-1',buyerId:'buyer',cohort:'POD',itemStatus:'DELIVERED',orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0},
+    ],deliveredAt:new Date('2026-04-20T00:00:00Z')});
+    await f.repository.create({id:'active-request',order_id:'order-1',order_item_id:'active-1',buyer_id:'buyer',seller_id:'seller',printer_id:'printer',item_snapshot:{},quantity:1,reason_code:'R02',reason_description:'x',requested_resolution:'REFUND',final_resolution:null,fault_party:null,fault_source:null,status:'PENDING_PRINTER',version:0,deadline_at:null,deadline_type:null,policy_version:'v1',schema_version:'v3',delivered_event_id:null,delivered_at:null,refund_admin_confirmed:false,refund_admin_confirmed_by:null,refund_admin_confirmed_at:null,correction_used:false,printer_evidence_request_used:false,buyer_dispute_count:0,seller_appeal_used:false,side_effect_started:false,exchange_quota_consumed:false,created_at:now,updated_at:now});
+    const response=await request(f.server,'GET','/returns/v3/eligibility?orderId=order-1','buyer','buyer'); assert.equal(response.status,200);
+    const rows=response.body.data.items; assert.equal(rows[0].eligible,true); assert.equal(rows[0].deadline,'2026-05-04T00:00:00.000Z');
+    assert.equal(rows[1].reasonIfNot.code,'MISSING_ORDER_ITEM_ID'); assert.equal(rows[2].reasonIfNot.code,'NORMAL_UNSUPPORTED');
+    assert.equal(rows[3].activeRequestId,'active-request'); assert.equal(rows[3].reasonIfNot.code,'ACTIVE_REQUEST'); assert.equal(rows[4].reasonIfNot.code,'EXPIRED');
+});
+
+test('Buyer eligibility rejects another owner with 403', async () => {
+    const f=setup({eligibilityItems:[{orderItemId:'item-1',buyerId:'someone-else',cohort:'POD',itemStatus:'DELIVERED',orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0}]});
+    assert.equal((await request(f.server,'GET','/returns/v3/eligibility?orderId=order-1','buyer','intruder')).status,403);
+});
+
 
 test('HTTP happy path: Buyer creates, assigned Printer approves Refund, Admin confirms and bridge is pending integration', async () => {
     const f=setup();
