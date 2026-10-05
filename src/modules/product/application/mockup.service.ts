@@ -31,33 +31,215 @@ export interface Placement {
 export interface PrintArea { key: string; x: number; y: number; width: number; height: number }
 
 async function loadImage(url: string): Promise<Buffer> {
+    if (!url || typeof url !== 'string' || !url.trim()) {
+        throw new Error('Đường dẫn ảnh phôi hoặc thiết kế không hợp lệ');
+    }
     if (url.startsWith('/uploads/')) {
         const abs = path.join(UPLOAD_ROOT, url.replace('/uploads/', ''));
-        return sharp(abs).toBuffer();
+        if (fs.existsSync(abs)) {
+            return sharp(abs).toBuffer();
+        }
+        const printerLocal = path.resolve(process.cwd(), '..', 'Printing-shop', 'Printing-shop', 'backend', url.replace(/^\//, ''));
+        if (fs.existsSync(printerLocal)) {
+            return sharp(printerLocal).toBuffer();
+        }
     }
     if (url.startsWith('/images/')) {
-        const localPath = path.join(process.cwd(), '..', 'FE', 'public', url);
+        const localPath = path.resolve(process.cwd(), '..', 'frontend', 'public', url.replace(/^\//, ''));
         if (fs.existsSync(localPath)) {
             return sharp(localPath).toBuffer();
         }
     }
     const frontendOrigin = config.frontendUrl || 'http://localhost:3000';
-    const full = url.startsWith('http') ? url : (url.startsWith('/') ? `${frontendOrigin}${url}` : `${config.printerApiUrl}${url}`);
+    const printerOrigin = config.printerApiUrl || 'http://localhost:8880';
+    const full = url.startsWith('http')
+        ? url
+        : (url.startsWith('/images/')
+            ? `${frontendOrigin}${url}`
+            : `${printerOrigin}${url}`);
     const res = await fetch(full);
-    if (!res.ok) throw new Error(`Không tải được ảnh phôi (${res.status})`);
+    if (!res.ok) throw new Error(`Không tải được ảnh (${res.status}): ${full}`);
     return Buffer.from(await res.arrayBuffer());
 }
 
+export const COLOR_MAP: Record<string, string> = {
+    'đen': '#18181b',
+    'black': '#18181b',
+    'đen huyền bí': '#18181b',
+    'đen mộc': '#27272a',
+    'trắng': '#ffffff',
+    'white': '#ffffff',
+    'trắng men mờ': '#ffffff',
+    'kem tự nhiên': '#fdfbf7',
+    'kem': '#fef3c7',
+    'be': '#f5f5dc',
+    'beige': '#f5f5dc',
+    'nâu': '#78350f',
+    'nâu gỗ': '#6b4226',
+    'nâu đất': '#5c3a21',
+    'gỗ sồi tự nhiên': '#d4a373',
+    'gỗ nâu óc chó': '#582f0e',
+    'xám': '#6b7280',
+    'xám melange': '#9ca3af',
+    'ghi': '#9ca3af',
+    'xám tiêu': '#9ca3af',
+    'xanh navy': '#1e3a8a',
+    'navy': '#1e3a8a',
+    'xanh than': '#172554',
+    'xanh rêu': '#14532d',
+    'xanh lá': '#15803d',
+    'xanh dương': '#2563eb',
+    'xanh cobalt': '#1d4ed8',
+    'đỏ': '#dc2626',
+    'đỏ đô': '#991b1b',
+    'đỏ tươi': '#ef4444',
+    'vàng': '#ca8a04',
+    'vàng mù tạt': '#a16207',
+    'hồng': '#db2777',
+    'hồng phấn': '#f472b6',
+    'cam': '#ea580c',
+    'tím': '#7e22ce'
+};
+
+export function resolveColorHex(colorName?: string, hex?: string): string | undefined {
+    if (hex && typeof hex === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(hex.trim())) {
+        return hex.trim();
+    }
+    if (!colorName || typeof colorName !== 'string') return undefined;
+    const lower = colorName.trim().toLowerCase();
+    return COLOR_MAP[lower] || undefined;
+}
+
+export function isLightOrWhite(colorHex: string): boolean {
+    const hex = colorHex.replace('#', '').trim().toLowerCase();
+    if (hex === 'fff' || hex === 'ffffff') return true;
+    if (hex.length === 6) {
+        const r = parseInt(hex.slice(0, 2), 16);
+        const g = parseInt(hex.slice(2, 4), 16);
+        const b = parseInt(hex.slice(4, 6), 16);
+        if (r > 242 && g > 242 && b > 242) return true;
+    }
+    return false;
+}
+
+export function hexToRgb(hex: string): { r: number; g: number; b: number } {
+    const clean = hex.replace('#', '').trim();
+    if (clean.length === 3) {
+        return {
+            r: parseInt(clean[0] + clean[0], 16),
+            g: parseInt(clean[1] + clean[1], 16),
+            b: parseInt(clean[2] + clean[2], 16)
+        };
+    }
+    return {
+        r: parseInt(clean.slice(0, 2), 16),
+        g: parseInt(clean.slice(2, 4), 16),
+        b: parseInt(clean.slice(4, 6), 16)
+    };
+}
+
+/**
+ * Áp màu chỉ lên phần sản phẩm, GIỮ NGUYÊN background:
+ *
+ * Thuật toán:
+ *  1. Lấy mẫu màu background từ 8 điểm góc/cạnh ảnh
+ *  2. Với mỗi pixel:
+ *     - Nếu gần màu background (distance < threshold) → giữ nguyên
+ *     - Nếu là pixel sản phẩm → áp Multiply blend (base × color / 255)
+ *
+ * Kết quả: áo trắng × màu = màu đó; bóng/nếp gấp × màu = tối tự nhiên;
+ *           background không thay đổi.
+ */
+export async function applyBlankColor(blankSharp: any, colorHex?: string): Promise<any> {
+    if (!colorHex || typeof colorHex !== 'string') return blankSharp;
+    const cleanHex = colorHex.trim();
+    if (isLightOrWhite(cleanHex)) return blankSharp; // Trắng/kem: giữ nguyên
+    try {
+        const sourceBuf: Buffer = await blankSharp.png().toBuffer();
+        const meta = await sharp(sourceBuf).metadata();
+        const W = meta.width || 800;
+        const H = meta.height || 800;
+        const CH = 4; // RGBA channels
+
+        const { r: tR, g: tG, b: tB } = hexToRgb(cleanHex);
+
+        // Lấy raw pixels RGBA
+        const rawBuf = await sharp(sourceBuf).ensureAlpha().raw().toBuffer();
+
+        // --- Phát hiện màu background từ 8 điểm cạnh/góc ---
+        const sampleAt = (x: number, y: number): [number, number, number] => {
+            const idx = (y * W + x) * CH;
+            return [rawBuf[idx], rawBuf[idx + 1], rawBuf[idx + 2]];
+        };
+        const edgeSamples = [
+            sampleAt(0, 0), sampleAt(W - 1, 0),
+            sampleAt(0, H - 1), sampleAt(W - 1, H - 1),
+            sampleAt(Math.floor(W / 2), 0),
+            sampleAt(Math.floor(W / 2), H - 1),
+            sampleAt(0, Math.floor(H / 2)),
+            sampleAt(W - 1, Math.floor(H / 2)),
+        ];
+        const bgR = Math.round(edgeSamples.reduce((s, c) => s + c[0], 0) / edgeSamples.length);
+        const bgG = Math.round(edgeSamples.reduce((s, c) => s + c[1], 0) / edgeSamples.length);
+        const bgB = Math.round(edgeSamples.reduce((s, c) => s + c[2], 0) / edgeSamples.length);
+
+        // Ngưỡng khoảng cách màu để nhận diện background
+        // 45 = chấp nhận sai lệch nhỏ do JPEG compression, anti-aliasing
+        const BG_THRESHOLD = 45;
+
+        // --- Xử lý từng pixel ---
+        const resultBuf = Buffer.alloc(W * H * CH);
+        for (let i = 0; i < W * H; i++) {
+            const idx = i * CH;
+            const pR = rawBuf[idx];
+            const pG = rawBuf[idx + 1];
+            const pB = rawBuf[idx + 2];
+            const pA = rawBuf[idx + 3];
+
+            // Khoảng cách Euclidean từ màu background
+            const distBg = Math.sqrt(
+                (pR - bgR) ** 2 +
+                (pG - bgG) ** 2 +
+                (pB - bgB) ** 2
+            );
+
+            if (distBg < BG_THRESHOLD) {
+                // Pixel background → giữ nguyên
+                resultBuf[idx]     = pR;
+                resultBuf[idx + 1] = pG;
+                resultBuf[idx + 2] = pB;
+            } else {
+                // Pixel sản phẩm → Multiply blend để đổi màu
+                // Trắng (255) × màu target = màu target ✓
+                // Xám (bóng/gấp) × màu target = tối tự nhiên ✓
+                resultBuf[idx]     = Math.round((pR * tR) / 255);
+                resultBuf[idx + 1] = Math.round((pG * tG) / 255);
+                resultBuf[idx + 2] = Math.round((pB * tB) / 255);
+            }
+            resultBuf[idx + 3] = pA; // Alpha không đổi
+        }
+
+        const coloredBuf = await sharp(resultBuf, { raw: { width: W, height: H, channels: CH } })
+            .png()
+            .toBuffer();
+
+        return sharp(coloredBuf);
+    } catch {
+        return blankSharp; // Fallback về ảnh gốc nếu lỗi
+    }
+}
 
 export async function generateMockup(
     blankImageUrl: string,
     designUrl: string,
     area: PrintArea | null,
-    placement: Placement = { x: 0, y: 0 }
+    placement: Placement = { x: 0, y: 0 },
+    colorHex?: string
 ): Promise<string> {
     const [blankBuf, designBuf] = await Promise.all([loadImage(blankImageUrl), loadImage(designUrl)]);
 
-    const blank = sharp(blankBuf).resize(800, 800, { fit: 'fill' });
+    let blank = sharp(blankBuf).resize(800, 800, { fit: 'fill' });
+    blank = await applyBlankColor(blank, colorHex);
     const canvasW = 800;
     const canvasH = 800;
 
@@ -147,10 +329,11 @@ async function layerToPng(layer: Layer): Promise<{ buf: Buffer; w: number; h: nu
     return null;
 }
 
-export async function generateMockupLayers(blankImageUrl: string, layers: Layer[]): Promise<string> {
+export async function generateMockupLayers(blankImageUrl: string, layers: Layer[], colorHex?: string): Promise<string> {
     const blankBuf = await loadImage(blankImageUrl);
     const canvasW = 800, canvasH = 800;
-    const blank = sharp(blankBuf).resize(canvasW, canvasH, { fit: 'fill' });
+    let blank = sharp(blankBuf).resize(canvasW, canvasH, { fit: 'fill' });
+    blank = await applyBlankColor(blank, colorHex);
 
     const ops: { input: Buffer; left: number; top: number }[] = [];
     for (const layer of layers) {
@@ -231,10 +414,11 @@ async function cylinderWarp(flat: Buffer, boxW: number, boxH: number, arc: numbe
         .composite(strips).png().toBuffer();
 }
 
-export async function generateWrapMockup(blankImageUrl: string, layers: Layer[], area: WrapArea): Promise<string> {
+export async function generateWrapMockup(blankImageUrl: string, layers: Layer[], area: WrapArea, colorHex?: string): Promise<string> {
     const blankBuf = await loadImage(blankImageUrl);
     const canvasW = 800, canvasH = 800;
-    const blank = sharp(blankBuf).resize(canvasW, canvasH, { fit: 'fill' });
+    let blank = sharp(blankBuf).resize(canvasW, canvasH, { fit: 'fill' });
+    blank = await applyBlankColor(blank, colorHex);
 
     // Kích thước và toạ độ vùng in trên ảnh mockup ly (canvas 800x800)
     let boxW = Math.round(area.width || 440);

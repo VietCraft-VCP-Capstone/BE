@@ -2,24 +2,13 @@ import { Router, Response } from 'express';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { AiGatewayService, AnalyticsViewer } from '../application/ai-gateway.service';
 
-/**
- * /api/seller/analytics/* — 16 tính năng Product Analytics (F26–F41) cho người bán.
- *
- * Đây KHÔNG phải proxy mở: chỉ những đường trong bảng ROUTES mới đi qua, và chỉ các
- * tham số query được liệt kê mới được chuyển tiếp. Mọi thứ khác bị bỏ, để FE không thể
- * gọi tới endpoint nội bộ nào khác của service AI qua cổng này.
- */
-
 type Method = 'get' | 'post' | 'delete';
 
 interface GatewayRoute {
     method: Method;
-    /** Đường dẫn phía BE (sau /api/seller/analytics). */
     path: string;
-    /** Đường dẫn phía service AI. Nhận params đã kiểm để thay {id}. */
     ai: (params: Record<string, string>) => string;
     query?: string[];
-    /** Chuyển tiếp body { shop_id } (chỉ F36). */
     forwardShopIdBody?: boolean;
 }
 

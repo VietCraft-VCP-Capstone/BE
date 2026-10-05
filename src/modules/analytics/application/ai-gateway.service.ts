@@ -3,20 +3,9 @@ import { config } from '../../../app/config';
 import { logger } from '../../../shared/utils/logger';
 import { Shop } from '../../product/infrastructure/models/shop.model';
 
-/**
- * Cổng gọi service AI (FastAPI, repo vc-ai/AI-Analysic) thay cho người bán.
- *
- * FE không bao giờ gọi thẳng service AI. BE đã xác thực JWT + vai trò seller, tự tra
- * shop của người đó, rồi gửi sang AI kèm hai header:
- *   X-Gateway-Secret  bí mật dùng chung, trùng AI_GATEWAY_SECRET bên AI
- *   X-Shop-Id         shop mà BE đã xác thực, AI không nhận shop từ query
- */
-
-/** Ai đang xem và đang xem số liệu của shop nào. FE dùng để hiện nhãn "shop mẫu". */
 export interface AnalyticsViewer {
     live_shop_id: string | null;
     shop_name: string | null;
-    /** Shop mà service AI thực sự phân tích. Khác live_shop_id khi đang ở chế độ demo. */
     analysed_shop_id: string | null;
     demo: boolean;
 }
@@ -33,15 +22,6 @@ export class AiGatewayService {
         return typeof value === 'string' && SHOP_ID_PATTERN.test(value);
     }
 
-    /**
-     * Người bán này xem số liệu của shop nào.
-     *
-     * Thứ tự ưu tiên:
-     *   1. AI_SHOP_MAP  ánh xạ riêng cho email này sang một shop mẫu
-     *   2. AI_DEMO_SHOP_ID  chế độ shop mẫu cho TẤT CẢ người bán
-     *   3. shop thật của người bán  (mặc định)
-     * Riêng trước chung, để một account demo không buộc cả nhóm phải xem dữ liệu mồi.
-     */
     static async resolveViewer(user: { id: string; email?: string }): Promise<AnalyticsViewer> {
         let shop: { _id: unknown; shop_name?: string } | null = null;
         if (mongoose.Types.ObjectId.isValid(user.id)) {
@@ -61,10 +41,6 @@ export class AiGatewayService {
         };
     }
 
-    /**
-     * Gọi một endpoint của service AI. Không ném lỗi: mọi kết cục đều thành {status, body}
-     * để router chuyển nguyên mã lỗi hợp đồng (400/403/404/503) về FE.
-     */
     static async call(options: {
         method: 'GET' | 'POST' | 'DELETE';
         path: string;

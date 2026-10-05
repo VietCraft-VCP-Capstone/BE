@@ -86,6 +86,8 @@ export class PrintingShopApiService {
         const payload = {
             vietcraft_order_id: order._id ? order._id.toString() : order.id,
             order_code: order.order_code,
+            printer_id: shop?.printer_partner?.printer_id,
+            printer_name: shop?.printer_partner?.printer_name,
             shop_id: order.shop_id ? order.shop_id.toString() : undefined,
             shop_name: shop?.shop_name || 'VietCraft Shop',
             seller_id: shop?.owner_id ? shop.owner_id.toString() : undefined,

@@ -17,6 +17,8 @@ export interface Blank {
     variations: BlankVariation[];
     print_areas?: { key: string; label?: string; image?: string; x: number; y: number; width: number; height: number; surface?: 'flat' | 'wrap'; template_w?: number; template_h?: number; arc?: number }[];
     is_active?: boolean;
+    printer_id?: string;
+    printer_name?: string;
 }
 
 export const DEFAULT_BLANKS: Blank[] = [
@@ -142,50 +144,167 @@ export const DEFAULT_BLANKS: Blank[] = [
     }
 ];
 
+import mongoose from 'mongoose';
+import { Shop } from '../infrastructure/models/shop.model';
+
 let cache: { at: number; data: Blank[] } | null = null;
 const TTL_MS = 1_000;
 
-async function fetchBlanks(): Promise<Blank[]> {
-    const res = await fetch(`${config.printerApiUrl}/api/blanks`, {
+async function fetchBlanksFromUrl(apiUrl: string, apiKey?: string, printerId?: string, printerName?: string): Promise<Blank[]> {
+    const res = await fetch(`${apiUrl}/api/blanks`, {
         signal: AbortSignal.timeout(5000),
         headers: {
             'Accept': 'application/json',
-            ...(config.printerApiKey ? { 'X-API-Key': config.printerApiKey } : {}),
+            ...(apiKey ? { 'X-API-Key': apiKey } : {}),
         },
     });
     if (!res.ok) throw new Error(`Printer trả về ${res.status}`);
-    return res.json() as Promise<Blank[]>;
+    const data = await res.json() as Blank[];
+    return (data || []).map(b => {
+        let printAreas = b.print_areas || [];
+        if (!printAreas || printAreas.length === 0) {
+            printAreas = [{
+                key: 'front',
+                label: 'Mặt trước',
+                image: b.default_image,
+                x: 275,
+                y: 220,
+                width: 250,
+                height: 330,
+                surface: 'flat'
+            }];
+        }
+        return {
+            ...b,
+            print_areas: printAreas,
+            printer_id: printerId || (b as any).printer_id || 'vietcraft-direct',
+            printer_name: printerName || (b as any).printer_name || 'Xưởng in đối tác'
+        };
+    });
 }
 
 export class BlankClient {
-    static async listBlanks(): Promise<Blank[]> {
+    static async listBlanks(sellerId?: string): Promise<Blank[]> {
+        if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+            const shop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(sellerId) }).lean();
+            // Lấy danh sách tất cả các xưởng in đang liên kết của Seller
+            const activePrinters = (shop?.printer_partners && shop.printer_partners.length > 0)
+                ? shop.printer_partners.filter(p => p.is_connected && p.api_url)
+                : (shop?.printer_partner?.is_connected && shop?.printer_partner?.api_url ? [shop.printer_partner] : []);
+
+            if (activePrinters.length === 0) {
+                // Nếu chưa liên kết xưởng in nào hoặc không có xưởng online, lấy danh sách phôi mặc định/hệ thống
+                return BlankClient.listSystemBlanks();
+            }
+
+            const allBlanks: Blank[] = [];
+            const seenKeys = new Set<string>();
+
+            for (const printer of activePrinters) {
+                try {
+                    const blanks = await fetchBlanksFromUrl(
+                        printer.api_url,
+                        printer.api_key,
+                        printer.printer_id,
+                        printer.printer_name
+                    );
+                    for (const b of blanks) {
+                        const uniqueKey = `${b._id}_${b.printer_id}`;
+                        if (!seenKeys.has(uniqueKey)) {
+                            seenKeys.add(uniqueKey);
+                            allBlanks.push(b);
+                        }
+                    }
+                } catch (err: any) {
+                    // Tiếp tục với xưởng khác nếu một xưởng offline
+                }
+            }
+            if (allBlanks.length > 0) return allBlanks;
+            return BlankClient.listSystemBlanks();
+        }
+
+        return BlankClient.listSystemBlanks();
+    }
+
+    private static async listSystemBlanks(): Promise<Blank[]> {
         if (cache && Date.now() - cache.at < TTL_MS) return cache.data;
         try {
-            const data = await fetchBlanks();
-            if (!Array.isArray(data) || data.length === 0) {
-                // Nếu xưởng in trả về danh sách rỗng -> tự động fallback về bộ phôi dự phòng
-                cache = { at: Date.now(), data: DEFAULT_BLANKS };
-                return DEFAULT_BLANKS;
+            const data = await fetchBlanksFromUrl(config.printerApiUrl || 'http://localhost:8880', config.printerApiKey);
+            if (data && data.length > 0) {
+                cache = { at: Date.now(), data };
+                return data;
             }
-            cache = { at: Date.now(), data };
-            return data;
+            return DEFAULT_BLANKS;
         } catch {
-            // Khi không fetch được phôi của xưởng (lỗi mạng, timeout hoặc xưởng in chưa bật) -> trả về phôi dự phòng
-            cache = { at: Date.now(), data: DEFAULT_BLANKS };
             return DEFAULT_BLANKS;
         }
     }
 
-    static async getBlank(id: string): Promise<Blank | undefined> {
-        const blanks = await BlankClient.listBlanks();
-        const found = blanks.find(b => b._id === id);
-        if (found) return found;
-        // Dự phòng: nếu không tìm thấy trong danh sách phôi từ xưởng thì tìm trong phôi dự phòng
-        return DEFAULT_BLANKS.find(b => b._id === id);
+    static async getBlank(id: string, sellerId?: string): Promise<Blank | undefined> {
+        // 1. Thử tìm trong danh sách phôi của seller (nếu có sellerId)
+        if (sellerId) {
+            try {
+                const blanks = await BlankClient.listBlanks(sellerId);
+                const found = blanks.find(b => b._id === id || String(b._id) === String(id));
+                if (found) return found;
+            } catch {
+                // Tiếp tục fallback
+            }
+        }
+
+        // 2. Thử tìm trong danh sách phôi hệ thống / cache
+        try {
+            const sysBlanks = await BlankClient.listBlanks();
+            const foundSys = sysBlanks.find(b => b._id === id || String(b._id) === String(id));
+            if (foundSys) return foundSys;
+        } catch {
+            // Tiếp tục fallback
+        }
+
+        // 3. Thử gọi trực tiếp endpoint GET /api/blanks/:id từ Printing Shop
+        try {
+            const apiUrl = config.printerApiUrl || 'http://localhost:8880';
+            const res = await fetch(`${apiUrl}/api/blanks/${id}`, {
+                signal: AbortSignal.timeout(5000),
+                headers: {
+                    'Accept': 'application/json',
+                    ...(config.printerApiKey ? { 'X-API-Key': config.printerApiKey } : {})
+                }
+            });
+            if (res.ok) {
+                const b = await res.json() as Blank;
+                if (b && b._id) {
+                    let printAreas = b.print_areas || [];
+                    if (!printAreas || printAreas.length === 0) {
+                        printAreas = [{
+                            key: 'front',
+                            label: 'Mặt trước',
+                            image: b.default_image,
+                            x: 275,
+                            y: 220,
+                            width: 250,
+                            height: 330,
+                            surface: 'flat'
+                        }];
+                    }
+                    return {
+                        ...b,
+                        print_areas: printAreas,
+                        printer_id: b.printer_id || 'vietcraft-direct',
+                        printer_name: b.printer_name || 'Xưởng in đối tác'
+                    };
+                }
+            }
+        } catch {
+            // Tiếp tục fallback
+        }
+
+        // 4. Dự phòng: nếu không tìm thấy trong danh sách phôi từ xưởng thì tìm trong phôi dự phòng mặc định sàn
+        return DEFAULT_BLANKS.find(b => b._id === id || String(b._id) === String(id));
     }
 
-    static async findVariation(blankId: string, sku: string): Promise<BlankVariation | undefined> {
-        const blank = await BlankClient.getBlank(blankId);
+    static async findVariation(blankId: string, sku: string, sellerId?: string): Promise<BlankVariation | undefined> {
+        const blank = await BlankClient.getBlank(blankId, sellerId);
         return blank?.variations.find(v => v.sku === sku);
     }
 }
