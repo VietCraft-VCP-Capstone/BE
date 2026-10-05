@@ -13,9 +13,10 @@ function fixture() {
     const clock = { now: () => new Date(time) };
     const repository = new InMemoryReturnRequestV3Repository();
     const bridge: ReturnRequestRefundBridge = { async createLinkedRefund(input) { bridgeCalls.push(input); return { id: 'linked-1', status: 'PENDING_INTEGRATION' }; } };
-    const service = new ReturnRequestApplicationService({ repository, snapshotSource, deliveredEventSource: deliveredSource, bridge, clock, id: () => `id-${++sequence}` });
+    const resolveBuyerOrderId = async (orderId:unknown,buyerId:string) => { if(orderId!=='o1') throw new Error('Unexpected test order'); if(buyerId!=='b1') throw Object.assign(new Error('Not found'),{statusCode:404}); return 'o1'; };
+    const service = new ReturnRequestApplicationService({ repository, snapshotSource, deliveredEventSource: deliveredSource, resolveBuyerOrderId, bridge, clock, id: () => `id-${++sequence}` });
     const evidence = [{ id: 'e1', kind: 'IMAGE' as const, uri: 'blob://e1' }];
-    return { service, repository, bridgeCalls, evidence, setTime(value: Date) { time = value.getTime(); } };
+    return { service, repository, bridgeCalls, evidence, resolveBuyerOrderId, setTime(value: Date) { time = value.getTime(); } };
 }
 
 async function create(f: ReturnType<typeof fixture>, resolution: 'REFUND'|'EXCHANGE' = 'REFUND', reasonCode = 'R02') {
@@ -37,7 +38,7 @@ test('a Return v3 request created from a simulated order remains marked simulate
     } as unknown as OrderReturnSnapshotSource;
     const service = new ReturnRequestApplicationService({
         repository: f.repository, snapshotSource: simulatedSnapshotSource, deliveredEventSource: deliveredSource,
-        bridge: f.service['deps'].bridge, clock: { now: () => now }, id: () => 'sim-return-1',
+        resolveBuyerOrderId: f.resolveBuyerOrderId, bridge: f.service['deps'].bridge, clock: { now: () => now }, id: () => 'sim-return-1',
     });
     const request = await service.createBuyerRequest({ actorId: 'b1', orderId: 'o1', orderItemId: 'i1', quantity: 1, reasonCode: 'R02', description: 'simulated item', resolution: 'REFUND', evidence: f.evidence });
     assert.equal(request.is_simulated, true);
@@ -58,12 +59,12 @@ test('reason mapping assigns documented defaults but holds R01a/R07 for Admin wi
 test('R06 delivered uses its own 168-hour deadline and verified tracking fault source; missing source routes Admin', async () => {
     const f = fixture();
     const tracking = { status: 'DELIVERED' as const, eventId: 'tracking-delivered-1', eventOccurredAt: delivered.occurredAt, sourceAssigned: true, verified: true, latestEta: null, faultParty: 'CARRIER' as const };
-    const service = new ReturnRequestApplicationService({ repository: f.repository, snapshotSource, deliveredEventSource: { ...deliveredSource, async getVerifiedTracking() { return tracking; } }, bridge: { async createLinkedRefund() { return { id:'linked', status:'PENDING_INTEGRATION' as const }; } }, clock: { now:()=>now }, id:()=> 'r06' });
+    const service = new ReturnRequestApplicationService({ repository: f.repository, snapshotSource, resolveBuyerOrderId:f.resolveBuyerOrderId, deliveredEventSource: { ...deliveredSource, async getVerifiedTracking() { return tracking; } }, bridge: { async createLinkedRefund() { return { id:'linked', status:'PENDING_INTEGRATION' as const }; } }, clock: { now:()=>now }, id:()=> 'r06' });
     const request = await service.createBuyerRequest({ actorId:'b1',orderId:'o1',orderItemId:'i1',quantity:1,reasonCode:'R06',description:'not received',resolution:'REFUND',evidence:f.evidence });
     assert.equal(request.status,'PENDING_PRINTER'); assert.equal(request.deadline_type,'R06_DELIVERED'); assert.equal(request.deadline_at?.toISOString(),'2026-05-08T00:00:00.000Z'); assert.equal(request.fault_party,'CARRIER');
     const missing = fixture(); const review = await create(missing,'REFUND','R06'); assert.equal(review.status,'DISPUTED'); assert.equal(review.fault_party,null);
     const shipping = fixture(); const eligibleTracking = { status:'IN_TRANSIT' as const,eventId:'eta-check',eventOccurredAt:new Date('2026-04-20T00:00:00Z'),sourceAssigned:true,verified:true,latestEta:new Date('2026-04-20T00:00:00Z'),faultParty:'PRINTER' as const };
-    const shippingService = new ReturnRequestApplicationService({ repository:shipping.repository, snapshotSource:{async getSnapshot(){return {...(await snapshotSource.getSnapshot('o1','i1'))!,itemStatus:'SHIPPING' as const};}}, deliveredEventSource:{...deliveredSource,async getVerifiedTracking(){return eligibleTracking;}}, bridge:{async createLinkedRefund(){return {id:'linked',status:'PENDING_INTEGRATION' as const};}}, clock:{now:()=>now}, id:()=> 'r06-shipping' });
+    const shippingService = new ReturnRequestApplicationService({ repository:shipping.repository, snapshotSource:{async getSnapshot(){return {...(await snapshotSource.getSnapshot('o1','i1'))!,itemStatus:'SHIPPING' as const};}}, resolveBuyerOrderId:shipping.resolveBuyerOrderId, deliveredEventSource:{...deliveredSource,async getVerifiedTracking(){return eligibleTracking;}}, bridge:{async createLinkedRefund(){return {id:'linked',status:'PENDING_INTEGRATION' as const};}}, clock:{now:()=>now}, id:()=> 'r06-shipping' });
     const shippingRequest=await shippingService.createBuyerRequest({actorId:'b1',orderId:'o1',orderItemId:'i1',quantity:1,reasonCode:'R06',description:'not received',resolution:'REFUND',evidence:shipping.evidence});
     assert.equal(shippingRequest.deadline_type,'P07'); assert.equal(shippingRequest.deadline_at,null); assert.equal(shippingRequest.fault_party,'PRINTER');
 });

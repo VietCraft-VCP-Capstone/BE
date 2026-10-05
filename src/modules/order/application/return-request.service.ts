@@ -22,6 +22,7 @@ export interface ReturnEligibilityItem {
 export interface ReturnRequestServiceDependencies {
     repository: ReturnRequestV3Repository; snapshotSource: OrderReturnSnapshotSource; deliveredEventSource: DeliveredEventSourceV3;
     eligibilityItemSource?: ReturnEligibilityItemSource;
+    resolveBuyerOrderId: (orderId: unknown, buyerId: string) => Promise<string>;
     bridge: ReturnRequestRefundBridge; clock: ReturnRequestClock; id: () => string; r06DeliveredWindowHours?: number;
 }
 export type PrinterDecisionAction = 'APPROVE'|'REJECT'|'REQUEST_EVIDENCE'|'PROPOSE_FAULT_CHANGE';
@@ -53,8 +54,10 @@ export class ReturnRequestApplicationService {
         return this.deps.repository.transitionWithAudit(request.id, request.version, { linked_refund_id:linked.id, linked_refund_status:linked.status, updated_at:this.now() }, { request_id:request.id, actor_id:'SYSTEM', actor_role:'SYSTEM', from_status:request.status, to_status:request.status, reason:'Persisted idempotent linked Refund bridge reference.', event_id:linked.id, created_at:this.now() });
     }
     async createBuyerRequest(input: { actorId:string; orderId:string; orderItemId:string; quantity:number; reasonCode:string; description:string; resolution:ReturnV3Resolution; evidence:readonly ReturnEvidenceItem[] }): Promise<ReturnRequestV3Data> {
-        const snapshot = await this.deps.snapshotSource.getSnapshot(input.orderId, input.orderItemId);
-        if (!snapshot || snapshot.cohort !== 'POD' || snapshot.orderId !== input.orderId || snapshot.orderItemId !== input.orderItemId || snapshot.buyerId !== input.actorId) throw new Error('Buyer ownership, order/item snapshot or POD cohort validation failed.');
+        const orderId = await this.deps.resolveBuyerOrderId(input.orderId, input.actorId);
+        const snapshot = await this.deps.snapshotSource.getSnapshot(orderId, input.orderItemId);
+        if (!snapshot || snapshot.orderId !== orderId || snapshot.orderItemId !== input.orderItemId || snapshot.buyerId !== input.actorId) throw Object.assign(new Error('Không tìm thấy đơn hàng.'),{statusCode:404});
+        if (snapshot.cohort !== 'POD') throw new Error('POD cohort validation failed.');
         const normalizedInputReason=input.reasonCode.trim().toUpperCase();
         if(snapshot.itemStatus!=='DELIVERED' && normalizedInputReason!=='R06') throw new Error('Only Delivered items may create requests, except eligible R06 tracking cases.');
         if(normalizedInputReason==='R06' && snapshot.itemStatus!=='DELIVERED' && snapshot.itemStatus!=='SHIPPING') throw new Error('R06 not-received requests require Delivered or Shipping item status.');
@@ -64,10 +67,10 @@ export class ReturnRequestApplicationService {
         if (quantity.kind !== 'VALID') throw new Error('Requested quantity exceeds remaining item quantity.');
         const now = this.now();
         let delivered: VerifiedDeliveredEvent | null = null;
-        try { delivered = await this.deps.deliveredEventSource.getVerifiedDeliveredEvent(input.orderId, input.orderItemId); } catch { /* Missing source evidence is routed to Admin review below. */ }
+        try { delivered = await this.deps.deliveredEventSource.getVerifiedDeliveredEvent(orderId, input.orderItemId); } catch { /* Missing source evidence is routed to Admin review below. */ }
         if(snapshot.itemStatus==='SHIPPING') delivered=null;
         let r06Tracking:(R06TrackingEvidence & {faultParty?:'CARRIER'|'PRINTER'})|null=null;
-        if(evidenceCheck.normalizedReason==='R06') { try { r06Tracking=await this.deps.deliveredEventSource.getVerifiedTracking?.(input.orderId,input.orderItemId) ?? null; } catch { r06Tracking=null; } }
+        if(evidenceCheck.normalizedReason==='R06') { try { r06Tracking=await this.deps.deliveredEventSource.getVerifiedTracking?.(orderId,input.orderItemId) ?? null; } catch { r06Tracking=null; } }
         const eligibility = evaluatePodEligibility({ reasonCode:evidenceCheck.normalizedReason, now, deliveredEvent:delivered, r06Tracking:r06Tracking ?? undefined, r06DeliveredWindowHours:this.deps.r06DeliveredWindowHours });
         const conflict = !snapshot.valid;
         const standardDeadline = evidenceCheck.normalizedReason !== 'R06' && delivered?.verified === true && delivered.eventId.trim() ? calculateFixedDeadline('P01',delivered.occurredAt) : null;
@@ -85,7 +88,7 @@ export class ReturnRequestApplicationService {
         const deadline = eligibility.kind === 'ELIGIBLE' ? eligibility.deadline : evidenceCheck.normalizedReason === 'R06' || !deliveredEvidenceValid ? null : calculateFixedDeadline('P01',delivered!.occurredAt);
         const deadlineType = eligibility.kind === 'ELIGIBLE' ? eligibility.policyId : evidenceCheck.normalizedReason === 'R06' || !deliveredEvidenceValid ? null : 'P01';
         const request: ReturnRequestV3Data = {
-            id, order_id:input.orderId, order_item_id:input.orderItemId, buyer_id:snapshot.buyerId, seller_id:snapshot.sellerId, printer_id:snapshot.printerId, item_snapshot:structuredClone(snapshot.itemSnapshot),
+            id, order_id:orderId, order_item_id:input.orderItemId, buyer_id:snapshot.buyerId, seller_id:snapshot.sellerId, printer_id:snapshot.printerId, item_snapshot:structuredClone(snapshot.itemSnapshot),
             quantity:input.quantity, reason_code:evidenceCheck.normalizedReason, reason_description:evidenceCheck.normalizedDescription,
             requested_resolution:input.resolution, final_resolution:null, fault_party:defaultFault, fault_source:defaultFault ? 'SYSTEM' : null, status, version:0,
             deadline_at:deadline, deadline_type:deadlineType as ReturnV3DeadlineType, policy_version:snapshot.policyVersion, schema_version:snapshot.schemaVersion,
@@ -201,11 +204,13 @@ export class ReturnRequestApplicationService {
         const saved=await this.commit(current,input.actorId,'ADMIN',action,to,input.reason,{correction_used:true,final_resolution:input.resolution,fault_party:input.faultParty,fault_source:'ADMIN',admin_decision_id:decisionId,refund_admin_confirmed:input.resolution==='REFUND',refund_admin_confirmed_by:input.resolution==='REFUND'?input.actorId:null,refund_admin_confirmed_at:input.resolution==='REFUND'?this.now():null,refund_amount_minor:input.resolution==='REFUND'?input.amountMinor:null,refund_currency:input.resolution==='REFUND'?input.currency:null,seller_fault_notified_at:notifiedAt,seller_appeal_deadline_at:appealWindow?.kind==='OPEN'?appealWindow.deadline:null});
         if(input.resolution==='REFUND') return this.createBridge(saved); return saved;
     }
-    async evaluateBuyerEligibility(actorId:string, orderId:string):Promise<ReturnEligibilityItem[]> {
+    async evaluateBuyerEligibility(actorId:string, orderIdInput:unknown):Promise<ReturnEligibilityItem[]> {
+        const orderId=await this.deps.resolveBuyerOrderId(orderIdInput,actorId);
         if(!this.deps.eligibilityItemSource) throw new Error('Buyer eligibility source is not configured.');
         const rows=await this.deps.eligibilityItemSource.getItems(orderId);
         const [activeRequests, snapshots]=await Promise.all([this.deps.repository.listActiveByOrder(orderId),Promise.all(rows.map(row=>row.orderItemId ? this.deps.snapshotSource.getSnapshot(orderId,row.orderItemId) : Promise.resolve(null)))]);
-        if(!rows.length || rows.some(row=>row.buyerId!==actorId)) throw Object.assign(new Error('Buyer does not own this order.'),{statusCode:403});
+        if(!rows.length || rows.some(row=>row.buyerId!==actorId)) throw Object.assign(new Error('Không tìm thấy đơn hàng.'),{statusCode:404});
+        if(snapshots.some((snapshot,index)=>!!rows[index].orderItemId&&(!snapshot||snapshot.buyerId!==actorId||snapshot.orderId!==orderId))) throw Object.assign(new Error('Không tìm thấy đơn hàng.'),{statusCode:404});
         return Promise.all(rows.map(async(row,index)=>{
             const itemId=row.orderItemId || null; const snapshot=snapshots[index]; const active=itemId ? activeRequests.find(request=>request.order_item_id===itemId) : undefined;
             const remaining=Math.max(0,row.orderedQuantity-row.replacedQuantity-row.refundedQuantity-row.activeReservedQuantity);

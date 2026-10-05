@@ -4,7 +4,7 @@ import type { ReturnEligibilityItemSource } from './return-request.service';
 
 export const eligibilityItemSource: ReturnEligibilityItemSource = {
     async getItems(orderId) {
-        const order=await Order.findOne({$or:[{_id:orderId},{order_code:orderId}]}).lean(); if(!order) return [];
+        const order=await Order.findById(orderId).lean(); if(!order) return [];
         return Promise.all((order.items||[]).map(async(item:any)=>{
             const orderItemId=item.order_item_id ? String(item.order_item_id) : null;
             const activeReservedQuantity=orderItemId ? await ReturnRequestV3.aggregate([{ $match:{order_item_id:orderItemId,status:{$in:[...RETURN_REQUEST_V3_ACTIVE_STATUSES]}} },{ $group:{_id:null,total:{$sum:'$quantity'}} }]).then(rows=>Number(rows[0]?.total)||0) : 0;

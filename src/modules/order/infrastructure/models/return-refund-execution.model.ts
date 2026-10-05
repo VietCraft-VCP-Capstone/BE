@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export const RETURN_REFUND_EXECUTION_STATUS = 'PENDING_INTEGRATION' as const;
-export type ReturnRefundExecutionStatus = typeof RETURN_REFUND_EXECUTION_STATUS;
+export type ReturnRefundExecutionStatus = typeof RETURN_REFUND_EXECUTION_STATUS | 'REFUNDED' | 'COMPLETED';
 export type ReturnFaultParty = 'BUYER' | 'SELLER' | 'PRINTER' | 'CARRIER' | 'PLATFORM';
 
 export interface IReturnRefundExecution extends Document {
@@ -27,7 +27,7 @@ const ReturnRefundExecutionSchema = new Schema<IReturnRefundExecution>({
     amount_minor: { type: Number, required: true, min: 0 },
     currency: { type: String, required: true, trim: true, uppercase: true, minlength: 3, maxlength: 3 },
     admin_decision_id: { type: String, required: true, trim: true },
-    status: { type: String, enum: [RETURN_REFUND_EXECUTION_STATUS], required: true, default: RETURN_REFUND_EXECUTION_STATUS },
+    status: { type: String, enum: [RETURN_REFUND_EXECUTION_STATUS, 'REFUNDED', 'COMPLETED'], required: true, default: RETURN_REFUND_EXECUTION_STATUS },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }, versionKey: false });
 
 ReturnRefundExecutionSchema.index({ request_id: 1, order_item_id: 1 }, { unique: true, name: 'uniq_return_refund_request_item' });

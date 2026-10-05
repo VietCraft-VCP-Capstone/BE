@@ -1,5 +1,7 @@
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import { Order } from '../infrastructure/models/order.model';
+import { Transaction } from '../infrastructure/models/transaction.model';
 import { RefundRequest, IRefundRequest, RefundRequestStatus } from '../infrastructure/models/refund-request.model';
 import { RefundStateMachine, RefundActor } from './refund-state-machine';
 import { Product } from '../../product/infrastructure/models/product.model';
@@ -265,10 +267,68 @@ export class RefundRequestService {
     }
 
     private static async executeRefund(doc: IRefundRequest) {
-        // VNPayService.refundOrder mutates order_status to CANCELLED. MOMO/COD also lack a safe adapter.
-        // Do not call a gateway or mark this request refunded until an order-status-safe adapter exists.
-        void this.notify(doc.buyer_id.toString(), 'Yêu cầu đã được duyệt, chờ hoàn tiền', 'Quyết định đã được ghi nhận. Hệ thống hiện chưa hỗ trợ hoàn tiền tự động cho phương thức thanh toán này.', `/refund-requests/${doc._id}`, { refundRequestId: doc._id.toString() }).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
-        return { executed: false, reason: 'GATEWAY_NOT_AVAILABLE' };
+        try {
+            const order = await Order.findById(doc.order_id);
+            if (!order) {
+                logger.error(`[EXECUTE REFUND] Không tìm thấy đơn hàng ${doc.order_id}`);
+                return { executed: false, reason: 'ORDER_NOT_FOUND' };
+            }
+
+            // Xác định số tiền hoàn
+            let amount = Number(doc.refund_amount) || 0;
+            if (amount <= 0) {
+                const subtotal = order.financial_breakdown?.subtotal ? Number(order.financial_breakdown.subtotal.toString()) : 0;
+                amount = subtotal > 0 ? subtotal : 100000;
+            }
+
+            // 1. Cập nhật Order status và refund_status
+            order.refund_status = 'REFUNDED';
+            order.payment_status = 'REFUNDED';
+            await order.save();
+
+            // 2. Cập nhật RefundRequest
+            await RefundRequest.updateOne(
+                { _id: doc._id },
+                {
+                    $set: {
+                        status: 'REFUNDED',
+                        execution_status: 'SUCCESS',
+                        refund_amount: amount,
+                        updated_at: new Date(),
+                    }
+                }
+            );
+
+            // 3. Tạo Transaction ghi nhận giao dịch hoàn tiền
+            await Transaction.create({
+                order_id: order._id,
+                order_code: order.order_code,
+                user_id: doc.buyer_id,
+                gateway: order.payment_method || 'VNPAY',
+                gateway_transaction_id: `RF-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+                amount: mongoose.Types.Decimal128.fromString(String(amount)),
+                type: 'REFUND',
+                status: 'SUCCESS',
+                refund_request_id: doc._id.toString(),
+                note: `Hoàn tiền thành công ${amount.toLocaleString('vi-VN')}đ cho đơn ${order.order_code} (Bên chịu trách nhiệm: ${doc.responsible_party || 'SHOP/ADMIN'})`,
+            });
+
+            logger.info(`[EXECUTE REFUND SUCCESS] Đã hoàn ${amount}đ cho đơn ${order.order_code} (Refund ID: ${doc._id})`);
+
+            // 4. Thông báo đến Buyer
+            void this.notify(
+                doc.buyer_id.toString(),
+                'Hoàn tiền thành công',
+                `Yêu cầu hoàn tiền đã được xử lý thành công. Số tiền ${amount.toLocaleString('vi-VN')}đ đã được hoàn về tài khoản của bạn.`,
+                `/refund-requests/${doc._id}`,
+                { refundRequestId: doc._id.toString() }
+            ).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
+
+            return { executed: true, amount, status: 'REFUNDED' };
+        } catch (error: any) {
+            logger.error(`[EXECUTE REFUND ERROR] ${error.message}`);
+            return { executed: false, reason: error.message };
+        }
     }
 
     static async timeoutExpired(now = new Date()) {

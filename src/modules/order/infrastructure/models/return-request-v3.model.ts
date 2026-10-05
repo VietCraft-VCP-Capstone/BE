@@ -23,6 +23,7 @@ export interface IReturnRequestV3 extends Document {
     evidence_requested_at?: Date | null; evidence_deadline_at?: Date | null; buyer_evidence_submitted_at?: Date | null; seller_fault_notified_at?: Date | null; seller_appeal_deadline_at?: Date | null;
     r06_tracking_event_id?: string | null; r06_tracking_event_at?: Date | null; r06_tracking_status?: 'IN_TRANSIT' | 'LOST' | 'RETURNED' | 'UNKNOWN' | null; r06_tracking_latest_eta?: Date | null; r06_fault_source?: 'CARRIER' | 'PRINTER' | null;
     proposed_fault_party?: ReturnV3FaultParty | null; proposed_classification?: string | null; is_simulated?: boolean;
+    replacement_order_id?: string | null; replacement_order_code?: string | null;
     created_at: Date; updated_at: Date;
 }
 
@@ -35,12 +36,12 @@ const ReturnRequestV3Schema = new Schema<IReturnRequestV3>({
     printer_id: { type: String, required: true, trim: true, immutable: true }, quantity: { type: Number, required: true, min: 1, validate: Number.isInteger, immutable: true },
     reason_code: { type: String, required: true, trim: true, uppercase: true, immutable: true }, reason_description: { type: String, required: true, trim: true, immutable: true },
     requested_resolution: { type: String, enum: ['EXCHANGE', 'REFUND'], required: true, immutable: true },
-    final_resolution: { type: String, enum: ['EXCHANGE', 'REFUND'], default: null },
-    fault_party: { type: String, enum: ['BUYER', 'SELLER', 'PRINTER', 'CARRIER', 'PLATFORM'], default: null },
+    final_resolution: { type: String, enum: ['EXCHANGE', 'REFUND', null], default: null },
+    fault_party: { type: String, enum: ['BUYER', 'SELLER', 'PRINTER', 'CARRIER', 'PLATFORM', null], default: null },
     fault_source: { type: String, enum: ['SYSTEM', 'PRINTER_PROPOSED', 'ADMIN', null], default: null },
     status: { type: String, enum: [...RETURN_REQUEST_V3_ACTIVE_STATUSES, 'ADMIN_REJECTED', 'CONVERTED_TO_REFUND', 'REPLACEMENT_CREATED', 'COMPLETED', 'EXPIRED', 'CANCELLED'], required: true },
     version: { type: Number, required: true, min: 0, default: 0 }, deadline_at: { type: Date, default: null },
-    deadline_type: { type: String, enum: ['P01', 'P02', 'P03', 'P04', 'P05', 'P07', 'P09', 'P14', 'P16', 'P17', 'R06_DELIVERED'], default: null },
+    deadline_type: { type: String, enum: ['P01', 'P02', 'P03', 'P04', 'P05', 'P07', 'P09', 'P14', 'P16', 'P17', 'R06_DELIVERED', null], default: null },
     policy_version: { type: String, required: true, trim: true, immutable: true }, schema_version: { type: String, required: true, trim: true, immutable: true },
     delivered_event_id: { type: String, default: null, immutable: true }, delivered_at: { type: Date, default: null, immutable: true },
     refund_admin_confirmed: { type: Boolean, required: true, default: false }, refund_admin_confirmed_by: { type: String, default: null }, refund_admin_confirmed_at: { type: Date, default: null },
@@ -52,6 +53,7 @@ const ReturnRequestV3Schema = new Schema<IReturnRequestV3>({
  seller_fault_notified_at: { type: Date, default: null }, seller_appeal_deadline_at: { type: Date, default: null },
  proposed_fault_party: { type: String, enum: ['BUYER', 'SELLER', 'PRINTER', 'CARRIER', 'PLATFORM', null], default: null }, proposed_classification: { type: String, default: null },
  is_simulated: { type: Boolean, default: false, immutable: true },
+ replacement_order_id: { type: String, default: null }, replacement_order_code: { type: String, default: null },
  }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }, versionKey: false, strict: 'throw' });
 ReturnRequestV3Schema.index({ order_item_id: 1 }, { unique: true, name: 'uniq_active_return_request_v3_per_item', partialFilterExpression: { status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES] } } });
 
@@ -65,7 +67,7 @@ ReturnEvidenceV3Schema.index({ request_id: 1, evidence_id: 1 }, { unique: true, 
 
 const ReturnRequestLogV3Schema = new Schema({
     request_id: { type: String, required: true, immutable: true }, actor_id: { type: String, required: true, immutable: true },
-    actor_role: { type: String, enum: ['BUYER', 'SELLER', 'PRINTER', 'ADMIN', 'SYSTEM'], required: true, immutable: true }, acting_as: { type: String, enum: ['PRINTER'], default: null, immutable: true },
+    actor_role: { type: String, enum: ['BUYER', 'SELLER', 'PRINTER', 'ADMIN', 'SYSTEM'], required: true, immutable: true }, acting_as: { type: String, enum: ['PRINTER', null], default: null, immutable: true },
     from_status: { type: String, default: null, immutable: true }, to_status: { type: String, default: null, immutable: true },
     reason: { type: String, required: true, immutable: true }, event_id: { type: String, default: null, immutable: true },
     created_at: { type: Date, required: true, default: Date.now, immutable: true },

@@ -10,6 +10,11 @@ import { UploadService } from '../../upload/application/upload.service';
 import { UPLOAD_ROOT, publicUrl } from '../../../shared/upload/upload.middleware';
 import { RefundRequestService } from '../application/refund-request.service';
 import { isValidRefundImageBuffer, isValidRefundVideoBuffer } from '../application/refund-evidence-policy';
+import { ReturnRequestV3, ReturnEvidenceV3 } from '../infrastructure/models/return-request-v3.model';
+import { createReturnRequestService } from '../application/return-request.runtime';
+import { ReplacementOrderService } from '../application/replacement-order.service';
+import { Order } from '../infrastructure/models/order.model';
+import { User } from '../../user/infrastructure/models/user.model';
 
 const router = Router();
 const asyncHandler = (fn: (req: AuthenticatedRequest, res: Response) => Promise<unknown>) => (req: AuthenticatedRequest, res: Response) => {
@@ -109,12 +114,96 @@ function verifyMockPrinter(req: AuthenticatedRequest, res: Response, next: (erro
     next();
 }
 router.get('/printer/refund-requests', verifyMockPrinter, asyncHandler(async (_req, res) => {
-    const docs = await RefundRequestService.printerList();
-    return res.json({ success: true, data: docs });
+    const legacyDocs = await RefundRequestService.printerList();
+    
+    // Đồng bộ các yêu cầu V3 (Đổi hàng & Hoàn tiền theo món) của xưởng in
+    const v3Docs = await ReturnRequestV3.find({
+        status: { $in: ['PENDING_PRINTER', 'APPROVED', 'REJECTED', 'DISPUTED', 'AWAITING_ADMIN_REFUND'] }
+    }).sort({ updated_at: -1, created_at: -1 }).limit(50).lean();
+    const v3Mapped = await Promise.all(v3Docs.map(async (v3: any) => {
+        const requestId = String(v3.id || v3._id);
+        const evidences = await ReturnEvidenceV3.find({ request_id: requestId }).lean();
+        let orderInfo: any = null;
+        if (mongoose.Types.ObjectId.isValid(v3.order_id)) {
+            orderInfo = await Order.findById(v3.order_id).select('order_code buyer_id items').lean();
+        } else {
+            orderInfo = await Order.findOne({ order_code: v3.order_id }).select('order_code buyer_id items').lean();
+        }
+        
+        let buyerInfo: any = null;
+        const buyerId = orderInfo?.buyer_id || v3.buyer_id;
+        if (buyerId && mongoose.Types.ObjectId.isValid(buyerId)) {
+            buyerInfo = await User.findById(buyerId).select('full_name email').lean();
+        }
+
+        const isExchange = v3.requested_resolution === 'EXCHANGE';
+        const unitPrice = v3.item_snapshot?.unit_price || v3.item_snapshot?.price || 0;
+        const totalAmount = unitPrice * (v3.quantity || 1);
+
+        return {
+            _id: requestId,
+            id: requestId,
+            is_v3: true,
+            order_id: {
+                _id: orderInfo?._id || v3.order_id,
+                order_code: orderInfo?.order_code || v3.order_id,
+            },
+            buyer_id: {
+                _id: v3.buyer_id,
+                full_name: buyerInfo?.full_name || 'Khách hàng VietCraft',
+                email: buyerInfo?.email || v3.buyer_id,
+            },
+            reason_category: `${v3.reason_code} - ${isExchange ? 'ĐỔI HÀNG (IN BÙ)' : 'HOÀN TIỀN'}`,
+            reason_code: v3.reason_code,
+            requested_resolution: v3.requested_resolution,
+            description: v3.reason_description,
+            evidence: evidences.map((e: any) => e.storage_ref),
+            refund_type: isExchange ? 'EXCHANGE' : 'FULL',
+            refund_amount: totalAmount,
+            quantity: v3.quantity || 1,
+            item_snapshot: v3.item_snapshot,
+            status: v3.status,
+            sla_deadlines: {
+                printer_deadline: v3.deadline_at,
+            },
+            created_at: v3.created_at,
+        };
+    }));
+
+    return res.json({ success: true, data: [...v3Mapped, ...legacyDocs] });
 }));
 router.post('/printer/refund-requests/:id/respond', verifyMockPrinter, asyncHandler(async (req, res) => {
-    if (!idOk(req.params.id)) throw new Error('ID không hợp lệ');
-    const doc = await RefundRequestService.printerRespond(req.params.id, req.body?.decision, req.body?.note);
+    const id = String(req.params.id);
+    const v3Doc: any = await ReturnRequestV3.findOne({ $or: [{ id }, { _id: id }] }).lean();
+    if (v3Doc) {
+        const requestId = String(v3Doc.id || v3Doc._id);
+        const service = createReturnRequestService();
+        const decision = String(req.body?.decision || '').toUpperCase();
+        const printerAction = decision === 'APPROVE' ? 'APPROVE' : 'REJECT';
+        const reason = String(req.body?.note || '').trim() || (printerAction === 'APPROVE' ? 'Xưởng in đã xác nhận và chấp thuận' : 'Xưởng in từ chối yêu cầu');
+        const updated = await service.printerDecision({
+            actorId: v3Doc.printer_id || 'PRINTING_SHOP_MOCK',
+            devAdminActorId: v3Doc.printer_id || 'PRINTING_SHOP_MOCK',
+            requestId,
+            action: printerAction,
+            reason,
+        });
+
+        if (printerAction === 'APPROVE' && (v3Doc.requested_resolution === 'EXCHANGE' || updated.final_resolution === 'EXCHANGE')) {
+            try {
+                await ReplacementOrderService.createAndDispatchReplacement(requestId);
+                const freshDoc = await ReturnRequestV3.findOne({ $or: [{ id: requestId }, { _id: requestId }] }).lean();
+                return res.json({ success: true, data: freshDoc || updated });
+            } catch (err: any) {
+                console.error('[REPLACEMENT CREATION ERROR]', err.message);
+            }
+        }
+
+        return res.json({ success: true, data: updated });
+    }
+
+    if (!idOk(id)) throw new Error('ID không hợp lệ');
+    const doc = await RefundRequestService.printerRespond(id, req.body?.decision, req.body?.note);
     return res.json({ success: true, data: doc });
 }));
 router.get('/admin/refund-requests', authenticate, requireRole(['admin']), asyncHandler(async (req, res) => {

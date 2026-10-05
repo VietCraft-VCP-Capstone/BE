@@ -57,6 +57,7 @@ export type ReturnAction =
     | 'RETURN_WINDOW_EXPIRED'
     | 'REPLACEMENT_CREATE'
     | 'REPLACEMENT_COMPLETED'
+    | 'REFUND_COMPLETED'
     | 'EXCHANGE_TO_REFUND'
     | 'CANCEL';
 
@@ -126,6 +127,12 @@ const podTransitions: readonly TransitionRule[] = [
     { from: 'WAITING_STOCK', action: 'STOCK_WAIT_EXPIRED', to: 'DISPUTED', actor: 'SYSTEM' },
     { from: 'WAITING_BUYER_CHOICE', action: 'STOCK_WAIT_EXPIRED', to: 'DISPUTED', actor: 'SYSTEM' },
     { from: 'WAITING_BUYER_CHOICE', action: 'BUYER_CANCEL', to: 'CANCELLED', actor: 'BUYER' },
+    { from: 'APPROVED', action: 'REPLACEMENT_CREATE', to: 'REPLACEMENT_CREATED', actor: 'SYSTEM' },
+    { from: 'APPROVED', action: 'REPLACEMENT_CREATE', to: 'REPLACEMENT_CREATED', actor: 'PRINTER' },
+    { from: 'REPLACEMENT_CREATED', action: 'REPLACEMENT_COMPLETED', to: 'COMPLETED', actor: 'SYSTEM' },
+    { from: 'REPLACEMENT_CREATED', action: 'REPLACEMENT_COMPLETED', to: 'COMPLETED', actor: 'PRINTER' },
+    { from: 'CONVERTED_TO_REFUND', action: 'REFUND_COMPLETED', to: 'COMPLETED', actor: 'SYSTEM' },
+    { from: 'CONVERTED_TO_REFUND', action: 'REFUND_COMPLETED', to: 'COMPLETED', actor: 'ADMIN' },
 ];
 
 // Declared for future policy clarity only. The feature flag defaults off and no L1 path enables it.

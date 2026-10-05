@@ -9,14 +9,14 @@ function extensionOf(value: string): string {
 function isSupportedRefundEvidenceUrl(value: string): boolean {
     const extension = extensionOf(value);
     if (![...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS].includes(extension)) return false;
-    const refundUploadPath = /^\/uploads\/refunds\/[a-z0-9-]+\.(jpg|jpeg|png|webp|mp4|webm|mov)$/i;
+    const refundUploadPath = /^\/uploads\/refunds\/[a-z0-9_.-]+\.(jpg|jpeg|png|webp|mp4|webm|mov)$/i;
     if (refundUploadPath.test(value)) return true;
     try {
         const url = new URL(value);
         const localUpload = (url.protocol === 'http:' || url.protocol === 'https:') && refundUploadPath.test(url.pathname);
         const cloudinaryEvidence = url.protocol === 'https:' && url.hostname === 'res.cloudinary.com'
             && /\/image\/upload\//i.test(url.pathname)
-            && /\/refunds\/[a-z0-9_-]+\.(jpg|jpeg|png|webp)$/i.test(url.pathname);
+            && /\/refunds\/[a-z0-9_.-]+\.(jpg|jpeg|png|webp)$/i.test(url.pathname);
         return localUpload || cloudinaryEvidence;
     } catch { return false; }
 }

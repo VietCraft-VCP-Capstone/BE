@@ -1,10 +1,17 @@
 import { Router, type RequestHandler } from 'express';
+import mongoose from 'mongoose';
 import type { AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import type { ReturnRequestApplicationService, ReturnRequestClock } from '../application/return-request.service';
 import type { ReturnRequestV3ActorRole } from '../infrastructure/repositories/return-request-v3.repository';
 import type { ReturnActor } from '../application/return-state-machine';
 import type { ReturnEvidenceItem } from '../application/return-evidence-policy';
+import crypto from 'crypto';
 import { validateRefundEvidence } from '../application/refund-evidence-policy';
+import { ReplacementOrderService } from '../application/replacement-order.service';
+import { ReturnRequestV3, ReturnRequestLogV3 } from '../infrastructure/models/return-request-v3.model';
+import { ReturnRefundExecution } from '../infrastructure/models/return-refund-execution.model';
+import { Order } from '../infrastructure/models/order.model';
+import { Transaction } from '../infrastructure/models/transaction.model';
 
 export interface ReturnRequestRouteDependencies {
     service: ReturnRequestApplicationService;
@@ -25,7 +32,13 @@ async function validateRequestEvidence(service: ReturnRequestApplicationService,
     if(!detail) throw Object.assign(new Error('Return request not found.'),{statusCode:404});
     validateUploadedReferences(evidence,detail.request.reason_code,detail.request.reason_description);
 }
-const sendError = (res: any, error: any) => res.status(error?.statusCode || (/not found/i.test(error?.message) ? 404 : /actor cannot|ownership|assigned printer required|only assigned|cannot perform|cannot view/i.test(error?.message) ? 403 : 400)).json({ error:error?.message || 'Return request failed.' });
+const sendError = (res: any, error: any) => {
+    if (error instanceof mongoose.Error) {
+        return res.status(400).json({ error: error instanceof mongoose.Error.CastError ? 'Mã đơn hàng không hợp lệ' : error.message || 'Dữ liệu không hợp lệ' });
+    }
+    const message=error?.message || 'Return request failed.';
+    return res.status(error?.statusCode || (/not found/i.test(message) ? 404 : /actor cannot|ownership|assigned printer required|only assigned|cannot perform|cannot view/i.test(message) ? 403 : 400)).json({ error:message });
+};
 
 export function createReturnRequestRouter({ service, authenticate, clock }: ReturnRequestRouteDependencies) {
     const router=Router();
@@ -68,7 +81,17 @@ export function createReturnRequestRouter({ service, authenticate, clock }: Retu
     router.post('/requests/:id/printer-decision', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='printer') return res.status(req.user?403:401).json({error:'Printer role required.'});
         await validateRequestEvidence(service,req.user.id,'PRINTER',req.params.id,req.body?.evidence);
-        const data=await service.printerDecision({actorId:req.user.id,requestId:req.params.id,action:req.body?.action,reason:req.body?.reason,proposedFault:req.body?.proposedFault,proposedClassification:req.body?.proposedClassification,evidence:req.body?.evidence}); return res.json({data});
+        const data=await service.printerDecision({actorId:req.user.id,requestId:req.params.id,action:req.body?.action,reason:req.body?.reason,proposedFault:req.body?.proposedFault,proposedClassification:req.body?.proposedClassification,evidence:req.body?.evidence});
+        if(req.body?.action === 'APPROVE' && (data.final_resolution === 'EXCHANGE' || data.requested_resolution === 'EXCHANGE')) {
+            try {
+                await ReplacementOrderService.createAndDispatchReplacement(req.params.id);
+                const freshDoc = await ReturnRequestV3.findOne({ $or: [{ id: req.params.id }, { _id: req.params.id }] }).lean();
+                return res.json({ data: freshDoc || data });
+            } catch (err: any) {
+                console.error('[REPLACEMENT CREATION ERROR]', err.message);
+            }
+        }
+        return res.json({data});
     }));
     router.post('/requests/:id/dispute', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='buyer') return res.status(req.user?403:401).json({error:'Buyer role required.'});
@@ -86,13 +109,77 @@ export function createReturnRequestRouter({ service, authenticate, clock }: Retu
     }));
     router.post('/requests/:id/admin/confirm-refund', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(req.user?403:401).json({error:'Admin role required.'});
-        const data=await service.adminConfirmRefund({actorId:req.user.id,requestId:req.params.id,amountMinor:req.body?.amountMinor,currency:req.body?.currency,faultParty:req.body?.faultParty}); return res.json({data});
+        const data=await service.adminConfirmRefund({actorId:req.user.id,requestId:req.params.id,amountMinor:req.body?.amountMinor,currency:req.body?.currency,faultParty:req.body?.faultParty});
+        
+        try {
+            const amt = Number(req.body?.amountMinor) || 0;
+            const cur = String(req.body?.currency || 'VND');
+            const v3Obj: any = await ReturnRequestV3.findOne({ $or: [{ id: req.params.id }, { _id: req.params.id }] }).lean();
+            if (v3Obj) {
+                let order = await Order.findOne({ $or: [{ _id: mongoose.Types.ObjectId.isValid(v3Obj.order_id) ? v3Obj.order_id : null }, { order_code: v3Obj.order_id }] });
+                if (order) {
+                    order.refund_status = 'REFUNDED';
+                    await order.save();
+
+                    await Transaction.create({
+                        order_id: order._id,
+                        order_code: order.order_code,
+                        user_id: v3Obj.buyer_id,
+                        gateway: order.payment_method || 'VNPAY',
+                        gateway_transaction_id: `RF3-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+                        amount: mongoose.Types.Decimal128.fromString(String(amt || 0)),
+                        type: 'REFUND',
+                        status: 'SUCCESS',
+                        refund_request_id: String(v3Obj.id || v3Obj._id),
+                        note: `Admin hoàn tiền thành công ${amt.toLocaleString('vi-VN')} ${cur} cho món hàng ${v3Obj.order_item_id} (Lỗi do: ${req.body?.faultParty})`,
+                    });
+                }
+            }
+
+            await ReturnRefundExecution.updateOne(
+                { request_id: req.params.id },
+                { $set: { status: 'REFUNDED', updated_at: new Date() } }
+            );
+
+            await ReturnRequestV3.updateOne(
+                { $or: [{ id: req.params.id }, { _id: req.params.id }] },
+                { $set: { linked_refund_status: 'REFUNDED', status: 'COMPLETED', updated_at: new Date() } }
+            );
+
+            await ReturnRequestLogV3.create({
+                request_id: req.params.id,
+                actor_id: req.user.id,
+                actor_role: 'ADMIN',
+                from_status: data.status,
+                to_status: 'COMPLETED',
+                reason: `Đã hoàn tiền thành công số tiền ${amt.toLocaleString('vi-VN')} ${cur} về tài khoản của người mua.`,
+                event_id: null,
+                created_at: new Date(),
+            });
+
+            const fresh = await ReturnRequestV3.findOne({ $or: [{ id: req.params.id }, { _id: req.params.id }] }).lean();
+            return res.json({ data: fresh || data });
+        } catch (err: any) {
+            console.error('[ADMIN CONFIRM REFUND EXECUTION ERROR]', err.message);
+        }
+
+        return res.json({data});
     }));
     if(enabledDev()) {
         router.post('/requests/dev/printer-action', asyncRoute(async(req,res)=>{
             if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(req.user?403:401).json({error:'Admin role required.'});
             await validateRequestEvidence(service,req.user.id,'ADMIN',req.body?.requestId,req.body?.evidence);
-            const data=await service.printerDecision({actorId:req.user.id,devAdminActorId:req.user.id,requestId:req.body?.requestId,action:req.body?.action,reason:req.body?.reason,proposedFault:req.body?.proposedFault,proposedClassification:req.body?.proposedClassification,evidence:req.body?.evidence}); return res.json({data});
+            const data=await service.printerDecision({actorId:req.user.id,devAdminActorId:req.user.id,requestId:req.body?.requestId,action:req.body?.action,reason:req.body?.reason,proposedFault:req.body?.proposedFault,proposedClassification:req.body?.proposedClassification,evidence:req.body?.evidence});
+            if(req.body?.action === 'APPROVE' && (data.final_resolution === 'EXCHANGE' || data.requested_resolution === 'EXCHANGE')) {
+                try {
+                    await ReplacementOrderService.createAndDispatchReplacement(req.body?.requestId);
+                    const freshDoc = await ReturnRequestV3.findOne({ $or: [{ id: req.body?.requestId }, { _id: req.body?.requestId }] }).lean();
+                    return res.json({ data: freshDoc || data });
+                } catch (err: any) {
+                    console.error('[REPLACEMENT CREATION ERROR]', err.message);
+                }
+            }
+            return res.json({data});
         }));
         router.get('/clock',(req: AuthenticatedRequest,res)=>{ if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(req.user?403:401).json({error:'Admin role required.'}); return res.json({now:clock.now().toISOString()}); });
     }

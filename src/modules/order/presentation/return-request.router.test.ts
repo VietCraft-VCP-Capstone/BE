@@ -4,24 +4,32 @@ import http from 'node:http';
 import express from 'express';
 import { createReturnRequestRouter } from './return-request.router';
 import { createReturnClock } from '../application/return-request.runtime';
+import { createBuyerOrderIdResolver } from '../application/buyer-order-id-resolver';
 import { ReturnRequestApplicationService, type OrderReturnSnapshotSource, type ReturnRequestRefundBridge } from '../application/return-request.service';
 import { InMemoryReturnRequestV3Repository } from '../infrastructure/repositories/return-request-v3.repository';
 
 const now = new Date('2026-05-02T00:00:00Z');
 const evidence = [{ id: 'e1', kind: 'IMAGE' as const, uri: '/uploads/refunds/e1.jpg' }];
-function setup(options: { eligibilityItems?: Array<{orderItemId?:string|null;buyerId:string;cohort:'POD'|'NORMAL';itemStatus:'DELIVERED'|'SHIPPING'|'OTHER';orderedQuantity:number;replacedQuantity:number;refundedQuantity:number;activeReservedQuantity:number}>; deliveredAt?:Date; clockNow?:Date } = {}) {
+function setup(options: { eligibilityItems?: Array<{orderItemId?:string|null;buyerId:string;cohort:'POD'|'NORMAL';itemStatus:'DELIVERED'|'SHIPPING'|'OTHER';orderedQuantity:number;replacedQuantity:number;refundedQuantity:number;activeReservedQuantity:number}>; deliveredAt?:Date; clockNow?:Date; orders?:Array<{id:string;orderCode:string;buyerId:string}>; snapshotCanonicalizesOrderCode?:boolean } = {}) {
     let seq = 0;
     const repository = new InMemoryReturnRequestV3Repository();
-    const snapshotSource: OrderReturnSnapshotSource = { async getSnapshot(orderId, orderItemId) { return { orderId, orderItemId, buyerId:'buyer', sellerId:'seller', printerId:'printer', cohort:'POD', itemStatus:'DELIVERED', itemSnapshot:{ title:'POD item' }, valid:true, orderedQuantity:1, replacedQuantity:0, refundedQuantity:0, activeReservedQuantity:0, policyVersion:'v1', schemaVersion:'v3' }; } };
-    const eligibilityItemSource = { async getItems(){ return options.eligibilityItems || [{orderItemId:'item-1',buyerId:'buyer',cohort:'POD' as const,itemStatus:'DELIVERED' as const,orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0}]; } };
+    const orders = options.orders || [{id:'507f1f77bcf86cd799439011',orderCode:'TEST-STATUS-6aba0583f92a55ed8b3b1980',buyerId:'buyer'}];
+    const snapshotOrderIds:string[] = [];
+    const eligibilityOrderIds:string[] = [];
+    const resolveBuyerOrderId=createBuyerOrderIdResolver({
+        async byId(orderId,buyerId){const order=orders.find(row=>row.id===orderId&&row.buyerId===buyerId);return order?.id||null;},
+        async byOrderCode(orderCode,buyerId){const order=orders.find(row=>row.orderCode===orderCode&&row.buyerId===buyerId);return order?.id||null;},
+    });
+    const snapshotSource: OrderReturnSnapshotSource = { async getSnapshot(orderId, orderItemId) { snapshotOrderIds.push(orderId); const found=orders.find(row=>row.id===orderId||row.orderCode===orderId); if(!found) return null; return { orderId:options.snapshotCanonicalizesOrderCode&&orderId===found.orderCode?found.id:orderId, orderItemId, buyerId:found.buyerId, sellerId:'seller', printerId:'printer', cohort:'POD', itemStatus:'DELIVERED', itemSnapshot:{ title:'POD item' }, valid:true, orderedQuantity:1, replacedQuantity:0, refundedQuantity:0, activeReservedQuantity:0, policyVersion:'v1', schemaVersion:'v3' }; } };
+    const eligibilityItemSource = { async getItems(orderId:string){ eligibilityOrderIds.push(orderId); return options.eligibilityItems || [{orderItemId:'item-1',buyerId:'buyer',cohort:'POD' as const,itemStatus:'DELIVERED' as const,orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0}]; } };
     const bridgeCalls: unknown[] = [];
     const bridge: ReturnRequestRefundBridge = { async createLinkedRefund(input) { bridgeCalls.push(input); return { id:'execution-1', status:'PENDING_INTEGRATION' }; } };
-    const service = new ReturnRequestApplicationService({ repository, snapshotSource, eligibilityItemSource, deliveredEventSource:{ async getVerifiedDeliveredEvent(_orderId:string,itemId:string){ return { eventId:`delivered-${itemId}`, occurredAt:itemId==='expired-1'?options.deliveredAt || new Date('2026-04-20T00:00:00Z'):new Date('2026-05-01T00:00:00Z'), verified:true }; } }, bridge, clock:{ now:()=>options.clockNow || now }, id:()=>`req-${++seq}` });
+    const service = new ReturnRequestApplicationService({ repository, snapshotSource, eligibilityItemSource, resolveBuyerOrderId, deliveredEventSource:{ async getVerifiedDeliveredEvent(_orderId:string,itemId:string){ return { eventId:`delivered-${itemId}`, occurredAt:itemId==='expired-1'?options.deliveredAt || new Date('2026-04-20T00:00:00Z'):new Date('2026-05-01T00:00:00Z'), verified:true }; } }, bridge, clock:{ now:()=>options.clockNow || now }, id:()=>`req-${++seq}` });
     const app = express(); app.use(express.json());
     const auth: Parameters<typeof createReturnRequestRouter>[0]['authenticate'] = (req:any,_res,next) => { req.user = req.headers['x-user'] ? { id:String(req.headers['x-user']), role:String(req.headers['x-role'] || '') } : undefined; next(); };
     app.use('/returns/v3', createReturnRequestRouter({ service, authenticate:auth, clock:{ now:()=>now } }));
     const server = http.createServer(app);
-    return { server, repository, bridgeCalls };
+    return { server, repository, bridgeCalls, snapshotOrderIds, eligibilityOrderIds };
 }
 async function request(server: http.Server, method: string, path: string, role: string, user: string, body?: unknown) {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -32,7 +40,41 @@ async function request(server: http.Server, method: string, path: string, role: 
         return { status:response.status, body:responseBody };
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 }
-const createBody = { orderId:'order-1', orderItemId:'item-1', quantity:1, reasonCode:'R02', description:'item defect', resolution:'REFUND', evidence };
+const createBody = { orderId:'TEST-STATUS-6aba0583f92a55ed8b3b1980', orderItemId:'item-1', quantity:1, reasonCode:'R02', description:'item defect', resolution:'REFUND', evidence };
+
+test('POST resolves canonical ObjectId and order_code to the owned order before snapshot comparison', async () => {
+    const f=setup({snapshotCanonicalizesOrderCode:true});
+    const byId=await request(f.server,'POST','/returns/v3/requests','buyer','buyer',{...createBody,orderId:'507f1f77bcf86cd799439011'});
+    assert.equal(byId.status,201); assert.equal(byId.body.data.order_id,'507f1f77bcf86cd799439011');
+    const byCode=await request(f.server,'POST','/returns/v3/requests','buyer','buyer',{...createBody,orderItemId:'item-2'});
+    assert.equal(byCode.status,201); assert.equal(byCode.body.data.order_id,'507f1f77bcf86cd799439011');
+    assert.deepEqual(f.snapshotOrderIds,['507f1f77bcf86cd799439011','507f1f77bcf86cd799439011']);
+});
+
+test('POST returns localized 404 for missing or another Buyer order and 400 for malformed order id', async () => {
+    const missing=setup();
+    const notFound=await request(missing.server,'POST','/returns/v3/requests','buyer','buyer',{...createBody,orderId:'missing-code'});
+    assert.equal(notFound.status,404); assert.equal(notFound.body.error,'Không tìm thấy đơn hàng.');
+    const malformed=await request(missing.server,'POST','/returns/v3/requests','buyer','buyer',{...createBody,orderId:'!invalid!'});
+    assert.equal(malformed.status,400); assert.equal(malformed.body.error,'Mã đơn hàng không hợp lệ');
+    const otherOwner=setup({orders:[{id:'507f1f77bcf86cd799439012',orderCode:'someone-else-order',buyerId:'someone-else'}]});
+    const forbiddenByCode=await request(otherOwner.server,'POST','/returns/v3/requests','buyer','buyer',{...createBody,orderId:'someone-else-order'});
+    assert.equal(forbiddenByCode.status,404); assert.equal(forbiddenByCode.body.error,'Không tìm thấy đơn hàng.');
+    const forbiddenById=await request(otherOwner.server,'POST','/returns/v3/requests','buyer','buyer',{...createBody,orderId:'507f1f77bcf86cd799439012'});
+    assert.equal(forbiddenById.status,404); assert.equal(forbiddenById.body.error,'Không tìm thấy đơn hàng.');
+});
+
+test('GET eligibility resolves order_code to its canonical id and rejects missing/non-owned orders', async () => {
+    const f=setup({snapshotCanonicalizesOrderCode:true});
+    const found=await request(f.server,'GET','/returns/v3/eligibility?orderId=TEST-STATUS-6aba0583f92a55ed8b3b1980','buyer','buyer');
+    assert.equal(found.status,200); assert.deepEqual(f.eligibilityOrderIds,['507f1f77bcf86cd799439011']);
+    const missing=await request(f.server,'GET','/returns/v3/eligibility?orderId=unknown-order','buyer','buyer');
+    assert.equal(missing.status,404); assert.equal(missing.body.error,'Không tìm thấy đơn hàng.');
+    const otherOwner=setup({orders:[{id:'507f1f77bcf86cd799439012',orderCode:'someone-else-order',buyerId:'someone-else'}]});
+    const forbidden=await request(otherOwner.server,'GET','/returns/v3/eligibility?orderId=someone-else-order','buyer','buyer');
+    assert.equal(forbidden.status,404); assert.equal(forbidden.body.error,'Không tìm thấy đơn hàng.');
+});
+
 
 test('Buyer eligibility returns policy deadline, missing IDs, NORMAL, active request, exhausted quantity and expired deadline', async () => {
     const f=setup({eligibilityItems:[
@@ -42,16 +84,17 @@ test('Buyer eligibility returns policy deadline, missing IDs, NORMAL, active req
         {orderItemId:'active-1',buyerId:'buyer',cohort:'POD',itemStatus:'DELIVERED',orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:1},
         {orderItemId:'expired-1',buyerId:'buyer',cohort:'POD',itemStatus:'DELIVERED',orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0},
     ],deliveredAt:new Date('2026-04-20T00:00:00Z')});
-    await f.repository.create({id:'active-request',order_id:'order-1',order_item_id:'active-1',buyer_id:'buyer',seller_id:'seller',printer_id:'printer',item_snapshot:{},quantity:1,reason_code:'R02',reason_description:'x',requested_resolution:'REFUND',final_resolution:null,fault_party:null,fault_source:null,status:'PENDING_PRINTER',version:0,deadline_at:null,deadline_type:null,policy_version:'v1',schema_version:'v3',delivered_event_id:null,delivered_at:null,refund_admin_confirmed:false,refund_admin_confirmed_by:null,refund_admin_confirmed_at:null,correction_used:false,printer_evidence_request_used:false,buyer_dispute_count:0,seller_appeal_used:false,side_effect_started:false,exchange_quota_consumed:false,created_at:now,updated_at:now});
-    const response=await request(f.server,'GET','/returns/v3/eligibility?orderId=order-1','buyer','buyer'); assert.equal(response.status,200);
+    await f.repository.create({id:'active-request',order_id:'507f1f77bcf86cd799439011',order_item_id:'active-1',buyer_id:'buyer',seller_id:'seller',printer_id:'printer',item_snapshot:{},quantity:1,reason_code:'R02',reason_description:'x',requested_resolution:'REFUND',final_resolution:null,fault_party:null,fault_source:null,status:'PENDING_PRINTER',version:0,deadline_at:null,deadline_type:null,policy_version:'v1',schema_version:'v3',delivered_event_id:null,delivered_at:null,refund_admin_confirmed:false,refund_admin_confirmed_by:null,refund_admin_confirmed_at:null,correction_used:false,printer_evidence_request_used:false,buyer_dispute_count:0,seller_appeal_used:false,side_effect_started:false,exchange_quota_consumed:false,created_at:now,updated_at:now});
+    const response=await request(f.server,'GET','/returns/v3/eligibility?orderId=TEST-STATUS-6aba0583f92a55ed8b3b1980','buyer','buyer'); assert.equal(response.status,200);
     const rows=response.body.data.items; assert.equal(rows[0].eligible,true); assert.equal(rows[0].deadline,'2026-05-04T00:00:00.000Z');
     assert.equal(rows[1].reasonIfNot.code,'MISSING_ORDER_ITEM_ID'); assert.equal(rows[2].reasonIfNot.code,'NORMAL_UNSUPPORTED');
     assert.equal(rows[3].activeRequestId,'active-request'); assert.equal(rows[3].reasonIfNot.code,'ACTIVE_REQUEST'); assert.equal(rows[4].reasonIfNot.code,'EXPIRED');
 });
 
-test('Buyer eligibility rejects another owner with 403', async () => {
-    const f=setup({eligibilityItems:[{orderItemId:'item-1',buyerId:'someone-else',cohort:'POD',itemStatus:'DELIVERED',orderedQuantity:1,replacedQuantity:0,refundedQuantity:0,activeReservedQuantity:0}]});
-    assert.equal((await request(f.server,'GET','/returns/v3/eligibility?orderId=order-1','buyer','intruder')).status,403);
+test('Buyer eligibility returns 404 when the supplied order belongs to another Buyer', async () => {
+    const f=setup({orders:[{id:'507f1f77bcf86cd799439012',orderCode:'another-buyers-order',buyerId:'someone-else'}]});
+    const response=await request(f.server,'GET','/returns/v3/eligibility?orderId=another-buyers-order','buyer','buyer');
+    assert.equal(response.status,404); assert.equal(response.body.error,'Không tìm thấy đơn hàng.');
 });
 
 

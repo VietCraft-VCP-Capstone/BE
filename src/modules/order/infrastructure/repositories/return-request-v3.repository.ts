@@ -14,7 +14,9 @@ export interface ReturnRequestV3Data {
     seller_appeal_used: boolean; side_effect_started: boolean; exchange_quota_consumed: boolean; refund_amount_minor?: number | null; refund_currency?: string | null; admin_decision_id?: string | null; linked_refund_id?: string | null; linked_refund_status?: string | null;
     evidence_requested_at?: Date | null; evidence_deadline_at?: Date | null; buyer_evidence_submitted_at?: Date | null; seller_fault_notified_at?: Date | null; seller_appeal_deadline_at?: Date | null;
     r06_tracking_event_id?: string | null; r06_tracking_event_at?: Date | null; r06_tracking_status?: 'IN_TRANSIT'|'LOST'|'RETURNED'|'DELIVERED'|'UNKNOWN'|null; r06_tracking_latest_eta?: Date | null; r06_fault_source?: 'CARRIER'|'PRINTER'|null;
-    proposed_fault_party?: ReturnV3FaultParty | null; proposed_classification?: string | null; is_simulated?: boolean; created_at: Date; updated_at: Date;
+    proposed_fault_party?: ReturnV3FaultParty | null; proposed_classification?: string | null; is_simulated?: boolean;
+    replacement_order_id?: string | null; replacement_order_code?: string | null;
+    created_at: Date; updated_at: Date;
 }
 export type ReturnRequestV3Patch = Partial<Omit<ReturnRequestV3Data, 'id' | 'order_id' | 'order_item_id' | 'created_at' | 'version'>>;
 export interface ReturnEvidenceV3Data { request_id: string; evidence_id: string; kind: 'PHOTO'|'VIDEO'|'DOCUMENT'|'SYSTEM'; storage_ref: string; uploaded_by: string; created_at: Date }
