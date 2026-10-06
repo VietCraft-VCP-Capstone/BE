@@ -36,6 +36,8 @@ export interface IFinancialBreakdown {
     coupon_discount: mongoose.Types.Decimal128;
     platform_fee: mongoose.Types.Decimal128;
     seller_payout_amount: mongoose.Types.Decimal128;
+    commission_rate?: number;
+    total_printing_cost?: mongoose.Types.Decimal128;
 }
 
 export interface IStatusHistory {
@@ -112,7 +114,9 @@ const FinancialBreakdownSchema = new Schema<IFinancialBreakdown>({
     shipping_fee: { type: Schema.Types.Decimal128, required: true },
     coupon_discount: { type: Schema.Types.Decimal128, required: true, default: 0.0 },
     platform_fee: { type: Schema.Types.Decimal128, required: true },
-    seller_payout_amount: { type: Schema.Types.Decimal128, required: true }
+    seller_payout_amount: { type: Schema.Types.Decimal128, required: true },
+    commission_rate: { type: Number, default: 0.10 },
+    total_printing_cost: { type: Schema.Types.Decimal128, default: 0.0 }
 }, { _id: false });
 
 const StatusHistorySchema = new Schema<IStatusHistory>({
