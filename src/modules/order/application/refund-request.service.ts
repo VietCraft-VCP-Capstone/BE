@@ -14,7 +14,6 @@ import { initialRefundStatus, sellerCanActOnRefund, buyerCanDispute } from './re
 import { validateRefundEvidence } from './refund-evidence-policy';
 const DAY = 24 * 60 * 60 * 1000;
 const VALID_REASONS = new Set(['DAMAGED', 'WRONG_DESCRIPTION', 'PRINT_DEFECT', 'MISSING_ITEM', 'OTHER']);
-import { buildTestDeliveredOrder } from './test-order.factory';
 import { byCodeOrId } from '../utils';
 const ALLOWED_TRANSITIONS: Record<RefundRequestStatus, RefundRequestStatus[]> = {
     PENDING_SELLER: ['SELLER_APPROVED', 'SELLER_REJECTED', 'PENDING_PRINTER', 'TIMEOUT_ESCALATED'],
@@ -31,6 +30,27 @@ export interface CreateRefundRequestInput {
     evidence?: string[];
     refund_type: 'FULL' | 'PARTIAL';
     refund_amount?: number;
+}
+
+function buildTestDeliveredOrder(source: any, now = new Date()) {
+    return {
+        buyer_id: source.buyer_id,
+        shop_id: source.shop_id,
+        order_code: `TEST-REFUND-${now.getTime()}-${Math.floor(Math.random() * 9000 + 1000)}`,
+        payment_method: source.payment_method,
+        payment_status: 'PENDING' as const,
+        refund_status: 'NONE' as const,
+        order_status: 'DELIVERED' as const,
+        shipping_address: source.shipping_address,
+        shipping_details: source.shipping_details,
+        items: source.items,
+        financial_breakdown: source.financial_breakdown,
+        status_history: [
+            { status: 'ORDERED', changed_at: now, note: 'Đơn test Refund/Dispute' },
+            { status: 'DELIVERED', changed_at: now, note: 'Giao hàng giả lập — chỉ dùng test Refund/Dispute' },
+        ],
+        order_hour_of_week: source.order_hour_of_week,
+    };
 }
 
 export class RefundRequestService {
