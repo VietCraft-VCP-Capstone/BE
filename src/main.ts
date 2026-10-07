@@ -26,6 +26,9 @@ async function bootstrap() {
     const { RefundTimeoutJob } = await import('./modules/order/application/refund-timeout.job');
     RefundTimeoutJob.start();
 
+    const { ReturnDeadlineJob } = await import('./modules/order/application/return-deadline.job');
+    ReturnDeadlineJob.start();
+
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);
         logger.info(` VietCraft Backend Monolith Running...`);

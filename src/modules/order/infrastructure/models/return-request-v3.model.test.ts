@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ReturnRequestV3, ReturnEvidenceV3, ReturnRequestLogV3, ReturnExchangeQuotaV3 } from './return-request-v3.model';
+import { ReturnRequestV3, ReturnEvidenceV3, ReturnRequestLogV3, ReturnExchangeQuotaV3, RETURN_REQUEST_V3_ACTIVE_STATUSES } from './return-request-v3.model';
 
 test('v3 request schema contains immutable order/item snapshots, decision, deadline, and CAS fields', () => {
     const schema = ReturnRequestV3.schema;
@@ -18,10 +18,18 @@ test('v3 schema declares one active request per item and unique exchange quota p
         (options.partialFilterExpression as any)?.status?.$in?.includes('DISPUTED'),
     );
     assert.ok(activeIndex, 'expected partial unique active-request index');
+    assert.ok((activeIndex?.[1].partialFilterExpression as any)?.status.$in.includes('CONVERTED_TO_REFUND'));
+    assert.ok(RETURN_REQUEST_V3_ACTIVE_STATUSES.includes('CONVERTED_TO_REFUND'));
     const quotaIndex = ReturnExchangeQuotaV3.schema.indexes().find(([keys, options]) =>
         JSON.stringify(keys) === JSON.stringify({ order_item_id: 1 }) && options?.unique === true,
     );
     assert.ok(quotaIndex, 'expected one-exchange-per-item unique index');
+});
+
+test('R06 delivered carrier tracking is accepted by the persistent schema', () => {
+    const document = new ReturnRequestV3({ _id: 'r06', r06_tracking_status: 'DELIVERED' });
+    const error = document.validateSync();
+    assert.equal(error?.errors.r06_tracking_status, undefined);
 });
 
 test('evidence and request logs have append-only schemas with request links and audit fields', () => {

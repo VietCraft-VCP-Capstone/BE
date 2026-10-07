@@ -64,6 +64,7 @@ export interface IOrder extends Document {
     payment_method: 'VNPAY' | 'MOMO' | 'COD';
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
     refund_status: 'NONE' | 'REQUESTED' | 'UNDER_REVIEW' | 'DISPUTED' | 'REFUNDED' | 'REFUND_REJECTED';
+    refund_execution_id?: string;
     order_status: 'ORDERED' | 'PENDING_DESIGN' | 'PROCESSING' | 'SHIPPING' | 'DELIVERED' | 'CANCELLED';
     seller_approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
     is_pod?: boolean;
@@ -141,6 +142,7 @@ const OrderSchema = new Schema<IOrder>({
     payment_method: { type: String, required: true, enum: ['VNPAY', 'MOMO', 'COD'] },
     payment_status: { type: String, required: true, enum: ['PENDING', 'PAID', 'REFUNDED'], default: 'PENDING' },
     refund_status: { type: String, required: true, enum: ['NONE', 'REQUESTED', 'UNDER_REVIEW', 'DISPUTED', 'REFUNDED', 'REFUND_REJECTED'], default: 'NONE', index: true },
+    refund_execution_id: { type: String },
     order_status: {
         type: String,
         required: true,

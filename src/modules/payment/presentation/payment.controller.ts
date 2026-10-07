@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { VNPayService, vnpayService } from '../application/vnpay.service';
 import { logger } from '../../../shared/utils/logger';
+import { RefundRequestService } from '../../order/application/refund-request.service';
 
 export class PaymentController {
     constructor(private readonly service: VNPayService = vnpayService) {}
@@ -85,30 +86,21 @@ export class PaymentController {
      */
     refund = async (req: Request, res: Response): Promise<void> => {
         try {
-            const { orderId, amount, reason } = req.body;
-            if (!orderId) {
+            const { refundRequestId } = req.body;
+            if (!refundRequestId) {
                 res.status(400).json({
                     success: false,
-                    message: 'Thiếu trường bắt buộc: orderId'
+                    message: 'Cần refundRequestId của yêu cầu đã được duyệt.'
                 });
                 return;
             }
 
-            const createdBy = (req as any).user?.email || (req as any).user?.name || 'Admin';
-            const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.ip || '127.0.0.1';
-
-            const result = await this.service.refundOrder({
-                orderId,
-                amount: amount ? Number(amount) : undefined,
-                reason: reason || 'Hoàn tiền theo yêu cầu khách hàng',
-                createdBy,
-                clientIp
-            });
+            const result = await RefundRequestService.retryExecution(refundRequestId, (req as any).user.id);
 
             res.status(200).json({
-                success: true,
-                message: result.message,
-                data: result.data
+                success: result?.execution_status === 'SUCCEEDED',
+                message: result?.execution_error || (result?.execution_status === 'SUCCEEDED' ? 'VNPay đã xác nhận hoàn tiền.' : 'Yêu cầu đang chờ thực thi hoặc xác minh.'),
+                data: result
             });
         } catch (error: any) {
             logger.error(`[PaymentController] Refund error: ${error.message}`);

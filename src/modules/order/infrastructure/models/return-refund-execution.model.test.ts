@@ -9,9 +9,9 @@ test('linked refund schema enforces the unique request/item business key', () =>
     assert.ok(compound);
 });
 
-test('linked refund schema exposes only PENDING_INTEGRATION as an execution status', () => {
+test('linked refund schema exposes the execution lifecycle statuses', () => {
     const statusPath = ReturnRefundExecution.schema.path('status') as { enumValues?: string[] };
-    assert.deepEqual(statusPath.enumValues, ['PENDING_INTEGRATION']);
+    assert.deepEqual(statusPath.enumValues, ['PENDING_INTEGRATION', 'PROCESSING', 'PENDING', 'FAILED', 'REFUNDED']);
     assert.equal(ReturnRefundExecution.schema.path('resolution') != null, true);
     assert.equal(ReturnRefundExecution.schema.path('fault_party') != null, true);
     assert.equal(ReturnRefundExecution.schema.path('amount_minor') != null, true);

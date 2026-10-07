@@ -15,6 +15,9 @@ import { createReturnRequestService } from '../application/return-request.runtim
 import { ReplacementOrderService } from '../application/replacement-order.service';
 import { Order } from '../infrastructure/models/order.model';
 import { User } from '../../user/infrastructure/models/user.model';
+import { RefundRequest } from '../infrastructure/models/refund-request.model';
+import { ReturnRequestLogV3 } from '../infrastructure/models/return-request-v3.model';
+import { verifyPrinterRefundPartner, verifyMockPrinterRefund, type PrinterRefundRequest } from './middlewares/verify-printer-refund.middleware';
 
 const router = Router();
 const asyncHandler = (fn: (req: AuthenticatedRequest, res: Response) => Promise<unknown>) => (req: AuthenticatedRequest, res: Response) => {
@@ -104,20 +107,14 @@ router.post('/seller/refund-requests/:id/dispute', authenticate, requireRole(['s
     return res.json({ success: true, data: doc });
 }));
 
-function verifyMockPrinter(req: AuthenticatedRequest, res: Response, next: (error?: unknown) => void) {
-    if (config.nodeEnv === 'production') return res.status(404).json({ error: 'Mock Printer disabled in production' });
-    const expected = process.env.REFUND_PRINTER_MOCK_SECRET;
-    if (!expected) return res.status(503).json({ error: 'Refund Printer mock chưa được cấu hình' });
-    const supplied = String(req.headers['x-refund-printer-secret'] || '');
-    const a = Buffer.from(expected); const b = Buffer.from(supplied);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: 'Unauthorized' });
-    next();
-}
-router.get('/printer/refund-requests', verifyMockPrinter, asyncHandler(async (_req, res) => {
-    const legacyDocs = await RefundRequestService.printerList();
+const listPrinterRefunds = asyncHandler(async (req: PrinterRefundRequest, res) => {
+    const printerId = req.printerActorId!;
+    const legacyDocs = await RefundRequest.find({ printer_id: printerId, status: 'PENDING_PRINTER' })
+        .populate('order_id').populate('buyer_id', 'full_name email').sort({ created_at: 1 }).lean();
     
     // Đồng bộ các yêu cầu V3 (Đổi hàng & Hoàn tiền theo món) của xưởng in
     const v3Docs = await ReturnRequestV3.find({
+        printer_id: printerId,
         status: { $in: ['PENDING_PRINTER', 'APPROVED', 'REJECTED', 'DISPUTED', 'AWAITING_ADMIN_REFUND'] }
     }).sort({ updated_at: -1, created_at: -1 }).limit(50).lean();
     const v3Mapped = await Promise.all(v3Docs.map(async (v3: any) => {
@@ -144,6 +141,7 @@ router.get('/printer/refund-requests', verifyMockPrinter, asyncHandler(async (_r
             _id: requestId,
             id: requestId,
             is_v3: true,
+            printer_id: printerId,
             order_id: {
                 _id: orderInfo?._id || v3.order_id,
                 order_code: orderInfo?.order_code || v3.order_id,
@@ -171,19 +169,27 @@ router.get('/printer/refund-requests', verifyMockPrinter, asyncHandler(async (_r
     }));
 
     return res.json({ success: true, data: [...v3Mapped, ...legacyDocs] });
-}));
-router.post('/printer/refund-requests/:id/respond', verifyMockPrinter, asyncHandler(async (req, res) => {
+});
+const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, res) => {
     const id = String(req.params.id);
+    const printerId = req.printerActorId!;
+    const decision = String(req.body?.decision || '').toUpperCase();
+    const note = String(req.body?.note || '').trim();
+    if (!['APPROVE', 'REJECT'].includes(decision)) throw new Error('decision không hợp lệ');
+    if (decision === 'REJECT' && note.length < 3) throw new Error('Khi từ chối, cần ghi rõ lý do (ít nhất 3 ký tự)');
     const v3Doc: any = await ReturnRequestV3.findOne({ $or: [{ id }, { _id: id }] }).lean();
     if (v3Doc) {
+        if (v3Doc.printer_id !== printerId) return res.status(403).json({ error: 'Assigned Printer required' });
         const requestId = String(v3Doc.id || v3Doc._id);
+        // Retry after a lost callback response must acknowledge the original decision.
+        const previous = await ReturnRequestLogV3.findOne({ request_id: requestId, actor_id: printerId, actor_role: 'PRINTER',
+            to_status: { $in: decision === 'APPROVE' ? ['APPROVED', 'AWAITING_ADMIN_REFUND'] : ['REJECTED'] } }).lean();
+        if (previous) return res.json({ success: true, data: v3Doc });
         const service = createReturnRequestService();
-        const decision = String(req.body?.decision || '').toUpperCase();
-        const printerAction = decision === 'APPROVE' ? 'APPROVE' : 'REJECT';
-        const reason = String(req.body?.note || '').trim() || (printerAction === 'APPROVE' ? 'Xưởng in đã xác nhận và chấp thuận' : 'Xưởng in từ chối yêu cầu');
+        const printerAction = decision as 'APPROVE' | 'REJECT';
+        const reason = note || 'Xưởng in đã xác nhận và chấp thuận';
         const updated = await service.printerDecision({
-            actorId: v3Doc.printer_id || 'PRINTING_SHOP_MOCK',
-            devAdminActorId: v3Doc.printer_id || 'PRINTING_SHOP_MOCK',
+            actorId: printerId,
             requestId,
             action: printerAction,
             reason,
@@ -203,9 +209,17 @@ router.post('/printer/refund-requests/:id/respond', verifyMockPrinter, asyncHand
     }
 
     if (!idOk(id)) throw new Error('ID không hợp lệ');
-    const doc = await RefundRequestService.printerRespond(id, req.body?.decision, req.body?.note);
+    const assigned = await RefundRequest.findById(id).lean();
+    if (!assigned) return res.status(404).json({ error: 'Không tìm thấy yêu cầu hoàn tiền' });
+    if (assigned.printer_id !== printerId) return res.status(403).json({ error: 'Assigned Printer required' });
+    if (assigned.printer_response?.decision === decision) return res.json({ success: true, data: assigned });
+    const doc = await RefundRequestService.printerRespond(id, decision as 'APPROVE' | 'REJECT', note);
     return res.json({ success: true, data: doc });
-}));
+});
+router.get('/printer/refund-requests', verifyPrinterRefundPartner, listPrinterRefunds);
+router.post('/printer/refund-requests/:id/respond', verifyPrinterRefundPartner, respondToPrinterRefund);
+router.get('/printer/mock/refund-requests', verifyMockPrinterRefund, listPrinterRefunds);
+router.post('/printer/mock/refund-requests/:id/respond', verifyMockPrinterRefund, respondToPrinterRefund);
 router.get('/admin/refund-requests', authenticate, requireRole(['admin']), asyncHandler(async (req, res) => {
     const docs = await RefundRequestService.adminList(typeof req.query.status === 'string' ? req.query.status : 'DISPUTED');
     return res.json({ success: true, data: docs });

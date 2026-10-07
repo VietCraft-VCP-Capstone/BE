@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
-import crypto from 'crypto';
 import { Order } from '../infrastructure/models/order.model';
-import { Transaction } from '../infrastructure/models/transaction.model';
+import { ReturnRequestV3, RETURN_REQUEST_V3_ACTIVE_STATUSES } from '../infrastructure/models/return-request-v3.model';
+import { executeVnpayRefund } from '../../payment/application/refund-runtime';
 import { RefundRequest, IRefundRequest, RefundRequestStatus } from '../infrastructure/models/refund-request.model';
 import { RefundStateMachine, RefundActor } from './refund-state-machine';
 import { Product } from '../../product/infrastructure/models/product.model';
@@ -39,19 +39,20 @@ export class RefundRequestService {
     }
 
     static async create(orderId: string, buyerId: string, input: CreateRefundRequestInput, options: { allowEmptyEvidenceForTest?: boolean } = {}) {
-        if (!mongoose.Types.ObjectId.isValid(orderId) || !mongoose.Types.ObjectId.isValid(buyerId)) throw new Error('ID không hợp lệ');
+        if (typeof orderId !== 'string' || !orderId.trim() || !mongoose.Types.ObjectId.isValid(buyerId)) throw new Error('ID không hợp lệ');
         if (!VALID_REASONS.has(input.reason_category)) throw new Error('reason_category không hợp lệ');
         const evidence = validateRefundEvidence(input.reason_category, input.description, input.evidence, options);
         if (input.refund_type !== 'FULL' && input.refund_type !== 'PARTIAL') throw new Error('refund_type không hợp lệ');
 
-        const order = await Order.findOne({ _id: orderId, buyer_id: buyerId });
+        const order = await Order.findOne({ ...byCodeOrId(orderId), buyer_id: buyerId });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
         if (order.order_status !== 'DELIVERED') throw new Error('Chỉ đơn đã giao mới được yêu cầu hoàn tiền');
         const now = new Date();
-        const deliveredAt = [...order.status_history].reverse().find(entry => entry.status === 'DELIVERED')?.changed_at;
+        const deliveredAt = order.status_history.find(entry => entry.status === 'DELIVERED')?.changed_at;
         if (!deliveredAt) throw new Error('Không xác định được thời điểm giao hàng của đơn');
         if (now.getTime() > deliveredAt.getTime() + 7 * DAY) throw new Error('Đã quá thời hạn yêu cầu hoàn tiền 7 ngày');
         if (order.refund_status !== 'NONE') throw new Error('Đơn hàng đã có yêu cầu hoàn tiền hoặc đã được xử lý');
+        if (await ReturnRequestV3.exists({ order_id: String(order._id), status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES, 'COMPLETED', 'REPLACEMENT_CREATED'] } })) throw new Error('Đơn đã có yêu cầu đổi/hoàn tiền theo món; hãy xử lý trong yêu cầu đó.');
 
         const products = await Product.find({ _id: { $in: order.items.map(item => item.product_id) } }).select('product_type shop_id').lean();
         if (!products.length) throw new Error('Không xác định được sản phẩm trong đơn hàng');
@@ -59,7 +60,7 @@ export class RefundRequestService {
         if (!shop) throw new Error('Không tìm thấy gian hàng');
         const maxRefund = Number(order.financial_breakdown.subtotal.toString()) + Number(order.financial_breakdown.shipping_fee.toString()) - Number(order.financial_breakdown.coupon_discount.toString());
         const amount = input.refund_type === 'FULL' ? maxRefund : Number(input.refund_amount);
-        if (!Number.isFinite(amount) || amount <= 0 || amount > maxRefund) throw new Error('Số tiền hoàn không hợp lệ');
+        if (!Number.isSafeInteger(amount) || amount <= 0 || amount > maxRefund) throw new Error('Số tiền hoàn không hợp lệ');
         if (input.refund_type === 'PARTIAL' && !input.refund_amount) throw new Error('PARTIAL cần refund_amount');
 
         const productType = products.some(product => product.product_type === 'POD_TEMPLATE') ? 'POD' : 'NORMAL';
@@ -71,7 +72,7 @@ export class RefundRequestService {
             reason_category: input.reason_category, description: input.description.trim(), evidence,
             refund_type: input.refund_type, refund_amount: amount, status: initialStatus,
             responsible_party: productType === 'POD' ? 'PRINTER' : null,
-            printer_id: productType === 'POD' ? 'PRINTING_SHOP_MOCK' : undefined,
+            printer_id: productType === 'POD' ? String(order.printer_info?.printer_id || process.env.PRINTER_REFUND_PRINTER_ID || (config.nodeEnv === 'production' ? '' : 'PRINTING_SHOP_MOCK')) : undefined,
             sla_deadlines: productType === 'POD' ? { seller_deadline: new Date(now.getTime() + 48 * 60 * 60 * 1000), printer_deadline: printerDeadline } : { seller_deadline: new Date(now.getTime() + 48 * 60 * 60 * 1000) },
         });
         const changed = await Order.updateOne({ _id: order._id, refund_status: 'NONE' }, { $set: { refund_status: 'REQUESTED' } });
@@ -90,9 +91,10 @@ export class RefundRequestService {
             try {
                 const response = await fetch(`${config.printerApiUrl}/api/orders/refund-requests`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'x-vietcraft-refund-key': config.printerRefundApiKey },
+                    headers: { 'Content-Type': 'application/json', 'x-vietcraft-refund-key': config.printerRefundApiKey, 'x-printer-id': doc.printer_id || '' },
+                    signal: AbortSignal.timeout(15_000),
                     body: JSON.stringify({
-                        refund_request_id: doc._id.toString(), order_code: order.order_code,
+                        refund_request_id: doc._id.toString(), order_code: order.order_code, printer_id: doc.printer_id,
                         reason_category: doc.reason_category, description: doc.description,
                         evidence: doc.evidence, refund_type: doc.refund_type, refund_amount: doc.refund_amount,
                         sla_deadline: printerDeadline,
@@ -106,12 +108,9 @@ export class RefundRequestService {
                     throw error;
                 }
             } catch (cause) {
-                await RefundRequest.deleteOne({ _id: doc._id });
-                await Order.updateOne({ _id: order._id, refund_status: 'REQUESTED' }, { $set: { refund_status: 'NONE' } });
-                if (cause instanceof Error && 'statusCode' in cause) throw cause;
-                const error = new Error('Không kết nối được xưởng in. Yêu cầu chưa được gửi, vui lòng thử lại.');
-                (error as Error & { statusCode?: number }).statusCode = 503;
-                throw error;
+                // The printer may have accepted the POST before the response was lost. Keep the
+                // same request id: the authenticated printer queue can recover it without duplicates.
+                logger.warn(`[REFUND] Printer delivery pending for ${doc._id}: ${cause instanceof Error ? cause.message : 'upstream unavailable'}`);
             }
         }
         const title = productType === 'POD' ? 'Yêu cầu hoàn tiền POD mới · chỉ theo dõi' : 'Yêu cầu hoàn tiền mới';
@@ -202,7 +201,7 @@ export class RefundRequestService {
         else await Order.updateOne({ _id: doc.order_id }, { $set: { refund_status: 'UNDER_REVIEW' } });
         if (decision === 'APPROVE') await this.executeRefund(updated);
         else void this.notify(doc.buyer_id.toString(), 'Yêu cầu hoàn tiền bị từ chối', 'Seller đã từ chối yêu cầu; bạn có thể mở dispute.', `/refund-requests/${doc._id}`, { refundRequestId: doc._id.toString() }).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
-        return updated;
+        return decision === 'APPROVE' ? RefundRequest.findById(updated._id) : updated;
     }
 
     static async dispute(requestId: string, buyerId: string, reason: string) {
@@ -232,7 +231,7 @@ export class RefundRequestService {
         await Order.updateOne({ _id: doc.order_id }, { $set: { refund_status: decision === 'APPROVE' ? 'UNDER_REVIEW' : 'REFUND_REJECTED' } });
         if (decision === 'APPROVE') await this.executeRefund(updated);
         else void this.notify(doc.buyer_id.toString(), 'Xưởng in từ chối yêu cầu hoàn tiền', `Lý do: ${note!.trim()}. Bạn có thể mở dispute với quản trị viên.`, `/refund-requests/${doc._id}`, { refundRequestId: doc._id.toString() }).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
-        return updated;
+        return decision === 'APPROVE' ? RefundRequest.findById(updated._id) : updated;
     }
 
     static async sellerDispute(requestId: string, sellerId: string, _reason: string) {
@@ -263,71 +262,41 @@ export class RefundRequestService {
         if (decision === 'REJECT') await Order.updateOne({ _id: doc.order_id }, { $set: { refund_status: 'REFUND_REJECTED' } });
         else { await Order.updateOne({ _id: doc.order_id }, { $set: { refund_status: 'UNDER_REVIEW' } }); await this.executeRefund(updated); }
         void this.notify(doc.buyer_id.toString(), decision === 'APPROVE' ? 'Dispute được chấp thuận' : 'Dispute bị từ chối', `Quản trị viên đã ${decision === 'APPROVE' ? 'chấp thuận' : 'từ chối'} dispute.`, `/refund-requests/${doc._id}`, { refundRequestId: doc._id.toString() }).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
-        return updated;
+        return decision === 'APPROVE' ? RefundRequest.findById(updated._id) : updated;
+    }
+
+    static async retryExecution(requestId: string, actorId: string, role: 'ADMIN' | 'SELLER' = 'ADMIN') {
+        if (!mongoose.Types.ObjectId.isValid(requestId)) throw new Error('ID không hợp lệ');
+        const doc = await RefundRequest.findOne({ _id: requestId, ...(role === 'SELLER' ? { seller_id: actorId } : {}) });
+        if (!doc) throw new Error('Không tìm thấy yêu cầu hoàn tiền');
+        if (!['SELLER_APPROVED', 'PRINTER_APPROVED', 'ADMIN_APPROVED', 'REFUNDED'].includes(doc.status)) throw new Error('Chỉ thực thi yêu cầu hoàn tiền đã được duyệt.');
+        await this.executeRefund(doc);
+        return RefundRequest.findById(doc._id);
     }
 
     private static async executeRefund(doc: IRefundRequest) {
+        if (doc.status === 'REFUNDED' && doc.execution_status === 'SUCCEEDED') return;
+        await RefundRequest.updateOne({ _id: doc._id }, { $set: { execution_status: 'PROCESSING' } });
         try {
-            const order = await Order.findById(doc.order_id);
-            if (!order) {
-                logger.error(`[EXECUTE REFUND] Không tìm thấy đơn hàng ${doc.order_id}`);
-                return { executed: false, reason: 'ORDER_NOT_FOUND' };
-            }
-
-            // Xác định số tiền hoàn
-            let amount = Number(doc.refund_amount) || 0;
-            if (amount <= 0) {
-                const subtotal = order.financial_breakdown?.subtotal ? Number(order.financial_breakdown.subtotal.toString()) : 0;
-                amount = subtotal > 0 ? subtotal : 100000;
-            }
-
-            // 1. Cập nhật Order status và refund_status
-            order.refund_status = 'REFUNDED';
-            order.payment_status = 'REFUNDED';
-            await order.save();
-
-            // 2. Cập nhật RefundRequest
-            await RefundRequest.updateOne(
-                { _id: doc._id },
-                {
-                    $set: {
-                        status: 'REFUNDED',
-                        execution_status: 'SUCCESS',
-                        refund_amount: amount,
-                        updated_at: new Date(),
-                    }
-                }
-            );
-
-            // 3. Tạo Transaction ghi nhận giao dịch hoàn tiền
-            await Transaction.create({
-                order_id: order._id,
-                order_code: order.order_code,
-                user_id: doc.buyer_id,
-                gateway: order.payment_method || 'VNPAY',
-                gateway_transaction_id: `RF-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
-                amount: mongoose.Types.Decimal128.fromString(String(amount)),
-                type: 'REFUND',
-                status: 'SUCCESS',
-                refund_request_id: doc._id.toString(),
-                note: `Hoàn tiền thành công ${amount.toLocaleString('vi-VN')}đ cho đơn ${order.order_code} (Bên chịu trách nhiệm: ${doc.responsible_party || 'SHOP/ADMIN'})`,
-            });
-
-            logger.info(`[EXECUTE REFUND SUCCESS] Đã hoàn ${amount}đ cho đơn ${order.order_code} (Refund ID: ${doc._id})`);
-
-            // 4. Thông báo đến Buyer
-            void this.notify(
-                doc.buyer_id.toString(),
-                'Hoàn tiền thành công',
-                `Yêu cầu hoàn tiền đã được xử lý thành công. Số tiền ${amount.toLocaleString('vi-VN')}đ đã được hoàn về tài khoản của bạn.`,
-                `/refund-requests/${doc._id}`,
-                { refundRequestId: doc._id.toString() }
-            ).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
-
-            return { executed: true, amount, status: 'REFUNDED' };
-        } catch (error: any) {
-            logger.error(`[EXECUTE REFUND ERROR] ${error.message}`);
-            return { executed: false, reason: error.message };
+            const result = await executeVnpayRefund({ orderId: String(doc.order_id), businessKey: String(doc._id),
+                amount: Number(doc.refund_amount), reason: `Hoan tien yeu cau ${doc._id}`, createdBy: 'VietCraft' });
+            const succeeded = result.status === 'REFUNDED';
+            const changed = await RefundRequest.updateOne({ _id: doc._id, execution_status: { $ne: 'SUCCEEDED' } }, { $set: {
+                ...(succeeded ? { status: 'REFUNDED' } : {}),
+                execution_status: succeeded ? 'SUCCEEDED' : result.status === 'FAILED' ? 'FAILED' : 'PROCESSING',
+                execution_error: result.error || '',
+            } }, { runValidators: true });
+            if (succeeded && changed.modifiedCount) void this.notify(doc.buyer_id.toString(), 'Hoàn tiền thành công',
+                `VNPay đã xác nhận hoàn ${result.amount.toLocaleString('vi-VN')}đ cho đơn của bạn.`,
+                `/refund-requests/${doc._id}`, { refundRequestId: String(doc._id) })
+                .catch(error => logger.error(`[REFUND] Notification failed: ${error.message}`));
+            return result;
+        } catch (error) {
+            const unsupported = (error as { statusCode?: number }).statusCode === 422;
+            await RefundRequest.updateOne({ _id: doc._id, execution_status: { $ne: 'SUCCEEDED' } }, { $set: {
+                execution_status: unsupported ? 'NOT_STARTED' : 'FAILED', execution_error: error instanceof Error ? error.message : 'Chưa xác nhận hoàn tiền.',
+            } });
+            if (!unsupported) throw error;
         }
     }
 

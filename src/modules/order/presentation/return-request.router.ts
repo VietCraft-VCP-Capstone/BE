@@ -5,13 +5,9 @@ import type { ReturnRequestApplicationService, ReturnRequestClock } from '../app
 import type { ReturnRequestV3ActorRole } from '../infrastructure/repositories/return-request-v3.repository';
 import type { ReturnActor } from '../application/return-state-machine';
 import type { ReturnEvidenceItem } from '../application/return-evidence-policy';
-import crypto from 'crypto';
 import { validateRefundEvidence } from '../application/refund-evidence-policy';
 import { ReplacementOrderService } from '../application/replacement-order.service';
-import { ReturnRequestV3, ReturnRequestLogV3 } from '../infrastructure/models/return-request-v3.model';
-import { ReturnRefundExecution } from '../infrastructure/models/return-refund-execution.model';
-import { Order } from '../infrastructure/models/order.model';
-import { Transaction } from '../infrastructure/models/transaction.model';
+import { ReturnRequestV3 } from '../infrastructure/models/return-request-v3.model';
 
 export interface ReturnRequestRouteDependencies {
     service: ReturnRequestApplicationService;
@@ -110,58 +106,6 @@ export function createReturnRequestRouter({ service, authenticate, clock }: Retu
     router.post('/requests/:id/admin/confirm-refund', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(req.user?403:401).json({error:'Admin role required.'});
         const data=await service.adminConfirmRefund({actorId:req.user.id,requestId:req.params.id,amountMinor:req.body?.amountMinor,currency:req.body?.currency,faultParty:req.body?.faultParty});
-        
-        try {
-            const amt = Number(req.body?.amountMinor) || 0;
-            const cur = String(req.body?.currency || 'VND');
-            const v3Obj: any = await ReturnRequestV3.findOne({ $or: [{ id: req.params.id }, { _id: req.params.id }] }).lean();
-            if (v3Obj) {
-                let order = await Order.findOne({ $or: [{ _id: mongoose.Types.ObjectId.isValid(v3Obj.order_id) ? v3Obj.order_id : null }, { order_code: v3Obj.order_id }] });
-                if (order) {
-                    order.refund_status = 'REFUNDED';
-                    await order.save();
-
-                    await Transaction.create({
-                        order_id: order._id,
-                        order_code: order.order_code,
-                        user_id: v3Obj.buyer_id,
-                        gateway: order.payment_method || 'VNPAY',
-                        gateway_transaction_id: `RF3-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
-                        amount: mongoose.Types.Decimal128.fromString(String(amt || 0)),
-                        type: 'REFUND',
-                        status: 'SUCCESS',
-                        refund_request_id: String(v3Obj.id || v3Obj._id),
-                        note: `Admin hoàn tiền thành công ${amt.toLocaleString('vi-VN')} ${cur} cho món hàng ${v3Obj.order_item_id} (Lỗi do: ${req.body?.faultParty})`,
-                    });
-                }
-            }
-
-            await ReturnRefundExecution.updateOne(
-                { request_id: req.params.id },
-                { $set: { status: 'REFUNDED', updated_at: new Date() } }
-            );
-
-            await ReturnRequestV3.updateOne(
-                { $or: [{ id: req.params.id }, { _id: req.params.id }] },
-                { $set: { linked_refund_status: 'REFUNDED', status: 'COMPLETED', updated_at: new Date() } }
-            );
-
-            await ReturnRequestLogV3.create({
-                request_id: req.params.id,
-                actor_id: req.user.id,
-                actor_role: 'ADMIN',
-                from_status: data.status,
-                to_status: 'COMPLETED',
-                reason: `Đã hoàn tiền thành công số tiền ${amt.toLocaleString('vi-VN')} ${cur} về tài khoản của người mua.`,
-                event_id: null,
-                created_at: new Date(),
-            });
-
-            const fresh = await ReturnRequestV3.findOne({ $or: [{ id: req.params.id }, { _id: req.params.id }] }).lean();
-            return res.json({ data: fresh || data });
-        } catch (err: any) {
-            console.error('[ADMIN CONFIRM REFUND EXECUTION ERROR]', err.message);
-        }
 
         return res.json({data});
     }));

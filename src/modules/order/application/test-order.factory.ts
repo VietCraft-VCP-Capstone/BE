@@ -14,6 +14,7 @@ export function buildTestDeliveredOrder(source: TestOrderInput, now = new Date()
         buyer_id: source.buyer_id,
         shop_id: source.shop_id,
         order_code: `TEST-REFUND-${now.getTime()}-${Math.floor(Math.random() * 9000 + 1000)}`,
+        is_simulated: true,
         payment_method: source.payment_method,
         payment_status: 'PENDING' as const,
         refund_status: 'NONE' as const,

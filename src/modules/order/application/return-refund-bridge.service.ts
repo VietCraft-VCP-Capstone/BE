@@ -1,4 +1,4 @@
-export type LinkedRefundStatus = 'PENDING_INTEGRATION';
+export type LinkedRefundStatus = 'PENDING_INTEGRATION' | 'PROCESSING' | 'PENDING' | 'FAILED' | 'REFUNDED';
 export type LinkedRefundFaultParty = 'BUYER' | 'SELLER' | 'PRINTER' | 'CARRIER' | 'PLATFORM';
 
 export interface LinkedRefundInput {
@@ -48,7 +48,7 @@ function isDuplicateKeyError(error: unknown): boolean {
 }
 
 function verifyStoredExecution(record: LinkedRefundExecution, requestId: string, orderItemId: string): LinkedRefundExecution {
-    if (record.requestId !== requestId || record.orderItemId !== orderItemId || record.status !== 'PENDING_INTEGRATION') {
+    if (record.requestId !== requestId || record.orderItemId !== orderItemId || !['PENDING_INTEGRATION', 'PROCESSING', 'PENDING', 'FAILED', 'REFUNDED'].includes(record.status)) {
         throw new Error('Linked Refund repository returned a record outside the allowed business key/status.');
     }
     return record;

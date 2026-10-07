@@ -10,7 +10,7 @@ export interface DeliveredEventSourceV3 { getVerifiedDeliveredEvent(orderId: str
 export interface OrderReturnSnapshotSource {
     getSnapshot(orderId: string, itemId: string): Promise<{ orderId:string; orderItemId:string; buyerId:string; sellerId:string; printerId:string; cohort:'POD'|'NORMAL'; itemStatus:'DELIVERED'|'SHIPPING'|'OTHER'; itemSnapshot:Record<string,unknown>; valid:boolean; orderedQuantity:number; replacedQuantity:number; refundedQuantity:number; activeReservedQuantity:number; policyVersion:string; schemaVersion:string; is_simulated?:boolean } | null>;
 }
-export interface ReturnRequestRefundBridge { /** Must be idempotent on requestId because retry may follow a timeout after remote create. */ createLinkedRefund(input: {requestId:string;orderItemId:string;orderId:string;resolution:'REFUND';faultParty:ReturnV3FaultParty;amountMinor:number;currency:string;adminDecisionId:string;finalizedByAdmin:true}): Promise<{ id:string; status:'PENDING_INTEGRATION' }> }
+export interface ReturnRequestRefundBridge { /** Must be idempotent on requestId because retry may follow a timeout after remote create. */ createLinkedRefund(input: {requestId:string;orderItemId:string;orderId:string;resolution:'REFUND';faultParty:ReturnV3FaultParty;amountMinor:number;currency:string;adminDecisionId:string;finalizedByAdmin:true}): Promise<{ id:string; status:string }> }
 export interface ReturnRequestClock { now(): Date }
 export interface ReturnEligibilityItemSource {
     getItems(orderId: string): Promise<Array<{ orderItemId?: string | null; buyerId:string; cohort:'POD'|'NORMAL'; itemStatus:'DELIVERED'|'SHIPPING'|'OTHER'; orderedQuantity:number; replacedQuantity:number; refundedQuantity:number; activeReservedQuantity:number }>>;
@@ -23,7 +23,7 @@ export interface ReturnRequestServiceDependencies {
     repository: ReturnRequestV3Repository; snapshotSource: OrderReturnSnapshotSource; deliveredEventSource: DeliveredEventSourceV3;
     eligibilityItemSource?: ReturnEligibilityItemSource;
     resolveBuyerOrderId: (orderId: unknown, buyerId: string) => Promise<string>;
-    bridge: ReturnRequestRefundBridge; clock: ReturnRequestClock; id: () => string; r06DeliveredWindowHours?: number;
+    bridge: ReturnRequestRefundBridge; executeRefund?: (request: ReturnRequestV3Data) => Promise<{ id: string; status: string }>; clock: ReturnRequestClock; id: () => string; r06DeliveredWindowHours?: number;
 }
 export type PrinterDecisionAction = 'APPROVE'|'REJECT'|'REQUEST_EVIDENCE'|'PROPOSE_FAULT_CHANGE';
 export type DeadlineOutcome = { kind:'REMIND_ADMIN'|'ADMIN_REVIEW'; requestId:string };
@@ -46,12 +46,19 @@ export class ReturnRequestApplicationService {
     private async createBridge(request: ReturnRequestV3Data): Promise<ReturnRequestV3Data> {
         const faultParty=request.fault_party, amountMinor=request.refund_amount_minor, currency=request.refund_currency, adminDecisionId=request.admin_decision_id;
         if (request.final_resolution !== 'REFUND' || !request.refund_admin_confirmed || !faultParty || !adminDecisionId || amountMinor == null || !currency) throw new Error('Refund requires an Admin-confirmed decision before bridge execution.');
-        if (request.linked_refund_id) return request;
+        if (request.linked_refund_id) return request.linked_refund_status === 'REFUNDED' ? request : this.executeLinkedRefund(request);
         if (!request.side_effect_started) {
             request = await this.deps.repository.transitionWithAudit(request.id, request.version, { side_effect_started:true, updated_at:this.now() }, { request_id:request.id, actor_id:'SYSTEM', actor_role:'SYSTEM', from_status:request.status, to_status:request.status, reason:'Admin-confirmed Refund bridge dispatch started.', event_id:adminDecisionId, created_at:this.now() });
         }
         const linked = await this.deps.bridge.createLinkedRefund({ requestId:request.id, orderItemId:request.order_item_id, orderId:request.order_id, resolution:'REFUND', faultParty, amountMinor, currency, adminDecisionId, finalizedByAdmin:true });
-        return this.deps.repository.transitionWithAudit(request.id, request.version, { linked_refund_id:linked.id, linked_refund_status:linked.status, updated_at:this.now() }, { request_id:request.id, actor_id:'SYSTEM', actor_role:'SYSTEM', from_status:request.status, to_status:request.status, reason:'Persisted idempotent linked Refund bridge reference.', event_id:linked.id, created_at:this.now() });
+        const linkedRequest = await this.deps.repository.transitionWithAudit(request.id, request.version, { linked_refund_id:linked.id, linked_refund_status:linked.status, updated_at:this.now() }, { request_id:request.id, actor_id:'SYSTEM', actor_role:'SYSTEM', from_status:request.status, to_status:request.status, reason:'Persisted idempotent linked Refund bridge reference.', event_id:linked.id, created_at:this.now() });
+        return this.executeLinkedRefund(linkedRequest);
+    }
+    /** Money moves only through the idempotent VNPay execution; the result is re-read so callers see the real status. */
+    private async executeLinkedRefund(request: ReturnRequestV3Data): Promise<ReturnRequestV3Data> {
+        if (!this.deps.executeRefund) return request;
+        await this.deps.executeRefund(request);
+        return (await this.deps.repository.findById(request.id)) ?? request;
     }
     async createBuyerRequest(input: { actorId:string; orderId:string; orderItemId:string; quantity:number; reasonCode:string; description:string; resolution:ReturnV3Resolution; evidence:readonly ReturnEvidenceItem[] }): Promise<ReturnRequestV3Data> {
         const orderId = await this.deps.resolveBuyerOrderId(input.orderId, input.actorId);

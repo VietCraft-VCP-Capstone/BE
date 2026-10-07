@@ -27,6 +27,7 @@ export interface IRefundRequest extends Document {
     admin_decision?: { decided_by: mongoose.Types.ObjectId; decision: RefundDecision; refund_type: 'FULL' | 'PARTIAL'; cost_bearer: 'SELLER' | 'PRINTER' | 'PLATFORM'; note: string; decided_at: Date };
     sla_deadlines: { seller_deadline: Date; printer_deadline?: Date };
     execution_status: 'NOT_STARTED' | 'PROCESSING' | 'SUCCEEDED' | 'FAILED';
+    execution_error?: string;
     created_at: Date;
     updated_at: Date;
 }
@@ -71,6 +72,7 @@ const RefundRequestSchema = new Schema<IRefundRequest>({
         printer_deadline: { type: Date },
     },
     execution_status: { type: String, enum: ['NOT_STARTED', 'PROCESSING', 'SUCCEEDED', 'FAILED'], default: 'NOT_STARTED' },
+    execution_error: { type: String },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 RefundRequestSchema.index({ status: 1, 'sla_deadlines.seller_deadline': 1 });

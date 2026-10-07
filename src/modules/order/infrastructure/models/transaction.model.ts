@@ -13,6 +13,7 @@ export interface ITransaction extends Document {
     status: 'SUCCESS' | 'FAILED' | 'PENDING';
     callback_payload?: Record<string, any>;
     refund_request_id?: string;
+    refund_execution_id?: string;
     note?: string;
     created_at: Date;
 }
@@ -39,9 +40,11 @@ const TransactionSchema = new Schema<ITransaction>({
     },
     callback_payload: { type: Schema.Types.Mixed, default: {} },
     refund_request_id: { type: String, index: true },
+    refund_execution_id: { type: String },
     note: { type: String }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: false }
 });
 
+TransactionSchema.index({ refund_execution_id: 1 }, { unique: true, partialFilterExpression: { refund_execution_id: { $type: 'string' } } });
 export const Transaction = mongoose.model<ITransaction>('Transaction', TransactionSchema, 'transactions');

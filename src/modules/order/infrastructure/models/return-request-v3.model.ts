@@ -2,10 +2,10 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export const RETURN_REQUEST_V3_ACTIVE_STATUSES = [
     'SUBMITTED', 'PENDING_PRINTER', 'PRINTER_PROPOSED_FAULT_CHANGE', 'APPROVED', 'REJECTED', 'DISPUTED',
-    'AWAITING_ADMIN_REFUND', 'WAITING_BUYER_CHOICE', 'WAITING_STOCK',
+    'AWAITING_ADMIN_REFUND', 'WAITING_BUYER_CHOICE', 'WAITING_STOCK', 'CONVERTED_TO_REFUND',
 ] as const;
 export type ReturnRequestV3Status = typeof RETURN_REQUEST_V3_ACTIVE_STATUSES[number]
-    | 'ADMIN_REJECTED' | 'CONVERTED_TO_REFUND' | 'REPLACEMENT_CREATED' | 'COMPLETED' | 'EXPIRED' | 'CANCELLED';
+    | 'ADMIN_REJECTED' | 'REPLACEMENT_CREATED' | 'COMPLETED' | 'EXPIRED' | 'CANCELLED';
 export type ReturnV3FaultParty = 'BUYER' | 'SELLER' | 'PRINTER' | 'CARRIER' | 'PLATFORM';
 export type ReturnV3Resolution = 'EXCHANGE' | 'REFUND';
 export type ReturnV3DeadlineType = 'P01' | 'P02' | 'P03' | 'P04' | 'P05' | 'P07' | 'P09' | 'P14' | 'P16' | 'P17' | 'R06_DELIVERED';
@@ -21,7 +21,8 @@ export interface IReturnRequestV3 extends Document {
     correction_used: boolean; printer_evidence_request_used: boolean; buyer_dispute_count: number; seller_appeal_used: boolean; side_effect_started: boolean; exchange_quota_consumed: boolean;
     refund_amount_minor?: number | null; refund_currency?: string | null; admin_decision_id?: string | null; linked_refund_id?: string | null; linked_refund_status?: string | null;
     evidence_requested_at?: Date | null; evidence_deadline_at?: Date | null; buyer_evidence_submitted_at?: Date | null; seller_fault_notified_at?: Date | null; seller_appeal_deadline_at?: Date | null;
-    r06_tracking_event_id?: string | null; r06_tracking_event_at?: Date | null; r06_tracking_status?: 'IN_TRANSIT' | 'LOST' | 'RETURNED' | 'UNKNOWN' | null; r06_tracking_latest_eta?: Date | null; r06_fault_source?: 'CARRIER' | 'PRINTER' | null;
+    r06_tracking_event_id?: string | null; r06_tracking_event_at?: Date | null; r06_tracking_status?: 'IN_TRANSIT' | 'LOST' | 'RETURNED' | 'DELIVERED' | 'UNKNOWN' | null; r06_tracking_latest_eta?: Date | null; r06_fault_source?: 'CARRIER' | 'PRINTER' | null;
+    deadline_reminded_for?: Date | null;
     proposed_fault_party?: ReturnV3FaultParty | null; proposed_classification?: string | null; is_simulated?: boolean;
     replacement_order_id?: string | null; replacement_order_code?: string | null;
     created_at: Date; updated_at: Date;
@@ -39,7 +40,7 @@ const ReturnRequestV3Schema = new Schema<IReturnRequestV3>({
     final_resolution: { type: String, enum: ['EXCHANGE', 'REFUND', null], default: null },
     fault_party: { type: String, enum: ['BUYER', 'SELLER', 'PRINTER', 'CARRIER', 'PLATFORM', null], default: null },
     fault_source: { type: String, enum: ['SYSTEM', 'PRINTER_PROPOSED', 'ADMIN', null], default: null },
-    status: { type: String, enum: [...RETURN_REQUEST_V3_ACTIVE_STATUSES, 'ADMIN_REJECTED', 'CONVERTED_TO_REFUND', 'REPLACEMENT_CREATED', 'COMPLETED', 'EXPIRED', 'CANCELLED'], required: true },
+    status: { type: String, enum: [...RETURN_REQUEST_V3_ACTIVE_STATUSES, 'ADMIN_REJECTED', 'REPLACEMENT_CREATED', 'COMPLETED', 'EXPIRED', 'CANCELLED'], required: true },
     version: { type: Number, required: true, min: 0, default: 0 }, deadline_at: { type: Date, default: null },
     deadline_type: { type: String, enum: ['P01', 'P02', 'P03', 'P04', 'P05', 'P07', 'P09', 'P14', 'P16', 'P17', 'R06_DELIVERED', null], default: null },
     policy_version: { type: String, required: true, trim: true, immutable: true }, schema_version: { type: String, required: true, trim: true, immutable: true },
@@ -49,13 +50,14 @@ const ReturnRequestV3Schema = new Schema<IReturnRequestV3>({
     exchange_quota_consumed: { type: Boolean, required: true, default: false }, buyer_dispute_count: { type: Number, min: 0, default: 0 }, seller_appeal_used: { type: Boolean, required: true, default: false }, side_effect_started: { type: Boolean, required: true, default: false },
  refund_amount_minor: { type: Number, min: 0, default: null }, refund_currency: { type: String, default: null }, admin_decision_id: { type: String, default: null }, linked_refund_id: { type: String, default: null }, linked_refund_status: { type: String, default: null },
  evidence_requested_at: { type: Date, default: null }, evidence_deadline_at: { type: Date, default: null }, buyer_evidence_submitted_at: { type: Date, default: null },
- r06_tracking_event_id: { type: String, default: null }, r06_tracking_event_at: { type: Date, default: null }, r06_tracking_status: { type: String, enum: ['IN_TRANSIT', 'LOST', 'RETURNED', 'UNKNOWN', null], default: null }, r06_tracking_latest_eta: { type: Date, default: null }, r06_fault_source: { type: String, enum: ['CARRIER', 'PRINTER', null], default: null },
+ r06_tracking_event_id: { type: String, default: null }, r06_tracking_event_at: { type: Date, default: null }, r06_tracking_status: { type: String, enum: ['IN_TRANSIT', 'LOST', 'RETURNED', 'DELIVERED', 'UNKNOWN', null], default: null }, r06_tracking_latest_eta: { type: Date, default: null }, r06_fault_source: { type: String, enum: ['CARRIER', 'PRINTER', null], default: null },
+ deadline_reminded_for: { type: Date, default: null },
  seller_fault_notified_at: { type: Date, default: null }, seller_appeal_deadline_at: { type: Date, default: null },
  proposed_fault_party: { type: String, enum: ['BUYER', 'SELLER', 'PRINTER', 'CARRIER', 'PLATFORM', null], default: null }, proposed_classification: { type: String, default: null },
  is_simulated: { type: Boolean, default: false, immutable: true },
  replacement_order_id: { type: String, default: null }, replacement_order_code: { type: String, default: null },
  }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }, versionKey: false, strict: 'throw' });
-ReturnRequestV3Schema.index({ order_item_id: 1 }, { unique: true, name: 'uniq_active_return_request_v3_per_item', partialFilterExpression: { status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES] } } });
+ReturnRequestV3Schema.index({ order_item_id: 1 }, { unique: true, name: 'uniq_active_return_request_v3_per_item_v2', partialFilterExpression: { status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES] } } });
 
 const ReturnEvidenceV3Schema = new Schema({
     request_id: { type: String, required: true, immutable: true }, evidence_id: { type: String, required: true, immutable: true },
