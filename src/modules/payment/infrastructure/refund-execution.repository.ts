@@ -12,7 +12,12 @@ export class MongoRefundExecutionRepository implements RefundExecutionRepository
     async loadContext(orderId: string): Promise<RefundContext> {
         const order = await Order.findOne(byCodeOrId(orderId)).lean();
         if (!order) throw new RefundExecutionError('Không tìm thấy đơn hàng.', 404);
-        const tx = await Transaction.findOne({ order_id: order._id, gateway: order.payment_method, type: 'PAYMENT', status: 'SUCCESS' }).sort({ created_at: -1 }).lean();
+        const findTx = () => Transaction.findOne({ order_id: order._id, gateway: order.payment_method, type: 'PAYMENT', status: 'SUCCESS' }).sort({ created_at: -1 }).lean();
+        let tx = await findTx();
+        if (!tx && order.payment_method === 'PAYOS') {
+            // Giao dịch thanh toán có thể chưa được ghi (lỗi trước đây): hỏi payOS và tạo bù.
+            if (await payosService.ensurePaymentTransaction(String(order._id)).catch(() => false)) tx = await findTx();
+        }
         const total = Math.max(0, num(order.financial_breakdown.subtotal) + num(order.financial_breakdown.shipping_fee) - num(order.financial_breakdown.coupon_discount));
         return {
             orderId: String(order._id), orderCode: order.order_code, buyerId: String(order.buyer_id),

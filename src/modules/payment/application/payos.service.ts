@@ -203,12 +203,39 @@ export class PayosService {
         if (dto.buyerId && order.buyer_id.toString() !== dto.buyerId) {
             throw new Error('Bạn không có quyền xem đơn hàng này.');
         }
-        if (order.payment_method !== 'PAYOS' || order.payment_status !== 'PENDING') {
+        if (order.payment_method !== 'PAYOS') return { paymentStatus: order.payment_status };
+        if (order.payment_status !== 'PENDING') {
+            // Đơn đã trả nhưng có thể thiếu giao dịch PAYMENT (lần ghi trước lỗi): tạo bù.
+            await this.ensurePaymentTransaction(String(order._id)).catch(err =>
+                logger.error(`[PayOS Sync] Không tạo bù được giao dịch cho #${order.order_code}: ${err?.message}`));
             return { paymentStatus: order.payment_status };
         }
 
+        const found = await this.findPaidLink(order);
+        if (found) await this.settlePaid(order, this.paymentInfoFrom(found));
+
+        const fresh = await Order.findById(order._id).select('payment_status').lean();
+        return { paymentStatus: fresh?.payment_status || order.payment_status };
+    }
+
+    /**
+     * Đơn payOS đã PAID mà thiếu giao dịch PAYMENT (ví dụ lần ghi trước bị index cũ chặn):
+     * hỏi lại payOS rồi tạo bù. Hoàn tiền cần giao dịch này để biết đã thu bao nhiêu, của ai.
+     */
+    async ensurePaymentTransaction(orderId: string): Promise<boolean> {
+        const order = await Order.findOne(byCodeOrId(orderId));
+        if (!order || order.payment_method !== 'PAYOS' || !['PAID', 'REFUNDED'].includes(order.payment_status)) return false;
+        if (await Transaction.exists({ order_id: order._id, type: 'PAYMENT' })) return true;
+        const found = await this.findPaidLink(order);
+        if (!found) return false;
+        await this.recordPaymentTransaction(order, this.paymentInfoFrom(found));
+        logger.warn(`[PayOS] Đã tạo bù giao dịch PAYMENT cho đơn #${order.order_code}.`);
+        return true;
+    }
+
+    /** Link mới nhất trước: khách thường trả bằng link vừa tạo. Chỉ nhận link PAID đúng số tiền. */
+    private async findPaidLink(order: IOrder): Promise<{ link: any; tx: any } | null> {
         const expectedAmount = Math.round(this.calculateOrderTotal(order));
-        // Link mới nhất trước: khách thường trả bằng link vừa tạo.
         for (const code of [...(order.payos_order_codes || [])].reverse()) {
             let link;
             try {
@@ -222,20 +249,46 @@ export class PayosService {
                 logger.error(`[PayOS Sync] Link ${code} của #${order.order_code} đã trả nhưng lệch số tiền (link ${link.amount}, đã trả ${link.amountPaid}, đơn ${expectedAmount}).`);
                 continue;
             }
-            const tx = link.transactions?.[0];
-            await this.settlePaid(order, {
-                amount: Number(link.amountPaid),
-                reference: String(tx?.reference || link.id),
-                paidAt: this.parsePaidAt(tx?.transactionDateTime),
-                responseCode: '00',
-                // Giữ orderCode và tài khoản người trả để hoàn tiền tra lại được (resolveRefundDestination).
-                payload: { source: 'sync', orderCode: link.orderCode, paymentLinkId: link.id, ...(tx || {}) },
-            });
-            break;
+            return { link, tx: link.transactions?.[0] };
         }
+        return null;
+    }
 
-        const fresh = await Order.findById(order._id).select('payment_status').lean();
-        return { paymentStatus: fresh?.payment_status || order.payment_status };
+    private paymentInfoFrom({ link, tx }: { link: any; tx: any }) {
+        return {
+            amount: Number(link.amountPaid),
+            reference: String(tx?.reference || link.id),
+            paidAt: this.parsePaidAt(tx?.transactionDateTime),
+            responseCode: '00',
+            // Giữ orderCode và tài khoản người trả để hoàn tiền tra lại được (resolveRefundDestination).
+            payload: { source: 'sync', orderCode: link.orderCode, paymentLinkId: link.id, ...(tx || {}) } as Record<string, any>,
+        };
+    }
+
+    /** Một đơn đúng một giao dịch PAYMENT payOS: upsert để webhook và đối soát chạy lại không tạo trùng. */
+    private async recordPaymentTransaction(
+        order: IOrder,
+        info: { amount: number; reference: string; paidAt: Date; responseCode: string; payload: Record<string, any> },
+    ): Promise<void> {
+        await Transaction.updateOne(
+            { order_id: order._id, type: 'PAYMENT', gateway: 'PAYOS' },
+            { $setOnInsert: {
+                order_id: order._id,
+                order_code: order.order_code,
+                user_id: order.buyer_id,
+                gateway: 'PAYOS',
+                gateway_transaction_id: info.reference,
+                gateway_bank_code: info.payload.counterAccountBankId || undefined,
+                gateway_response_code: info.responseCode,
+                amount: dec(info.amount),
+                type: 'PAYMENT',
+                status: 'SUCCESS',
+                payment_date: info.paidAt,
+                callback_payload: info.payload,
+                note: `Thanh toán thành công qua payOS #${info.reference}`,
+            } },
+            { upsert: true },
+        );
     }
 
     /** Webhook gửi "yyyy-MM-dd HH:mm:ss" giờ Việt Nam; API tra cứu có thể trả chuỗi ISO. */
@@ -288,21 +341,12 @@ export class PayosService {
         // Tiến trình khác vừa xử lý xong.
         if (!updatedOrder) return false;
 
-        await Transaction.create({
-            order_id: updatedOrder._id,
-            order_code: updatedOrder.order_code,
-            user_id: updatedOrder.buyer_id,
-            gateway: 'PAYOS',
-            gateway_transaction_id: reference,
-            gateway_bank_code: info.payload.counterAccountBankId || undefined,
-            gateway_response_code: info.responseCode,
-            amount: dec(paidAmount),
-            type: 'PAYMENT',
-            status: 'SUCCESS',
-            payment_date: info.paidAt,
-            callback_payload: info.payload,
-            note: `Thanh toán thành công qua payOS #${reference}`,
-        });
+        try {
+            await this.recordPaymentTransaction(updatedOrder, info);
+        } catch (err: any) {
+            // Đơn đã chuyển PAID; giao dịch thiếu sẽ được tạo bù ở lần đối soát/hoàn tiền sau.
+            logger.error(`[PayOS] Đơn #${orderCode} đã PAID nhưng không ghi được giao dịch PAYMENT: ${err?.message}`);
+        }
 
         if (isPod && isAutoApprove) {
             dispatchToPrinter(updatedOrder).catch((err: any) =>
