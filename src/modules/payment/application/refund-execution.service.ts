@@ -31,6 +31,15 @@ export class RefundExecutionError extends Error {
     constructor(message: string, readonly statusCode = 400) { super(message); }
 }
 
+/**
+ * Một lần gửi lệnh chi (kể cả gateway tự retry) xong trong dưới một phút. Bản ghi còn
+ * PROCESSING lâu hơn mức này nghĩa là tiến trình đã chết giữa chừng (BE khởi động lại,
+ * crash): kết quả chưa rõ, phải hỏi lại cổng như PENDING chứ không được để kẹt mãi.
+ */
+export const PROCESSING_STALE_MS = 2 * 60 * 1000;
+const isStaleProcessing = (record: PaymentRefundRecord, now = Date.now()) =>
+    record.status === 'PROCESSING' && now - new Date(record.updated_at).getTime() > PROCESSING_STALE_MS;
+
 /** The durable record and order lock are acquired before contacting the gateway. Unknown outcomes remain reserved. */
 export class RefundExecutionService {
     constructor(private readonly repository: RefundExecutionRepository, private readonly gateway: RefundGateway) {}
@@ -50,14 +59,15 @@ export class RefundExecutionService {
             await this.repository.materializeSuccess(context, record);
             return output('REFUNDED');
         }
-        if (record.status === 'PENDING') {
+        if (record.status === 'PENDING' || isStaleProcessing(record)) {
+            const stale = record.status === 'PROCESSING';
             // Querying is read-only at the gateway: a retry never repeats a transfer with an unknown outcome.
             let result: RefundGatewayResult;
             try { result = await this.gateway.query(context, record); }
             catch { return output('PENDING', 'Đang xác minh kết quả với cổng thanh toán.'); }
             // Vẫn chưa có gì mới thì không ghi lại: updated_at phải giữ mốc lần gửi lệnh, vì
             // gateway dựa vào nó để biết đã đợi đủ lâu chưa trước khi kết luận "chưa từng chi".
-            if (result.status !== 'PENDING' || Object.keys(result.data || {}).length) {
+            if (stale || result.status !== 'PENDING' || Object.keys(result.data || {}).length) {
                 await this.repository.recordResult(record._id, result.status, result);
             }
             if (result.status === 'SUCCEEDED') {
@@ -128,8 +138,8 @@ export class RefundExecutionService {
             await this.repository.materializeSuccess(context, record);
             return output('REFUNDED');
         }
-        if (record.status === 'PROCESSING') throw new RefundExecutionError('Hệ thống đang gửi lệnh chi, chưa thể xác nhận hoàn tiền thủ công.', 409);
-        if (record.status === 'PENDING') {
+        if (record.status === 'PROCESSING' && !isStaleProcessing(record)) throw new RefundExecutionError('Hệ thống đang gửi lệnh chi, chưa thể xác nhận hoàn tiền thủ công.', 409);
+        if (record.status === 'PENDING' || record.status === 'PROCESSING') {
             let result: RefundGatewayResult;
             try { result = await this.gateway.query(context, record); }
             catch { throw new RefundExecutionError('Chưa xác minh được với cổng thanh toán là lệnh chi trước đó có thành công không. Thử lại sau để tránh hoàn tiền hai lần.', 409); }

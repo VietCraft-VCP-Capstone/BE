@@ -1,6 +1,7 @@
 import { logger } from '../../../shared/utils/logger';
 import { PaymentRefundExecution } from '../infrastructure/refund-execution.model';
 import { Order } from '../../order/infrastructure/models/order.model';
+import { PROCESSING_STALE_MS } from './refund-execution.service';
 
 /**
  * payout payOS chốt kết quả bất đồng bộ nên hoàn tiền thường dừng ở PENDING. Job này chạy lại
@@ -29,10 +30,11 @@ export class PayosRefundReconcileJob {
         this.running = true;
         let processed = 0;
         try {
-            const pending = await PaymentRefundExecution.find({
-                status: 'PENDING',
-                updated_at: { $lte: new Date(Date.now() - minAgeMs) },
-            }).limit(50).lean();
+            const pending = await PaymentRefundExecution.find({ $or: [
+                { status: 'PENDING', updated_at: { $lte: new Date(Date.now() - minAgeMs) } },
+                // Tiến trình chết giữa lúc gửi lệnh chi: hỏi lại cổng thay vì để kẹt.
+                { status: 'PROCESSING', updated_at: { $lte: new Date(Date.now() - PROCESSING_STALE_MS) } },
+            ] }).limit(50).lean();
             for (const record of pending) {
                 const order = await Order.findById(record.order_id).select('payment_method').lean();
                 if (order?.payment_method !== 'PAYOS') continue;

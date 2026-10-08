@@ -62,3 +62,19 @@ test('đối soát: payOS trả PENDING không kèm dữ liệu thì KHÔNG ghi 
     assert.equal(r.status, 'PENDING');
     assert.deepEqual(repo.recorded, []);
 });
+
+test('PROCESSING quá hạn (tiến trình chết giữa lúc gửi lệnh chi): hỏi lại cổng, không kẹt và không chi lại mù', async () => {
+    const repo = new Repo('PROCESSING');
+    repo.rec!.updated_at = new Date(Date.now() - 3 * 60 * 1000);
+    let queried = 0;
+    const r = await new RefundExecutionService(repo, gw(async () => { queried++; return { status: 'SUCCEEDED', data: { payoutId: 'po1', reference: 'FT-X' } }; })).execute(input);
+    assert.equal(queried, 1);
+    assert.equal(r.status, 'REFUNDED');
+    assert.equal(repo.materialized.length, 1);
+});
+
+test('PROCESSING còn mới: vẫn coi là đang gửi lệnh, không hỏi cổng', async () => {
+    const repo = new Repo('PROCESSING');
+    const r = await new RefundExecutionService(repo, gw(async () => { throw new Error('không được hỏi'); })).execute(input);
+    assert.equal(r.status, 'PROCESSING');
+});
