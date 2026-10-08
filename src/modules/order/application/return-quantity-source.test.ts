@@ -31,7 +31,7 @@ test('quantity usage sums units and consumes terminal refunds/replacements witho
         { order_id: 'o1', order_item_id: 'i1', status: 'ADMIN_REJECTED', quantity: 20 },
         { order_id: 'other-order', order_item_id: 'i1', status: 'COMPLETED', final_resolution: 'REFUND', quantity: 100 },
     ];
-    ReturnRequestV3.aggregate = async (pipeline: any[]) => {
+    (ReturnRequestV3 as any).aggregate = async (pipeline: any[]) => {
         assert.deepEqual(pipeline[0].$match, { order_id: 'o1', order_item_id: 'i1' });
         const matched = requests.filter(row => row.order_id === 'o1' && row.order_item_id === 'i1');
         const result: any = {};
@@ -48,7 +48,7 @@ test('legacy pending/refunded order requests block V3 quantities, while a V3-onl
     const originalAggregate = ReturnRequestV3.aggregate;
     const originalFind = RefundRequest.findOne;
     let legacy: any = null;
-    ReturnRequestV3.aggregate = async () => [];
+    (ReturnRequestV3 as any).aggregate = async () => [];
     (RefundRequest as any).findOne = () => ({ select: () => ({ lean: async () => legacy }) });
     try {
         const order = { _id: 'o1', refund_status: 'REFUNDED' };
