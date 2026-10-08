@@ -56,7 +56,7 @@ const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
         bankAccounts: [],
         autoWithdraw: false,
         payoutCycle: 'WEEKLY_MON',
-        minPayoutAmount: 50000
+        minPayoutAmount: 500
     },
     notifications: {
         orders: {
@@ -139,6 +139,19 @@ export class SellerSettingsService {
             ...(customSettings.payment || {})
         };
 
+        // Fallback: If bankAccounts is empty but shop.bank_info exists, migrate it
+        if ((!payment.bankAccounts || payment.bankAccounts.length === 0) && shop.bank_info?.account_number) {
+            payment.bankAccounts = [{
+                id: 'bank_default_0',
+                bankName: shop.bank_info.bank_code || 'Ngân hàng thụ hưởng',
+                bankCode: shop.bank_info.bank_code || 'BANK',
+                accountNumber: shop.bank_info.account_number,
+                accountHolder: shop.bank_info.account_holder,
+                branch: 'Chi nhánh mặc định',
+                isDefault: true
+            }];
+        }
+
         const notifications: SellerNotificationSettingsDTO = {
             ...DEFAULT_SETTINGS.notifications,
             ...(customSettings.notifications || {})
@@ -217,14 +230,16 @@ export class SellerSettingsService {
 
         if (payload.payment) {
             const minPayout = Number(payload.payment.minPayoutAmount);
-            if (!isNaN(minPayout) && minPayout < 50000) {
-                throw new Error('Hạn mức rút tiền tối thiểu phải từ 50.000 VNĐ trở lên.');
+            if (payload.payment.autoWithdraw && !isNaN(minPayout) && minPayout > 0 && minPayout < 500) {
+                throw new Error('Hạn mức rút tiền tối thiểu phải từ 500 VNĐ trở lên.');
             }
+
+            const validMinPayout = !isNaN(minPayout) && minPayout >= 500 ? minPayout : 500;
 
             currentSettings.payment = {
                 ...(currentSettings.payment || {}),
                 ...payload.payment,
-                minPayoutAmount: !isNaN(minPayout) ? Math.max(50000, minPayout) : 50000
+                minPayoutAmount: validMinPayout
             };
             const defaultBank = payload.payment.bankAccounts?.find(b => b.isDefault) || payload.payment.bankAccounts?.[0];
             if (defaultBank) {

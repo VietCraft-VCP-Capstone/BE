@@ -5,7 +5,7 @@ import { adminRouter, adminPromotionsRouter, adminFinanceRouter } from '../modul
 import { categoryRouter } from '../modules/category';
 import { tagsRouter } from '../modules/tags';
 import { userRouter } from '../modules/user';
-import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter, sellerPromotionsRouter, sellerPrinterRouter } from '../modules/seller';
+import { sellerSettingsRouter, sellerOrdersRouter, sellerKycRouter, sellerPromotionsRouter, sellerPrinterRouter, sellerFinanceRouter } from '../modules/seller';
 
 import { cartRouter } from '../modules/cart';
 import { productsRouter, wishlistRouter, shopRouter } from '../modules/product';
@@ -35,6 +35,7 @@ router.use('/seller/kyc', sellerKycRouter);
 router.use('/seller/settings', sellerSettingsRouter);
 router.use('/seller/promotions', sellerPromotionsRouter);
 router.use('/seller/orders', sellerOrdersRouter);
+router.use('/seller/finance', sellerFinanceRouter);
 router.use('/seller/analytics', sellerAnalyticsRouter);
 router.use('/seller/printer', sellerPrinterRouter);
 
