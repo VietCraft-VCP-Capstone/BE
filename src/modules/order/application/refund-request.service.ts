@@ -307,7 +307,7 @@ export class RefundRequestService {
                 execution_error: result.error || '',
             } }, { runValidators: true });
             if (succeeded && changed.modifiedCount) void this.notify(doc.buyer_id.toString(), 'Hoàn tiền thành công',
-                `VNPay đã xác nhận hoàn ${result.amount.toLocaleString('vi-VN')}đ cho đơn của bạn.`,
+                `Cổng thanh toán đã xác nhận hoàn ${result.amount.toLocaleString('vi-VN')}đ cho đơn của bạn.`,
                 `/refund-requests/${doc._id}`, { refundRequestId: String(doc._id) })
                 .catch(error => logger.error(`[REFUND] Notification failed: ${error.message}`));
             return result;

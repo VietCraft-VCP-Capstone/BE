@@ -5,13 +5,14 @@ import { Order } from '../../order/infrastructure/models/order.model';
 import { Transaction } from '../../order/infrastructure/models/transaction.model';
 import { byCodeOrId, num, dec } from '../../order/utils';
 import { formatVnpayDate } from '../utils/vnpay.util';
+import { payosService } from '../application/payos.service';
 import { RefundExecutionError, type RefundContext, type RefundExecutionInput, type RefundExecutionRepository, type RefundGatewayResult } from '../application/refund-execution.service';
 
 export class MongoRefundExecutionRepository implements RefundExecutionRepository {
     async loadContext(orderId: string): Promise<RefundContext> {
         const order = await Order.findOne(byCodeOrId(orderId)).lean();
         if (!order) throw new RefundExecutionError('Không tìm thấy đơn hàng.', 404);
-        const tx = await Transaction.findOne({ order_id: order._id, gateway: 'VNPAY', type: 'PAYMENT', status: 'SUCCESS' }).sort({ created_at: -1 }).lean();
+        const tx = await Transaction.findOne({ order_id: order._id, gateway: order.payment_method, type: 'PAYMENT', status: 'SUCCESS' }).sort({ created_at: -1 }).lean();
         const total = Math.max(0, num(order.financial_breakdown.subtotal) + num(order.financial_breakdown.shipping_fee) - num(order.financial_breakdown.coupon_discount));
         return {
             orderId: String(order._id), orderCode: order.order_code, buyerId: String(order.buyer_id),
@@ -20,6 +21,7 @@ export class MongoRefundExecutionRepository implements RefundExecutionRepository
             paidAmount: tx ? Math.min(total, num(tx.amount)) : total,
             originalTransactionId: tx?.gateway_transaction_id || '',
             transactionDate: tx?.callback_payload?.vnp_CreateDate || tx?.callback_payload?.vnp_PayDate || formatVnpayDate(tx?.created_at),
+            ...(order.payment_method === 'PAYOS' ? { destination: await payosService.resolveRefundDestination(order, tx) } : {}),
         };
     }
     async findOrCreate(input: RefundExecutionInput): Promise<PaymentRefundRecord> {
@@ -56,10 +58,10 @@ export class MongoRefundExecutionRepository implements RefundExecutionRepository
     async materializeSuccess(context: RefundContext, record: PaymentRefundRecord): Promise<void> {
         await Transaction.updateOne({ refund_execution_id: record._id }, { $setOnInsert: {
             order_id: context.orderId, order_code: context.orderCode, user_id: context.buyerId,
-            gateway: 'VNPAY', gateway_transaction_id: record.gateway_response?.vnp_TransactionNo,
+            gateway: context.paymentMethod, gateway_transaction_id: record.gateway_response?.vnp_TransactionNo || record.gateway_response?.reference || record.gateway_response?.payoutId,
             gateway_response_code: '00', amount: dec(record.amount), type: 'REFUND', status: 'SUCCESS',
             refund_request_id: record.business_key, refund_execution_id: record._id,
-            callback_payload: record.gateway_response || {}, note: `VNPay xác nhận hoàn ${record.amount}đ cho đơn ${context.orderCode}.`,
+            callback_payload: record.gateway_response || {}, note: `${context.paymentMethod === 'PAYOS' ? 'payOS' : 'VNPay'} xác nhận hoàn ${record.amount}đ cho đơn ${context.orderCode}.`,
         } }, { upsert: true, runValidators: true });
         const refunded = await this.refundedAmount(context.orderId);
         await Order.updateOne({ _id: context.orderId }, { $set: { refund_status: 'REFUNDED', ...(refunded >= context.paidAmount ? { payment_status: 'REFUNDED' } : {}) } });

@@ -61,7 +61,9 @@ export interface IOrder extends Document {
     order_code: string;
     simulation_source_id?: mongoose.Types.ObjectId;
     is_simulated?: boolean;
-    payment_method: 'VNPAY' | 'MOMO' | 'COD';
+    payment_method: 'VNPAY' | 'PAYOS' | 'COD';
+    /** Mọi mã số payOS đã cấp cho đơn (mỗi lần tạo link là một mã mới) để webhook đối chiếu được link cũ. */
+    payos_order_codes?: number[];
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
     refund_status: 'NONE' | 'REQUESTED' | 'UNDER_REVIEW' | 'DISPUTED' | 'REFUNDED' | 'REFUND_REJECTED';
     refund_execution_id?: string;
@@ -139,7 +141,8 @@ const OrderSchema = new Schema<IOrder>({
     order_code: { type: String, required: true, unique: true, index: true },
     simulation_source_id: { type: Schema.Types.ObjectId, ref: 'Order', index: true },
     is_simulated: { type: Boolean, default: false, index: true },
-    payment_method: { type: String, required: true, enum: ['VNPAY', 'MOMO', 'COD'] },
+    payment_method: { type: String, required: true, enum: ['VNPAY', 'PAYOS', 'COD'] },
+    payos_order_codes: { type: [Number], default: undefined, index: true },
     payment_status: { type: String, required: true, enum: ['PENDING', 'PAID', 'REFUNDED'], default: 'PENDING' },
     refund_status: { type: String, required: true, enum: ['NONE', 'REQUESTED', 'UNDER_REVIEW', 'DISPUTED', 'REFUNDED', 'REFUND_REJECTED'], default: 'NONE', index: true },
     refund_execution_id: { type: String },

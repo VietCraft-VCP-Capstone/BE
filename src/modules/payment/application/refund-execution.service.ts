@@ -4,6 +4,8 @@ import type { PaymentRefundRecord, PaymentRefundStatus } from '../infrastructure
 export interface RefundContext {
     orderId: string; orderCode: string; buyerId: string; paymentMethod: string; paymentStatus: string;
     simulated: boolean; paidAmount: number; originalTransactionId: string; transactionDate: string;
+    /** Tài khoản nhận tiền hoàn khi cổng thu tiền không tự hoàn về nguồn (payOS). */
+    destination?: { bin: string; accountNo: string; accountName?: string };
 }
 export interface RefundExecutionInput { orderId: string; businessKey: string; amount: number; reason: string; createdBy: string; clientIp?: string }
 export interface RefundGatewayResult { status: 'SUCCEEDED' | 'PENDING' | 'FAILED'; data: Record<string, any>; request?: Record<string, any>; error?: string }
@@ -35,7 +37,8 @@ export class RefundExecutionService {
         if (!Number.isSafeInteger(input.amount) || input.amount <= 0) throw new RefundExecutionError('Số tiền hoàn phải là số nguyên VND lớn hơn 0.');
         const context = await this.repository.loadContext(input.orderId);
         if (context.simulated) throw new RefundExecutionError('Đơn mô phỏng không phát sinh hoàn tiền.', 422);
-        if (context.paymentMethod !== 'VNPAY') throw new RefundExecutionError('Phương thức này chưa tích hợp hoàn tiền tự động; tiền chưa được chuyển.', 422);
+        if (!['VNPAY', 'PAYOS'].includes(context.paymentMethod)) throw new RefundExecutionError('Phương thức này chưa tích hợp hoàn tiền tự động; tiền chưa được chuyển.', 422);
+        if (context.paymentMethod === 'PAYOS' && !context.destination) throw new RefundExecutionError('Không xác định được tài khoản ngân hàng đã dùng để thanh toán; tiền chưa được chuyển.', 422);
         input = { ...input, orderId: context.orderId };
         const record = await this.repository.findOrCreate(input);
         if (record.order_id !== context.orderId || record.amount !== input.amount) throw new RefundExecutionError('Yêu cầu hoàn tiền đã lưu có đơn hoặc số tiền khác.', 409);
@@ -59,7 +62,7 @@ export class RefundExecutionService {
         }
         if (record.status === 'PROCESSING') return output('PROCESSING');
         if (context.paymentStatus !== 'PAID') throw new RefundExecutionError('Chỉ hoàn tiền cho đơn đã thanh toán.');
-        if (!context.originalTransactionId) throw new RefundExecutionError('Không tìm thấy giao dịch VNPay gốc.');
+        if (!context.originalTransactionId) throw new RefundExecutionError('Không tìm thấy giao dịch thanh toán gốc.');
         if (!Number.isSafeInteger(context.paidAmount) || input.amount > context.paidAmount) throw new RefundExecutionError('Số tiền hoàn vượt số tiền đã thanh toán.');
         if (!await this.repository.claim(record)) return output('PROCESSING');
         if (!await this.repository.lockOrder(context.orderId, record._id)) {

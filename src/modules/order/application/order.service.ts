@@ -189,7 +189,7 @@ export class OrdersService {
         await PromotionService.releaseUsage(cleanCouponCode).catch(() => {});
       }
       throw new Error(
-        "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc MOMO.",
+        "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc PAYOS.",
       );
     }
 
