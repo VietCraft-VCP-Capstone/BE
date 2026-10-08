@@ -112,6 +112,7 @@ export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>
         shippingProvider: dbOrder.shipping_details?.carrier?.toLowerCase() || 'ghn',
         shippingCode: dbOrder.shipping_details?.tracking_number,
         paymentStatus: dbOrder.payment_status,
+        paidAt: dbOrder.paid_at || null,
         isStatusSimulation: Boolean(dbOrder.is_status_simulation),
         createdAt: dbOrder.created_at || dbOrder.createdAt || new Date(),
         is_reviewed: isOrderReviewed,

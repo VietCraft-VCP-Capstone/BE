@@ -263,6 +263,7 @@ export class PayosService {
             {
                 $set: {
                     payment_status: 'PAID',
+                    paid_at: info.paidAt,
                     order_status: isAutoApprove ? 'PROCESSING' : 'ORDERED',
                     seller_approval_status: isAutoApprove ? 'APPROVED' : 'PENDING_APPROVAL',
                     fulfillment_status: isAutoApprove ? 'QUEUED' : (isPod ? 'PENDING_APPROVAL' : 'UNFULFILLED'),
