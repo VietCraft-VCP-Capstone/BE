@@ -1,4 +1,4 @@
-import querystring from 'querystring';
+import { executeVnpayRefund } from './refund-runtime';
 import { config } from '../../../app/config';
 import { logger } from '../../../shared/utils/logger';
 import { formatVnpayDate, sortObject, createHmacSha512, stringifyParams } from '../utils/vnpay.util';
@@ -15,6 +15,21 @@ import { byCodeOrId, num, dec } from '../../order/utils';
 import { dispatchToPrinter } from '../../order/application/printer-dispatch.service';
 import { notificationService } from '../../notification';
 import { Shop } from '../../product/infrastructure/models/shop.model';
+
+/**
+ * Lỗi có kết quả dứt khoát từ VNPay mới được phép chuyển refund sang FAILED/retry.
+ * Lỗi mạng là kết quả chưa biết: retry mù có thể hoàn tiền hai lần.
+ */
+export class VNPayRefundError extends Error {
+    constructor(
+        message: string,
+        public readonly definitive: boolean,
+        public readonly providerCode?: string,
+    ) {
+        super(message);
+        this.name = 'VNPayRefundError';
+    }
+}
 
 export class VNPayService {
     private readonly tmnCode: string;
@@ -39,6 +54,19 @@ export class VNPayService {
         const shippingFee = num(order.financial_breakdown?.shipping_fee);
         const discount = num(order.financial_breakdown?.coupon_discount);
         return Math.max(0, subtotal + shippingFee - discount);
+    }
+
+    /** VNPay gửi vnp_PayDate theo yyyyMMddHHmmss ở múi giờ Việt Nam. */
+    private parsePayDate(value: unknown): Date {
+        const text = String(value || '');
+        if (!/^\d{14}$/.test(text)) return new Date();
+        const year = Number(text.slice(0, 4));
+        const month = Number(text.slice(4, 6)) - 1;
+        const day = Number(text.slice(6, 8));
+        const hour = Number(text.slice(8, 10));
+        const minute = Number(text.slice(10, 12));
+        const second = Number(text.slice(12, 14));
+        return new Date(Date.UTC(year, month, day, hour - 7, minute, second));
     }
 
     /**
@@ -165,7 +193,8 @@ export class VNPayService {
                             payment_status: 'PAID',
                             order_status: isAutoApprove ? 'PROCESSING' : 'ORDERED',
                             seller_approval_status: isAutoApprove ? 'APPROVED' : 'PENDING_APPROVAL',
-                            fulfillment_status: isAutoApprove ? 'QUEUED' : (isPod ? 'PENDING_APPROVAL' : 'UNFULFILLED')
+                            fulfillment_status: isAutoApprove ? 'QUEUED' : (isPod ? 'PENDING_APPROVAL' : 'UNFULFILLED'),
+                            paid_at: this.parsePayDate(payDateStr)
                         },
                         $push: {
                             status_history: {
@@ -199,7 +228,7 @@ export class VNPayService {
                     amount: dec(vnpAmount),
                     type: 'PAYMENT',
                     status: 'SUCCESS',
-                    payment_date: payDateStr ? new Date() : undefined,
+                    payment_date: this.parsePayDate(payDateStr),
                     callback_payload: query,
                     note: `Thanh toán thành công qua VNPay #${transactionNo}`
                 });
@@ -323,141 +352,13 @@ export class VNPayService {
      * Gọi API Hoàn tiền (Refund) của VNPay
      */
     async refundOrder(input: VNPayRefundInput): Promise<VNPayRefundResult> {
-        const order = await Order.findOne(byCodeOrId(input.orderId));
-        if (!order) {
-            throw new Error(`Không tìm thấy đơn hàng: ${input.orderId}`);
-        }
-
-        if (order.payment_status !== 'PAID') {
-            throw new Error(`Chỉ có thể hoàn tiền cho đơn hàng đã thanh toán thành công (Trạng thái hiện tại: ${order.payment_status})`);
-        }
-
-        // Tìm giao dịch gốc để lấy vnp_TransactionNo và ngày thanh toán
-        const originalTx = await Transaction.findOne({
-            order_id: order._id,
-            type: 'PAYMENT',
-            status: 'SUCCESS'
-        }).sort({ created_at: -1 });
-
-        if (!originalTx || !originalTx.gateway_transaction_id) {
-            throw new Error('Không tìm thấy mã giao dịch gốc của VNPay (vnp_TransactionNo) để yêu cầu hoàn tiền');
-        }
-
-        const orderTotal = this.calculateOrderTotal(order);
-        const refundAmount = input.amount && input.amount > 0 ? input.amount : orderTotal;
-        const transactionType = refundAmount >= orderTotal ? '02' : '03'; // '02': Toàn phần, '03': Một phần
-
-        const requestId = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
-        const createDate = formatVnpayDate(new Date());
-        const transactionDate = originalTx.callback_payload?.['vnp_PayDate'] || formatVnpayDate(originalTx.created_at);
-        const orderInfo = input.reason || `Hoan tien don hang VietCraft #${order.order_code}`;
-        const ipAddr = input.clientIp || '127.0.0.1';
-        const vnp_Amount = Math.round(refundAmount * 100);
-
-        // CẤU TRÚC KÝ BẮT BUỘC CỦA VNPAY REFUND API (Nối chuỗi bằng dấu '|')
-        const signData = [
-            requestId,
-            '2.1.0',
-            'refund',
-            this.tmnCode,
-            transactionType,
-            order.order_code,
-            vnp_Amount,
-            originalTx.gateway_transaction_id,
-            transactionDate,
-            input.createdBy || 'Admin',
-            createDate,
-            ipAddr,
-            orderInfo
-        ].join('|');
-
-        const secureHash = createHmacSha512(this.hashSecret, signData);
-
-        const requestBody = {
-            vnp_RequestId: requestId,
-            vnp_Version: '2.1.0',
-            vnp_Command: 'refund',
-            vnp_TmnCode: this.tmnCode,
-            vnp_TransactionType: transactionType,
-            vnp_TxnRef: order.order_code,
-            vnp_Amount: vnp_Amount,
-            vnp_OrderInfo: orderInfo,
-            vnp_TransactionNo: originalTx.gateway_transaction_id,
-            vnp_TransactionDate: transactionDate,
-            vnp_CreateBy: input.createdBy || 'Admin',
-            vnp_CreateDate: createDate,
-            vnp_IpAddr: ipAddr,
-            vnp_SecureHash: secureHash
-        };
-
-        logger.info(`[VNPay Refund] Sending refund request for Order #${order.order_code} (Amount: ${refundAmount} VND)`);
-
-        const response = await fetch(this.apiUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody),
+        const result = await executeVnpayRefund({
+            orderId: input.orderId, businessKey: input.refundRequestId || '', amount: Number(input.amount),
+            reason: input.reason, createdBy: input.createdBy, clientIp: input.clientIp,
         });
-
-        const data = (await response.json()) as Record<string, any>;
-        logger.info(`[VNPay Refund] Response:`, data);
-
-        if (data.vnp_ResponseCode === '00') {
-            // Cập nhật trạng thái đơn hàng sang REFUNDED
-            await Order.findByIdAndUpdate(order._id, {
-                $set: {
-                    payment_status: 'REFUNDED',
-                    order_status: 'CANCELLED'
-                },
-                $push: {
-                    status_history: {
-                        status: 'CANCELLED',
-                        changed_at: new Date(),
-                        note: `VNPay Refund: Hoàn tiền thành công (${refundAmount.toLocaleString('vi-VN')}₫). Lý do: ${orderInfo}`
-                    }
-                }
-            });
-
-            // Ghi nhận Transaction REFUND
-            await Transaction.create({
-                order_id: order._id,
-                order_code: order.order_code,
-                user_id: order.buyer_id,
-                gateway: 'VNPAY',
-                gateway_transaction_id: data.vnp_TransactionNo || originalTx.gateway_transaction_id,
-                gateway_response_code: data.vnp_ResponseCode,
-                amount: dec(refundAmount),
-                type: 'REFUND',
-                status: 'SUCCESS',
-                refund_request_id: requestId,
-                callback_payload: data,
-                note: `Hoàn tiền thành công: ${orderInfo}`
-            });
-
-            return {
-                success: true,
-                message: 'Yêu cầu hoàn tiền thành công',
-                data
-            };
-        } else {
-            // Ghi nhận Transaction REFUND FAILED
-            await Transaction.create({
-                order_id: order._id,
-                order_code: order.order_code,
-                user_id: order.buyer_id,
-                gateway: 'VNPAY',
-                gateway_response_code: data.vnp_ResponseCode,
-                amount: dec(refundAmount),
-                type: 'REFUND',
-                status: 'FAILED',
-                refund_request_id: requestId,
-                callback_payload: data,
-                note: `Hoàn tiền thất bại: ${data.vnp_Message || data.vnp_ResponseCode}`
-            });
-
-            throw new Error(`VNPay Refund thất bại [Mã lỗi ${data.vnp_ResponseCode}]: ${data.vnp_Message || 'Từ chối giao dịch'}`);
-        }
+        return { success: result.status === 'REFUNDED', status: result.status, executionId: result.executionId,
+            message: result.error || (result.status === 'REFUNDED' ? 'VNPay đã xác nhận hoàn tiền.' : 'Yêu cầu hoàn tiền đang chờ cổng thanh toán xác nhận.'),
+            data: result };
     }
 }
 

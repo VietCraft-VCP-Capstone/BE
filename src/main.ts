@@ -1,3 +1,5 @@
+import dns from 'node:dns';
+import net from 'node:net';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import app from './app/app';
@@ -5,6 +7,11 @@ import { config, initializeDatabases } from './app/config';
 import { logger } from './shared/utils/logger';
 import { ChatGateway } from './modules/chat';
 import { NotificationGateway } from './modules/notification';
+// payOS (và một số cổng khác) whitelist theo IPv4. Máy có IPv6 thì Node mặc định có thể
+// kết nối qua IPv6, cổng thấy địa chỉ lạ và trả 403 dù IPv4 đã được thêm. Ưu tiên IPv4.
+dns.setDefaultResultOrder('ipv4first');
+net.setDefaultAutoSelectFamily(false);
+
 // Khởi động server
 async function bootstrap() {
     const server = http.createServer(app);
@@ -22,6 +29,18 @@ async function bootstrap() {
 
     const { FulfillmentQueueService } = await import('./modules/order/application/fulfillment-queue.service');
     FulfillmentQueueService.startWorker();
+
+    const { RefundTimeoutJob } = await import('./modules/order/application/refund-timeout.job');
+    RefundTimeoutJob.start();
+
+    const { ReturnDeadlineJob } = await import('./modules/order/application/return-deadline.job');
+    ReturnDeadlineJob.start();
+
+    const { PayosPaymentReconcileJob } = await import('./modules/payment/application/payos-payment-reconcile.job');
+    PayosPaymentReconcileJob.start();
+
+    const { PayosRefundReconcileJob } = await import('./modules/payment/application/payos-refund-reconcile.job');
+    PayosRefundReconcileJob.start();
 
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);

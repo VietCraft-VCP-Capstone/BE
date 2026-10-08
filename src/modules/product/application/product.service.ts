@@ -23,6 +23,8 @@ import {
 } from './product.dto';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
+import { CommissionSetting } from '../../../shared/services/commission-setting.service';
+import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
 
 function getColorHex(colorName: string): string {
@@ -716,7 +718,9 @@ export class ProductsService {
         let variantsToWrite: VariantInput[] = data.variants;
         let podFields: any = {};
         if (data.isPod && data.blank) {
-            const built = await ProductsService.buildPodArtifacts(data.blank, data.podVariants!, data.designPlacements!);
+            const built = await ProductsService.buildPodArtifacts(
+                data.blank, data.podVariants!, data.designPlacements!, data.category?._id?.toString() ?? null,
+            );
             images = (Array.isArray(payload.images) && payload.images.length > 0)
                 ? payload.images
                 : built.images;
@@ -869,7 +873,13 @@ export class ProductsService {
         });
 
         const baseSku = payload.sku || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
-        await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock));
+        // Giá người bán nhập là giá họ nhận; niêm yết lên sàn là giá đó cộng hoa hồng.
+        // Mức hoa hồng tra theo danh mục chính + loại sản phẩm, không phải mức phẳng của sàn.
+        const listPrice = withCommission(
+            basePrice,
+            await CommissionSetting.resolvePercent(catalog.category!._id.toString(), 'READY_TO_SHIP'),
+        );
+        await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice));
         if (tags.length) {
             await Tag.updateMany({ _id: { $in: tags.map(t => t._id) } }, { $inc: { product_count: 1 } });
         }
@@ -880,11 +890,17 @@ export class ProductsService {
     }
 
 
+    /**
+     * `basePrice` là giá người bán nhận (dùng để suy ra giá vốn), `listPrice` là giá niêm yết
+     * đã cộng hoa hồng sàn. Hai số khác nhau nên phải truyền riêng — lấy listPrice tính giá vốn
+     * thì giá vốn bị thổi theo hoa hồng.
+     */
     private static colorsToVariants(
         colors: ProductColorVariantDTO[] | undefined,
         baseSku: string,
         basePrice: number,
-        totalStock: number
+        totalStock: number,
+        listPrice: number
     ): VariantInput[] {
         const baseCost = Math.round(basePrice * 0.7);
 
@@ -893,7 +909,7 @@ export class ProductsService {
                 sku: baseSku,
                 color: 'Tự nhiên',
                 base_cost: baseCost,
-                price: basePrice,
+                price: listPrice,
                 stock: totalStock,
             }];
         }
@@ -904,7 +920,7 @@ export class ProductsService {
             color: c.name,
             mockup_image: c.hex,
             base_cost: baseCost,
-            price: basePrice,
+            price: listPrice,
             stock: i === colors.length - 1 ? totalStock - perColor * (colors.length - 1) : perColor,
         }));
     }
@@ -920,10 +936,21 @@ export class ProductsService {
             : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO);
     }
 
+    /**
+     * Mức hoa hồng áp cho một sản phẩm ĐÃ LƯU, tra theo danh mục chính và loại của nó.
+     * Dùng ở đường sửa, nơi chỉ còn document chứ không còn payload gốc.
+     */
+    private static async resolveProductCommission(mp: any): Promise<number> {
+        const categoryId = mp?.category_ids?.[0] ? String(mp.category_ids[0]) : null;
+        return CommissionSetting.resolvePercent(categoryId, mp?.product_type || 'READY_TO_SHIP');
+    }
+
     private static async buildPodArtifacts(
         blank: Blank,
         podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[],
-        placements: any[]
+        placements: any[],
+        /** Danh mục chính của sản phẩm — quyết định mức hoa hồng áp cho biến thể POD. */
+        categoryId: string | null
     ): Promise<{ images: string[]; variants: VariantInput[] }> {
 
         const ids = new Set<string>();
@@ -971,15 +998,18 @@ export class ProductsService {
         }
         const images = mockups.length ? mockups : [blank.default_image];
 
+        // Người bán nhận tiền phôi + markup; hoa hồng sàn cộng thêm lên giá niêm yết.
+        const commissionPercent = await CommissionSetting.resolvePercent(categoryId, 'POD_TEMPLATE');
         const variants: VariantInput[] = podVariants.map(pv => {
             const vari = blank.variations?.find(v => v.sku === pv.sku);
+            const baseCost = pv.base_cost ?? vari?.base_cost ?? 50000;
             return {
                 sku: pv.sku,
                 color: pv.color || vari?.color || 'Màu mặc định',
                 size: pv.size || vari?.size || 'Freesize',
                 material: pv.material || vari?.material || (blank as any)?.material || 'Cotton',
-                base_cost: pv.base_cost ?? vari?.base_cost ?? 50000,
-                price: (pv.base_cost ?? vari?.base_cost ?? 50000) + pv.markup,
+                base_cost: baseCost,
+                price: withCommission(baseCost + pv.markup, commissionPercent),
                 stock: pv.stock,
             };
         });
@@ -1184,19 +1214,29 @@ export class ProductsService {
         if (payload.colors && payload.colors.length > 0) {
             const existing = await MongoVariant.find({ product_id: mp._id }).lean();
             const baseSku = payload.sku || existing[0]?.sku?.replace(/-\d+$/, '') || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
-            const basePrice = payload.price !== undefined
-                ? Number(payload.price)
-                : parseFloat(existing[0]?.retail_price?.toString() || '0');
             const totalStock = payload.stock !== undefined
                 ? Number(payload.stock)
                 : existing.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
 
-            await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock));
+            // `payload.price` là giá người bán NHẬN, còn giá trong DB là giá NIÊM YẾT (đã gồm
+            // hoa hồng). Sửa màu mà không nhập giá thì giữ nguyên giá niêm yết từng đồng, đồng
+            // thời bóc hoa hồng ra để giá vốn vẫn tính trên cùng cơ sở như lúc tạo sản phẩm.
+            const dbPrice = parseFloat(existing[0]?.retail_price?.toString() || '0');
+            const commissionPercent = await ProductsService.resolveProductCommission(mp);
+            const basePrice = payload.price !== undefined
+                ? Number(payload.price)
+                : dbPrice - commissionFromGross(dbPrice, commissionPercent);
+            const listPrice = payload.price !== undefined
+                ? withCommission(basePrice, commissionPercent)
+                : dbPrice;
+            await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice));
         } else {
             const updates: any = {};
             if (payload.price !== undefined) {
-                updates.retail_price = mongoose.Types.Decimal128.fromString(Number(payload.price).toString());
-                updates.base_cost = mongoose.Types.Decimal128.fromString((Number(payload.price) * 0.7).toFixed(0));
+                const netPrice = Number(payload.price);
+                const grossPrice = withCommission(netPrice, await ProductsService.resolveProductCommission(mp));
+                updates.retail_price = mongoose.Types.Decimal128.fromString(grossPrice.toString());
+                updates.base_cost = mongoose.Types.Decimal128.fromString((netPrice * 0.7).toFixed(0));
             }
             if (payload.stock !== undefined) updates.stock_quantity = Number(payload.stock);
             if (payload.sku !== undefined) updates.sku = payload.sku;

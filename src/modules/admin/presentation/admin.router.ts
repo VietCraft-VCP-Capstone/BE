@@ -2,8 +2,29 @@ import { Router, Response, NextFunction } from 'express';
 import { adminService } from '../application/admin.service';
 import { parsePageParams } from '../../../shared/utils/pagination';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { CommissionSetting } from '../../../shared/services/commission-setting.service';
 
 const router = Router();
+
+/**
+ * Lỗi do admin nhập sai (thông điệp tiếng Việt do service ném ra) trả 400 kèm nguyên văn để
+ * hiện thẳng lên form; lỗi còn lại đẩy sang error handler chung, không lộ chi tiết nội bộ.
+ */
+function badRequestOrNext(error: any, res: Response, next: NextFunction) {
+    const known = [
+        'Phần trăm hoa hồng',
+        'Danh mục không hợp lệ',
+        'Loại sản phẩm không hợp lệ',
+        'Luật phải giới hạn',
+        'Đã có luật',
+        'Luật không tồn tại',
+        'Tối đa',
+    ];
+    if (known.some(k => error?.message?.startsWith(k))) {
+        return res.status(400).json({ success: false, error: error.message });
+    }
+    return next(error);
+}
 
 // Tất cả các route admin yêu cầu xác thực và quyền ADMIN
 router.use(authenticate);
@@ -127,6 +148,71 @@ router.post('/seller-applications/:id/reject', async (req: AuthenticatedRequest,
         res.status(200).json(result);
     } catch (error: any) {
         res.status(400).json({ success: false, error: error.message });
+    }
+});
+
+// ==========================================
+// 3. CẤU HÌNH SÀN — % HOA HỒNG
+// ==========================================
+
+/**
+ * Toàn bộ dữ liệu trang cấu hình: mức đang áp dụng, lịch sử đổi, và số liệu để ước lượng
+ * tác động. Gộp một lượt gọi vì ba phần luôn hiện cùng nhau trên một màn.
+ */
+router.get('/settings/commission', async (_req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        res.json({ success: true, data: await adminService.getCommissionOverview() });
+    } catch (error: any) {
+        next(error);
+    }
+});
+
+/**
+ * Đặt mức MẶC ĐỊNH của sàn. Chỉ ảnh hưởng sản phẩm tạo/sửa giá và đơn phát sinh từ lúc này;
+ * giá đã niêm yết không tự tính lại.
+ */
+router.put('/settings/commission', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const percent = await CommissionSetting.setPercent(req.body?.percent, req.user!.id);
+        res.json({ success: true, data: { percent }, message: `Đã đặt mức mặc định ${percent}%` });
+    } catch (error: any) {
+        return badRequestOrNext(error, res, next);
+    }
+});
+
+/** Thêm luật mới, hoặc sửa luật có sẵn khi body kèm `id`. */
+router.put('/settings/commission/rules', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const rule = await CommissionSetting.saveRule(req.body || {}, req.user!.id);
+        res.json({ success: true, data: rule, message: `Đã lưu luật ${rule.percent}%` });
+    } catch (error: any) {
+        return badRequestOrNext(error, res, next);
+    }
+});
+
+router.delete('/settings/commission/rules/:id', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        await CommissionSetting.deleteRule(req.params.id, req.user!.id);
+        res.json({ success: true, message: 'Đã xoá luật' });
+    } catch (error: any) {
+        return badRequestOrNext(error, res, next);
+    }
+});
+
+// ==========================================
+// 4. THỐNG KÊ THU NHẬP SÀN
+// ==========================================
+
+/**
+ * Số liệu tài chính của sàn trong N ngày gần nhất (mặc định 30 — BR-114).
+ * Chỉ tính đơn đã thanh toán (BR-141), tối đa 365 ngày (BR-118).
+ */
+router.get('/finance/overview', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const days = Number(req.query.days) || 30;
+        res.json({ success: true, data: await adminService.getFinanceOverview(days) });
+    } catch (error: any) {
+        next(error);
     }
 });
 

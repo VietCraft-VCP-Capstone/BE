@@ -83,7 +83,7 @@ export class SellerOrdersService {
             };
         }
 
-        const baseMatch: Record<string, any> = { shop_id: shopId };
+        const baseMatch: Record<string, any> = { shop_id: shopId, is_simulated: { $ne: true } };
         const search = String(query.search || '').trim();
         if (search) {
             const rx = new RegExp(escapeRegex(search), 'i');
@@ -169,6 +169,7 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
@@ -194,6 +195,7 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
@@ -238,6 +240,7 @@ export class SellerOrdersService {
         if (next === 'DELIVERED') {
             if (order.payment_method === 'COD' && order.payment_status === 'PENDING') {
                 order.payment_status = 'PAID';
+                order.paid_at = new Date();
             }
             order.fulfillment_status = 'DELIVERED';
             if (isPod) {
@@ -291,12 +294,17 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
+        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
+        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
+            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
+        }
 
         const isPod = Boolean(
             order.is_pod ||
@@ -350,12 +358,17 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
+        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
+        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
+            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
+        }
 
         // Cập nhật trạng thái duyệt của người bán
         order.seller_approval_status = 'APPROVED';
@@ -399,6 +412,7 @@ export class SellerOrdersService {
 
         const order = await Order.findOne({
             shop_id: shopId,
+            is_simulated: { $ne: true },
             $or: [
                 { order_code: id },
                 { _id: mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null }
@@ -437,4 +451,3 @@ export class SellerOrdersService {
 }
 
 export default SellerOrdersService;
-

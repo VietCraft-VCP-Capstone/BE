@@ -18,11 +18,15 @@ export class FulfillmentQueueService {
     /**
      * Đưa đơn hàng vào hàng đợi fulfillment và tiến hành gọi dispatch
      */
-    static async enqueueOrder(orderId: string | mongoose.Types.ObjectId): Promise<IFulfillmentJob> {
+    static async enqueueOrder(
+        orderId: string | mongoose.Types.ObjectId,
+        notBefore: Date = new Date(),
+    ): Promise<IFulfillmentJob> {
         const order = await OrderModel.findById(orderId);
         if (!order) {
             throw new Error(`Không tìm thấy đơn hàng ID: ${orderId}`);
         }
+        if (order.is_simulated) throw new Error('Đơn mô phỏng không thể vào hàng đợi fulfillment.');
 
         // Cập nhật trạng thái đơn sang QUEUED
         order.fulfillment_status = 'QUEUED';
@@ -43,15 +47,22 @@ export class FulfillmentQueueService {
                 status: 'PENDING',
                 attempts: 0,
                 max_attempts: 4,
-                next_run_at: new Date(),
+                next_run_at: notBefore,
                 error_history: []
             });
+        } else if (job.status === 'PENDING' && job.next_run_at.getTime() < notBefore.getTime()) {
+            // Không cho một lần enqueue lặp vô tình rút ngắn refund window.
+            job.next_run_at = notBefore;
+            await job.save();
         }
 
-        // Thực thi ngay lập tức lần đầu (không cần đợi timer)
-        this.processJob(job).catch(err => {
-            logger.error(`[FULFILLMENT QUEUE] Lỗi khi xử lý job ${job!._id}: ${err.message}`);
-        });
+        // Chỉ thực thi ngay khi đã qua thời điểm được phép. Job còn trong refund window
+        // sẽ do worker nhặt lên sau, tránh xưởng sản xuất một đơn sắp được hoàn tiền.
+        if (job.next_run_at.getTime() <= Date.now()) {
+            this.processJob(job).catch(err => {
+                logger.error(`[FULFILLMENT QUEUE] Lỗi khi xử lý job ${job!._id}: ${err.message}`);
+            });
+        }
 
         return job;
     }
@@ -64,6 +75,25 @@ export class FulfillmentQueueService {
         if (!order) {
             job.status = 'FAILED';
             job.last_error = 'Đơn hàng không còn tồn tại trong database';
+            await job.save();
+            return false;
+        }
+        if (order.is_simulated) {
+            job.status = 'FAILED';
+            job.last_error = 'Đơn mô phỏng bị chặn khỏi fulfillment.';
+            await job.save();
+            return false;
+        }
+
+        // Refund/cancel có thể thắng race ngay trước lúc worker nhặt job. Kiểm tra lại
+        // order tại thời điểm thực thi để không gửi một đơn đã đóng sang xưởng.
+        if (
+            order.payment_status === 'REFUNDED'
+            || order.order_status === 'CANCELLED'
+            || order.fulfillment_status === 'CANCELLED'
+        ) {
+            job.status = 'FAILED';
+            job.last_error = 'ORDER_CANCELED_OR_REFUNDED';
             await job.save();
             return false;
         }

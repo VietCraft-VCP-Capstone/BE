@@ -1,8 +1,9 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { OrdersService } from '../application/order.service';
-import { authenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { config } from '../../../app/config';
+import { authenticate, AuthenticatedRequest, requireRole } from '../../../app/middleware/auth.middleware';
+
 import { logger } from '../../../shared/utils/logger';
 
 const router = Router();

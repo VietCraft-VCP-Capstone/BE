@@ -229,7 +229,6 @@ export async function applyBlankColor(blankSharp: any, colorHex?: string): Promi
     }
 }
 
-
 export async function generateMockup(
     blankImageUrl: string,
     designUrl: string,
