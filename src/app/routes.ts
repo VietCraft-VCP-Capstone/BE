@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authRouter } from '../modules/auth';
 
-import { adminRouter, adminPromotionsRouter } from '../modules/admin';
+import { adminRouter, adminPromotionsRouter, adminFinanceRouter } from '../modules/admin';
 import { categoryRouter } from '../modules/category';
 import { tagsRouter } from '../modules/tags';
 import { userRouter } from '../modules/user';
@@ -28,6 +28,7 @@ router.use('/auth', authRouter);
 router.use('/admin/categories', categoryRouter);
 router.use('/admin/tags', tagsRouter);
 router.use('/admin/promotions', adminPromotionsRouter);
+router.use('/admin/finance', adminFinanceRouter);
 router.use('/admin', adminRouter);
 router.use('/users', userRouter);
 router.use('/seller/kyc', sellerKycRouter);

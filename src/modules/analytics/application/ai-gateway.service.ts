@@ -61,6 +61,7 @@ export class AiGatewayService {
             Accept: 'application/json',
             'X-Gateway-Secret': config.aiGatewaySecret,
             'X-Shop-Id': options.shopId,
+            'X-Debug-Shop-Id': options.shopId,
         };
         if (options.body) headers['Content-Type'] = 'application/json';
 

@@ -10,6 +10,7 @@ import { dispatchToPrinter } from "./printer-dispatch.service";
 import { PromotionService } from "../../promotion/application/promotion.service";
 import { Review } from "../infrastructure/models/review.model";
 import { OrderResponse, DEFAULT_SHIPPING_FEE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
+import { platformFinanceService } from "../../admin/application/platform-finance.service";
 import { CommissionSetting } from "../../../shared/services/commission-setting.service";
 import { commissionFromGross } from "../../../shared/utils/commission";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
@@ -188,10 +189,25 @@ export class OrdersService {
       await PromotionService.claimUsage(cleanCouponCode, buyerId);
     }
 
-    // ponytail: phí sàn dùng luật HIỆN HÀNH, không chụp lại luật lúc niêm yết. Admin đổi mức
-    // giữa lúc sản phẩm đã lên sàn và lúc khách đặt thì phần chênh lệch lệch về phía sàn hoặc
-    // người bán. Cần chính xác tuyệt đối thì snapshot commission_percent xuống product_variants
-    // lúc ghi giá, rồi đọc lại ở đây.
+    // Đọc chính sách phí sàn động từ PlatformCostConfig (fallback 10%, min 10.000đ)
+    let commissionRate = 0.10;
+    let minOrderFee = 10000;
+    try {
+      const financeConfig = await platformFinanceService.getConfig();
+      if (financeConfig?.policies) {
+        commissionRate = financeConfig.policies.default_commission_rate ?? 0.10;
+        minOrderFee = financeConfig.policies.min_order_fee ?? 10000;
+      }
+    } catch {
+      // Giữ default fallback
+    }
+
+    const rawPlatformFee = Math.round(subtotal * commissionRate);
+    const platformFee = Math.max(rawPlatformFee, minOrderFee);
+
+    // Tính tổng chi phí in ấn (base_cost phôi in)
+    const totalPrintingCost = orderItems.reduce((acc, it) => acc + (num(it.base_cost) * it.quantity), 0);
+
     // Nếu là Shop coupon, shop chịu trừ tiền. Nếu là Platform coupon, sàn bù tiền cho shop.
     const sellerPayoutAmount = isPlatformCoupon
       ? Math.max(0, subtotal - platformFee)
@@ -252,6 +268,8 @@ export class OrdersService {
         coupon_discount: dec(discount),
         platform_fee: dec(platformFee),
         seller_payout_amount: dec(sellerPayoutAmount),
+        commission_rate: commissionRate,
+        total_printing_cost: dec(totalPrintingCost),
       },
       coupon_code: cleanCouponCode || null,
       status_history: [
