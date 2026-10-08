@@ -31,8 +31,11 @@ function isDuplicateIdempotencyKey(error: unknown): boolean {
  */
 function isDefinitiveRejection(error: unknown): boolean {
     if (error instanceof ConnectionError || error instanceof ConnectionTimeoutError) return false;
-    if (!(error instanceof APIError)) return false;
-    const status = Number(error.status);
+    const anyErr = error as any;
+    if (!(error instanceof APIError) && anyErr?.code === undefined && anyErr?.desc === undefined && anyErr?.status === undefined) {
+        return false;
+    }
+    const status = Number(anyErr.status ?? 200);
     if (!(status >= 200 && status < 500) || status === 408 || status === 429) return false;
     return !isDuplicateIdempotencyKey(error);
 }

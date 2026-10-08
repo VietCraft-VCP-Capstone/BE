@@ -48,6 +48,7 @@ export interface OrderResponse {
     isPod?: boolean;
     orderType?: string;
     fulfillmentStatus?: string;
+    sellerApprovalStatus?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
     printerInfo?: {
         printerId?: string;
         printerName?: string;
