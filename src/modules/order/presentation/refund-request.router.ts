@@ -68,11 +68,6 @@ router.post('/refund-evidence/upload', authenticate, requireRole(['buyer']), (re
     });
 });
 
-router.post('/orders/:orderId/refund-test-flow', authenticate, requireRole(['buyer']), asyncHandler(async (req, res) => {
-    const result = await RefundRequestService.createTestFlow(req.params.orderId, req.user!.id);
-    return res.status(201).json({ success: true, data: result });
-}));
-
 router.get('/orders/:orderId/refund-requests', authenticate, requireRole(['buyer']), asyncHandler(async (req, res) => {
     const doc = await RefundRequestService.getForOrder(req.params.orderId, req.user!.id);
     return res.json({ success: true, data: doc });
@@ -100,6 +95,20 @@ router.post('/seller/refund-requests/:id/triage', authenticate, requireRole(['se
 }));
 router.post('/seller/refund-requests/:id/decision', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {
     const doc = await RefundRequestService.sellerDecision(req.params.id, req.user!.id, req.body?.decision, req.body?.note);
+    return res.json({ success: true, data: doc });
+}));
+router.post('/seller/refund-requests/:id/retry-execution', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {
+    const role = String(req.user!.role).toLowerCase() === 'admin' ? 'ADMIN' : 'SELLER';
+    const doc = await RefundRequestService.retryExecution(req.params.id, req.user!.id, role);
+    return res.json({ success: true, data: doc });
+}));
+router.get('/seller/refund-requests/:id/manual-info', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {
+    const role = String(req.user!.role).toLowerCase() === 'admin' ? 'ADMIN' : 'SELLER';
+    return res.json({ success: true, data: await RefundRequestService.manualRefundInfo(req.params.id, req.user!.id, role) });
+}));
+router.post('/seller/refund-requests/:id/manual-settle', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {
+    const role = String(req.user!.role).toLowerCase() === 'admin' ? 'ADMIN' : 'SELLER';
+    const doc = await RefundRequestService.settleManually(req.params.id, req.user!.id, role, req.body?.reference, req.body?.note);
     return res.json({ success: true, data: doc });
 }));
 router.post('/seller/refund-requests/:id/dispute', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {

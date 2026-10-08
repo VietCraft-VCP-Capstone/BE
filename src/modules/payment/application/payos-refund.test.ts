@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { PayosRefundGateway, classifyPayout, payosPayoutReference, type PayosPayoutSdk } from './payos-refund.gateway';
+import { PayosRefundGateway, classifyPayout, payoutDescription, payosPayoutReference, type PayosPayoutSdk } from './payos-refund.gateway';
 import { RefundExecutionError, RefundExecutionService, type RefundContext, type RefundExecutionRepository } from './refund-execution.service';
 import { PayosService } from './payos.service';
 import type { PaymentRefundRecord, PaymentRefundStatus } from '../infrastructure/refund-execution.model';
 import { config } from '../../../app/config';
+import { toNapasBin } from '../domain/bank-codes';
 
 config.payos.payoutClientId = 'id'; config.payos.payoutApiKey = 'key'; config.payos.payoutChecksumKey = 'sum';
 
@@ -53,6 +54,7 @@ test('refund: tạo payout đúng tài khoản/số tiền, idempotency key = re
     assert.equal(calls.create[0].amount, 50000);
     assert.equal(calls.create[0].referenceId, payosPayoutReference(record()));
     assert.equal(calls.idem[0], calls.create[0].referenceId);
+    assert.ok(calls.create[0].description.length <= 25, `mô tả ${calls.create[0].description.length} ký tự`);
 });
 
 test('refund: payout đã tồn tại theo reference thì nhận lại, không tạo lệnh chi thứ hai', async () => {
@@ -156,4 +158,26 @@ test('resolveRefundDestination: lấy từ webhook; thiếu thì hỏi payOS; sa
 
     svc.useClient({ paymentRequests: { get: async () => { throw new Error('down'); } } } as any);
     assert.equal(await svc.resolveRefundDestination({ payos_order_codes: [1] }, { callback_payload: {} }), undefined);
+});
+
+test('toNapasBin: BIN 6 số giữ nguyên, CITAD 8 số quy theo mã ngân hàng, mã lạ thì không đoán', () => {
+    assert.equal(toNapasBin('970436'), '970436');
+    assert.equal(toNapasBin('01201001'), '970415'); // VietinBank, mã payOS trả thật trên đơn test
+    assert.equal(toNapasBin('79307001'), '970416'); // ACB, chi nhánh TP.HCM
+    assert.equal(toNapasBin('01311001'), '970422'); // MB Bank
+    assert.equal(toNapasBin('79304001'), undefined); // 304: nguồn không ghi tên, không map
+    assert.equal(toNapasBin('0120100'), undefined);
+    assert.equal(toNapasBin(null), undefined);
+});
+
+test('resolveRefundDestination: payOS trả mã CITAD (01201001) vẫn ra đúng BIN VietinBank', async () => {
+    const svc = new PayosService();
+    const dest = await svc.resolveRefundDestination({}, { callback_payload: { counterAccountBankId: '01201001', counterAccountNumber: '101234567890', counterAccountName: 'NGUYEN VAN A' } });
+    assert.deepEqual(dest, { bin: '970415', accountNo: '101234567890', accountName: 'NGUYEN VAN A' });
+});
+
+test('payoutDescription: luôn <= 25 ký tự (giới hạn payOS), giữ được mã đơn chuẩn', () => {
+    assert.equal(payoutDescription('VC-1791445007611-1364'), 'HT VC-1791445007611-1364');
+    assert.ok(payoutDescription('VC-1791445007611-1364-THEM-HAU-TO-DAI').length <= 25);
+    assert.equal(payoutDescription('VC-1#2'), 'HT VC-12');
 });

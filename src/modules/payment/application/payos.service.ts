@@ -1,6 +1,7 @@
 import { PayOS, Webhook } from '@payos/node';
 import { config } from '../../../app/config';
 import { logger } from '../../../shared/utils/logger';
+import { toNapasBin } from '../domain/bank-codes';
 import { CreatePayosPaymentDto, PayosPaymentResult, PayosWebhookOutcome } from '../types/payos.types';
 import { Order, IOrder } from '../../order/infrastructure/models/order.model';
 import { Transaction } from '../../order/infrastructure/models/transaction.model';
@@ -66,7 +67,8 @@ export class PayosService {
      */
     async resolveRefundDestination(order: { payos_order_codes?: number[] }, tx?: { callback_payload?: Record<string, any> } | null) {
         const pick = (src?: Record<string, any>) => {
-            const bin = text(src?.counterAccountBankId);
+            // payOS trả BIN 6 số hoặc mã CITAD 8 số tuỳ ngân hàng; payout chỉ nhận BIN.
+            const bin = toNapasBin(src?.counterAccountBankId) || '';
             const accountNo = text(src?.counterAccountNumber).replace(/\s+/g, '');
             return isBin(bin) && isAccountNo(accountNo)
                 ? { bin, accountNo, accountName: text(src?.counterAccountName) || undefined }
@@ -180,13 +182,78 @@ export class PayosService {
             return 'IGNORED';
         }
 
-        // Idempotency: payOS có thể gửi lại webhook.
-        if (order.payment_status !== 'PENDING') return 'PROCESSED';
+        await this.settlePaid(order, {
+            amount: paidAmount,
+            reference: String(data.reference || ''),
+            paidAt: this.parsePaidAt(data.transactionDateTime),
+            responseCode: data.code,
+            payload: data as unknown as Record<string, any>,
+        });
+        return 'PROCESSED';
+    }
+
+    /**
+     * Hỏi payOS trạng thái các link của đơn và ghi nhận nếu đã trả. Webhook không tới được
+     * (BE chạy local, URL webhook chưa đăng ký, payOS gửi trễ) thì đây là đường xác nhận
+     * thay thế: API payOS được ký bằng credential của mình nên tin được như webhook.
+     */
+    async syncPayment(dto: { orderId: string; buyerId?: string }): Promise<{ paymentStatus: string }> {
+        const order = await Order.findOne(byCodeOrId(dto.orderId));
+        if (!order) throw new Error(`Đơn hàng không tồn tại: ${dto.orderId}`);
+        if (dto.buyerId && order.buyer_id.toString() !== dto.buyerId) {
+            throw new Error('Bạn không có quyền xem đơn hàng này.');
+        }
+        if (order.payment_method !== 'PAYOS' || order.payment_status !== 'PENDING') {
+            return { paymentStatus: order.payment_status };
+        }
+
+        const expectedAmount = Math.round(this.calculateOrderTotal(order));
+        // Link mới nhất trước: khách thường trả bằng link vừa tạo.
+        for (const code of [...(order.payos_order_codes || [])].reverse()) {
+            let link;
+            try {
+                link = await this.sdk().paymentRequests.get(code);
+            } catch (err: any) {
+                logger.warn(`[PayOS Sync] Không tra được link ${code} của #${order.order_code}: ${err?.message}`);
+                continue;
+            }
+            if (link.status !== 'PAID') continue;
+            if (Math.round(Number(link.amount)) !== expectedAmount || Number(link.amountPaid) < expectedAmount) {
+                logger.error(`[PayOS Sync] Link ${code} của #${order.order_code} đã trả nhưng lệch số tiền (link ${link.amount}, đã trả ${link.amountPaid}, đơn ${expectedAmount}).`);
+                continue;
+            }
+            const tx = link.transactions?.[0];
+            await this.settlePaid(order, {
+                amount: Number(link.amountPaid),
+                reference: String(tx?.reference || link.id),
+                paidAt: this.parsePaidAt(tx?.transactionDateTime),
+                responseCode: '00',
+                // Giữ orderCode và tài khoản người trả để hoàn tiền tra lại được (resolveRefundDestination).
+                payload: { source: 'sync', orderCode: link.orderCode, paymentLinkId: link.id, ...(tx || {}) },
+            });
+            break;
+        }
+
+        const fresh = await Order.findById(order._id).select('payment_status').lean();
+        return { paymentStatus: fresh?.payment_status || order.payment_status };
+    }
+
+    /** Webhook gửi "yyyy-MM-dd HH:mm:ss" giờ Việt Nam; API tra cứu có thể trả chuỗi ISO. */
+    private parsePaidAt(value?: string | null): Date {
+        const raw = text(value);
+        const date = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw) ? new Date(`${raw.replace(' ', 'T')}+07:00`) : new Date(raw);
+        return raw && !Number.isNaN(date.getTime()) ? date : new Date();
+    }
+
+    /** Chuyển đơn sang PAID đúng một lần (webhook và tra cứu có thể chạy đồng thời). */
+    private async settlePaid(
+        order: IOrder,
+        info: { amount: number; reference: string; paidAt: Date; responseCode: string; payload: Record<string, any> },
+    ): Promise<boolean> {
+        if (order.payment_status !== 'PENDING') return false;
 
         const orderCode = order.order_code;
-        const reference = String(data.reference || '');
-        const paidAt = data.transactionDateTime ? new Date(`${data.transactionDateTime.replace(' ', 'T')}+07:00`) : new Date();
-        const payDate = Number.isNaN(paidAt.getTime()) ? new Date() : paidAt;
+        const { amount: paidAmount, reference } = info;
 
         const preOrder = await Order.findOne({ order_code: orderCode }).populate('shop_id');
         const shopData = preOrder?.shop_id as any;
@@ -198,6 +265,7 @@ export class PayosService {
             {
                 $set: {
                     payment_status: 'PAID',
+                    paid_at: info.paidAt,
                     order_status: isAutoApprove ? 'PROCESSING' : 'ORDERED',
                     seller_approval_status: isAutoApprove ? 'APPROVED' : 'PENDING_APPROVAL',
                     fulfillment_status: isAutoApprove ? 'QUEUED' : (isPod ? 'PENDING_APPROVAL' : 'UNFULFILLED'),
@@ -218,7 +286,7 @@ export class PayosService {
         );
 
         // Tiến trình khác vừa xử lý xong.
-        if (!updatedOrder) return 'PROCESSED';
+        if (!updatedOrder) return false;
 
         await Transaction.create({
             order_id: updatedOrder._id,
@@ -226,13 +294,13 @@ export class PayosService {
             user_id: updatedOrder.buyer_id,
             gateway: 'PAYOS',
             gateway_transaction_id: reference,
-            gateway_bank_code: data.counterAccountBankId || undefined,
-            gateway_response_code: data.code,
+            gateway_bank_code: info.payload.counterAccountBankId || undefined,
+            gateway_response_code: info.responseCode,
             amount: dec(paidAmount),
             type: 'PAYMENT',
             status: 'SUCCESS',
-            payment_date: payDate,
-            callback_payload: data as unknown as Record<string, any>,
+            payment_date: info.paidAt,
+            callback_payload: info.payload,
             note: `Thanh toán thành công qua payOS #${reference}`,
         });
 
@@ -270,11 +338,11 @@ export class PayosService {
                 }
             }
         } catch (notiErr: any) {
-            logger.error(`[PayOS Webhook] Lỗi tạo thông báo: ${notiErr.message}`);
+            logger.error(`[PayOS] Lỗi tạo thông báo: ${notiErr.message}`);
         }
 
-        logger.info(`[PayOS Webhook] Successfully processed payment for Order #${orderCode}`);
-        return 'PROCESSED';
+        logger.info(`[PayOS] Ghi nhận thanh toán thành công cho đơn #${orderCode} (Mã GD: ${reference})`);
+        return true;
     }
 }
 

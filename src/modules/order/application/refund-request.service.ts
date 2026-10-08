@@ -1,7 +1,8 @@
 import mongoose from 'mongoose';
 import { Order } from '../infrastructure/models/order.model';
 import { ReturnRequestV3, RETURN_REQUEST_V3_ACTIVE_STATUSES } from '../infrastructure/models/return-request-v3.model';
-import { executeVnpayRefund } from '../../payment/application/refund-runtime';
+import { executeVnpayRefund, refundContextOf, settleRefundManually } from '../../payment/application/refund-runtime';
+import { bankNameOf } from '../../payment/domain/bank-codes';
 import { RefundRequest, IRefundRequest, RefundRequestStatus } from '../infrastructure/models/refund-request.model';
 import { RefundStateMachine, RefundActor } from './refund-state-machine';
 import { Product } from '../../product/infrastructure/models/product.model';
@@ -139,36 +140,6 @@ export class RefundRequestService {
         return doc;
     }
 
-    static async createTestFlow(orderId: string, buyerId: string) {
-        if (process.env.NODE_ENV === 'production') throw new Error('Chức năng test Refund/Dispute chỉ dùng trong development');
-        if (!mongoose.Types.ObjectId.isValid(buyerId)) throw new Error('ID buyer không hợp lệ');
-        const source = await Order.findOne({ ...byCodeOrId(orderId), buyer_id: buyerId, order_status: 'ORDERED' }).lean();
-        if (!source) throw new Error('Chỉ tạo luồng test từ đơn đang chờ của chính bạn');
-        const shop = await Shop.findById(source.shop_id).lean();
-        if (!shop?.owner_id) throw new Error('Không xác định được chủ shop');
-        const sourceProducts = await Product.find({ _id: { $in: source.items.map(item => item.product_id) } }).select('product_type').lean();
-        const productType = sourceProducts.some(product => product.product_type === 'POD_TEMPLATE') ? 'POD' : 'NORMAL';
-
-        const testOrder = await Order.create(buildTestDeliveredOrder({
-            buyer_id: source.buyer_id, shop_id: source.shop_id, payment_method: source.payment_method,
-            shipping_address: source.shipping_address, shipping_details: source.shipping_details,
-            items: source.items, financial_breakdown: source.financial_breakdown,
-            order_hour_of_week: source.order_hour_of_week,
-        }));
-        try {
-            const request = await this.create(testOrder._id.toString(), buyerId, {
-                reason_category: 'OTHER',
-                description: 'Luồng test Refund/Dispute; không phát sinh giao dịch hoàn tiền.',
-                evidence: [],
-                refund_type: 'FULL',
-            }, { allowEmptyEvidenceForTest: true });
-            return { order_id: testOrder.order_code, refund_request_id: request._id.toString(), order_status: testOrder.order_status, payment_status: testOrder.payment_status, refund_status: 'REQUESTED' };
-        } catch (error) {
-            await Order.deleteOne({ _id: testOrder._id });
-            throw error;
-        }
-    }
-
     static async getForBuyer(id: string, buyerId: string) {
         if (!mongoose.Types.ObjectId.isValid(id)) throw new Error('ID không hợp lệ');
         const doc = await RefundRequest.findOne({ _id: id, buyer_id: buyerId }).populate('order_id');
@@ -291,6 +262,56 @@ export class RefundRequestService {
         if (!doc) throw new Error('Không tìm thấy yêu cầu hoàn tiền');
         if (!['SELLER_APPROVED', 'PRINTER_APPROVED', 'ADMIN_APPROVED', 'REFUNDED'].includes(doc.status)) throw new Error('Chỉ thực thi yêu cầu hoàn tiền đã được duyệt.');
         await this.executeRefund(doc);
+        return RefundRequest.findById(doc._id);
+    }
+
+    private static async findApprovedForActor(requestId: string, actorId: string, role: 'ADMIN' | 'SELLER') {
+        if (!mongoose.Types.ObjectId.isValid(requestId)) throw new Error('ID không hợp lệ');
+        const doc = await RefundRequest.findOne({ _id: requestId, ...(role === 'SELLER' ? { seller_id: actorId } : {}) });
+        if (!doc) throw new Error('Không tìm thấy yêu cầu hoàn tiền');
+        if (doc.status === 'REFUNDED' && doc.execution_status === 'SUCCEEDED') throw new Error('Yêu cầu này đã được hoàn tiền.');
+        if (!['SELLER_APPROVED', 'PRINTER_APPROVED', 'ADMIN_APPROVED', 'REFUNDED'].includes(doc.status)) throw new Error('Chỉ hoàn tiền cho yêu cầu đã được duyệt.');
+        return doc;
+    }
+
+    /** Thông tin để người bán tự chuyển khoản hoàn: số tiền, nội dung và tài khoản khách đã dùng để trả. */
+    static async manualRefundInfo(requestId: string, actorId: string, role: 'ADMIN' | 'SELLER' = 'SELLER') {
+        const doc = await this.findApprovedForActor(requestId, actorId, role);
+        const order = await Order.findById(doc.order_id).select('order_code payment_method').lean();
+        let destination: { bin: string; bankName?: string; accountNo: string; accountName?: string } | null = null;
+        try {
+            const context = await refundContextOf(String(doc.order_id));
+            if (context.destination) destination = { ...context.destination, bankName: bankNameOf(context.destination.bin) };
+        } catch (error) {
+            logger.warn(`[REFUND] Không lấy được tài khoản nhận cho ${doc._id}: ${error instanceof Error ? error.message : error}`);
+        }
+        return {
+            amount: Number(doc.refund_amount),
+            paymentMethod: order?.payment_method,
+            transferContent: `HOAN TIEN ${order?.order_code || doc._id}`,
+            destination,
+        };
+    }
+
+    /**
+     * Người bán đã tự chuyển khoản hoàn cho khách. Ghi nhận khi cổng thanh toán chắc chắn
+     * chưa chi (xem RefundExecutionService.settleManually); cổng đã chi thì ghi theo cổng.
+     */
+    static async settleManually(requestId: string, actorId: string, role: 'ADMIN' | 'SELLER', reference: string, note?: string) {
+        const doc = await this.findApprovedForActor(requestId, actorId, role);
+        const result = await settleRefundManually(
+            { orderId: String(doc.order_id), businessKey: String(doc._id), amount: Number(doc.refund_amount), reason: `Hoan tien thu cong ${doc._id}`, createdBy: actorId },
+            { reference: String(reference || ''), settledBy: actorId, note: note?.trim() || undefined },
+        );
+        if (result.status === 'REFUNDED') {
+            const changed = await RefundRequest.updateOne({ _id: doc._id, execution_status: { $ne: 'SUCCEEDED' } }, { $set: {
+                status: 'REFUNDED', execution_status: 'SUCCEEDED', execution_error: '',
+            } }, { runValidators: true });
+            if (changed.modifiedCount) void this.notify(doc.buyer_id.toString(), 'Hoàn tiền thành công',
+                `Người bán đã hoàn ${result.amount.toLocaleString('vi-VN')}đ cho đơn của bạn. Mã giao dịch: ${String(reference).trim()}.`,
+                `/refund-requests/${doc._id}`, { refundRequestId: String(doc._id) })
+                .catch(error => logger.error(`[REFUND] Notification failed: ${error.message}`));
+        }
         return RefundRequest.findById(doc._id);
     }
 

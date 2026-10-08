@@ -13,6 +13,7 @@ export interface ITransaction extends Document {
     status: 'SUCCESS' | 'FAILED' | 'PENDING';
     callback_payload?: Record<string, any>;
     refund_request_id?: string;
+    payment_date?: Date;
     refund_execution_id?: string;
     note?: string;
     created_at: Date;
@@ -40,6 +41,7 @@ const TransactionSchema = new Schema<ITransaction>({
     },
     callback_payload: { type: Schema.Types.Mixed, default: {} },
     refund_request_id: { type: String, index: true },
+    payment_date: { type: Date },
     refund_execution_id: { type: String },
     note: { type: String }
 }, {

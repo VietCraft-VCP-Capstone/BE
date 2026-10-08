@@ -12,6 +12,11 @@ const NOT_FOUND_GRACE_MS = 5 * 60 * 1000;
 
 const text = (value: unknown) => String(value ?? '').trim();
 
+/** payOS payout giới hạn mô tả 25 ký tự (lỗi code 20). "HT VC-1791445007611-1364" dài 24. */
+const PAYOUT_DESCRIPTION_MAX = 25;
+export const payoutDescription = (orderCode: string) =>
+    `HT ${orderCode}`.replace(/[^A-Za-z0-9 _-]/g, '').slice(0, PAYOUT_DESCRIPTION_MAX);
+
 export const payosPayoutReference = (record: PaymentRefundRecord) => `rf-${record.gateway_request_id}`;
 
 /** payOS báo "Idempotency key đã tồn tại": payout có thể đã được tạo, chưa phải từ chối. */
@@ -117,7 +122,7 @@ export class PayosRefundGateway implements RefundGateway {
             const payout = await this.sdk().payouts.create({
                 referenceId,
                 amount: record.amount,
-                description: `REFUND ${context.orderCode}`.replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 50),
+                description: payoutDescription(context.orderCode),
                 toBin: destination.bin,
                 toAccountNumber: destination.accountNo,
             }, referenceId);

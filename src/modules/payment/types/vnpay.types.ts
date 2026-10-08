@@ -17,6 +17,8 @@ export interface VNPayRefundInput {
     reason: string;
     createdBy: string;
     clientIp?: string;
+    /** Mã ổn định do refund workflow cấp để đối chiếu một lần thực thi. */
+    requestId?: string;
 }
 
 export interface VNPayRefundResult {

@@ -16,6 +16,21 @@ import { dispatchToPrinter } from '../../order/application/printer-dispatch.serv
 import { notificationService } from '../../notification';
 import { Shop } from '../../product/infrastructure/models/shop.model';
 
+/**
+ * Lỗi có kết quả dứt khoát từ VNPay mới được phép chuyển refund sang FAILED/retry.
+ * Lỗi mạng là kết quả chưa biết: retry mù có thể hoàn tiền hai lần.
+ */
+export class VNPayRefundError extends Error {
+    constructor(
+        message: string,
+        public readonly definitive: boolean,
+        public readonly providerCode?: string,
+    ) {
+        super(message);
+        this.name = 'VNPayRefundError';
+    }
+}
+
 export class VNPayService {
     private readonly tmnCode: string;
     private readonly hashSecret: string;
@@ -39,6 +54,19 @@ export class VNPayService {
         const shippingFee = num(order.financial_breakdown?.shipping_fee);
         const discount = num(order.financial_breakdown?.coupon_discount);
         return Math.max(0, subtotal + shippingFee - discount);
+    }
+
+    /** VNPay gửi vnp_PayDate theo yyyyMMddHHmmss ở múi giờ Việt Nam. */
+    private parsePayDate(value: unknown): Date {
+        const text = String(value || '');
+        if (!/^\d{14}$/.test(text)) return new Date();
+        const year = Number(text.slice(0, 4));
+        const month = Number(text.slice(4, 6)) - 1;
+        const day = Number(text.slice(6, 8));
+        const hour = Number(text.slice(8, 10));
+        const minute = Number(text.slice(10, 12));
+        const second = Number(text.slice(12, 14));
+        return new Date(Date.UTC(year, month, day, hour - 7, minute, second));
     }
 
     /**
@@ -165,7 +193,8 @@ export class VNPayService {
                             payment_status: 'PAID',
                             order_status: isAutoApprove ? 'PROCESSING' : 'ORDERED',
                             seller_approval_status: isAutoApprove ? 'APPROVED' : 'PENDING_APPROVAL',
-                            fulfillment_status: isAutoApprove ? 'QUEUED' : (isPod ? 'PENDING_APPROVAL' : 'UNFULFILLED')
+                            fulfillment_status: isAutoApprove ? 'QUEUED' : (isPod ? 'PENDING_APPROVAL' : 'UNFULFILLED'),
+                            paid_at: this.parsePayDate(payDateStr)
                         },
                         $push: {
                             status_history: {
@@ -199,7 +228,7 @@ export class VNPayService {
                     amount: dec(vnpAmount),
                     type: 'PAYMENT',
                     status: 'SUCCESS',
-                    payment_date: payDateStr ? new Date() : undefined,
+                    payment_date: this.parsePayDate(payDateStr),
                     callback_payload: query,
                     note: `Thanh toán thành công qua VNPay #${transactionNo}`
                 });

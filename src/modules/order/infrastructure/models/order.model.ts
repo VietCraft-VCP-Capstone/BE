@@ -65,6 +65,8 @@ export interface IOrder extends Document {
     /** Mọi mã số payOS đã cấp cho đơn (mỗi lần tạo link là một mã mới) để webhook đối chiếu được link cũ. */
     payos_order_codes?: number[];
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
+    /** Thời điểm provider xác nhận tiền về; refund window tính từ mốc này. */
+    paid_at?: Date;
     refund_status: 'NONE' | 'REQUESTED' | 'UNDER_REVIEW' | 'DISPUTED' | 'REFUNDED' | 'REFUND_REJECTED';
     refund_execution_id?: string;
     order_status: 'ORDERED' | 'PENDING_DESIGN' | 'PROCESSING' | 'SHIPPING' | 'DELIVERED' | 'CANCELLED';
@@ -144,6 +146,7 @@ const OrderSchema = new Schema<IOrder>({
     payment_method: { type: String, required: true, enum: ['VNPAY', 'PAYOS', 'COD'] },
     payos_order_codes: { type: [Number], default: undefined, index: true },
     payment_status: { type: String, required: true, enum: ['PENDING', 'PAID', 'REFUNDED'], default: 'PENDING' },
+    paid_at: { type: Date, index: true },
     refund_status: { type: String, required: true, enum: ['NONE', 'REQUESTED', 'UNDER_REVIEW', 'DISPUTED', 'REFUNDED', 'REFUND_REJECTED'], default: 'NONE', index: true },
     refund_execution_id: { type: String },
     order_status: {
