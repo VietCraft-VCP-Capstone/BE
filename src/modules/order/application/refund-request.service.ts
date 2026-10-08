@@ -139,36 +139,6 @@ export class RefundRequestService {
         return doc;
     }
 
-    static async createTestFlow(orderId: string, buyerId: string) {
-        if (process.env.NODE_ENV === 'production') throw new Error('Chức năng test Refund/Dispute chỉ dùng trong development');
-        if (!mongoose.Types.ObjectId.isValid(buyerId)) throw new Error('ID buyer không hợp lệ');
-        const source = await Order.findOne({ ...byCodeOrId(orderId), buyer_id: buyerId, order_status: 'ORDERED' }).lean();
-        if (!source) throw new Error('Chỉ tạo luồng test từ đơn đang chờ của chính bạn');
-        const shop = await Shop.findById(source.shop_id).lean();
-        if (!shop?.owner_id) throw new Error('Không xác định được chủ shop');
-        const sourceProducts = await Product.find({ _id: { $in: source.items.map(item => item.product_id) } }).select('product_type').lean();
-        const productType = sourceProducts.some(product => product.product_type === 'POD_TEMPLATE') ? 'POD' : 'NORMAL';
-
-        const testOrder = await Order.create(buildTestDeliveredOrder({
-            buyer_id: source.buyer_id, shop_id: source.shop_id, payment_method: source.payment_method,
-            shipping_address: source.shipping_address, shipping_details: source.shipping_details,
-            items: source.items, financial_breakdown: source.financial_breakdown,
-            order_hour_of_week: source.order_hour_of_week,
-        }));
-        try {
-            const request = await this.create(testOrder._id.toString(), buyerId, {
-                reason_category: 'OTHER',
-                description: 'Luồng test Refund/Dispute; không phát sinh giao dịch hoàn tiền.',
-                evidence: [],
-                refund_type: 'FULL',
-            }, { allowEmptyEvidenceForTest: true });
-            return { order_id: testOrder.order_code, refund_request_id: request._id.toString(), order_status: testOrder.order_status, payment_status: testOrder.payment_status, refund_status: 'REQUESTED' };
-        } catch (error) {
-            await Order.deleteOne({ _id: testOrder._id });
-            throw error;
-        }
-    }
-
     static async getForBuyer(id: string, buyerId: string) {
         if (!mongoose.Types.ObjectId.isValid(id)) throw new Error('ID không hợp lệ');
         const doc = await RefundRequest.findOne({ _id: id, buyer_id: buyerId }).populate('order_id');

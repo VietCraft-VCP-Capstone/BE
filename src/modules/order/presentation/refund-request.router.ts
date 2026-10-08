@@ -68,11 +68,6 @@ router.post('/refund-evidence/upload', authenticate, requireRole(['buyer']), (re
     });
 });
 
-router.post('/orders/:orderId/refund-test-flow', authenticate, requireRole(['buyer']), asyncHandler(async (req, res) => {
-    const result = await RefundRequestService.createTestFlow(req.params.orderId, req.user!.id);
-    return res.status(201).json({ success: true, data: result });
-}));
-
 router.get('/orders/:orderId/refund-requests', authenticate, requireRole(['buyer']), asyncHandler(async (req, res) => {
     const doc = await RefundRequestService.getForOrder(req.params.orderId, req.user!.id);
     return res.json({ success: true, data: doc });
