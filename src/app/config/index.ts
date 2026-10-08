@@ -32,16 +32,9 @@ export const config = {
     redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
     jwtSecret: process.env.JWT_SECRET || '',
     aiAnalyticsUrl: process.env.AI_ANALYTICS_URL || 'http://localhost:8000',
-    // Bí mật dùng chung BE <-> service AI. Phải trùng AI_GATEWAY_SECRET bên AI-Analysic.
     aiGatewaySecret: process.env.AI_GATEWAY_SECRET || '',
-    // Shop mẫu trong dữ liệu mồi (vd shp_00017). Có giá trị = chế độ demo: mọi seller xem
-    // số liệu của shop mẫu, FE hiện nhãn "shop mẫu". Để trống = gửi shop thật của seller.
     aiDemoShopId: process.env.AI_DEMO_SHOP_ID || '',
-    // Ánh xạ RIÊNG từng người bán sang một shop mẫu, dạng `email=shp_00017,email2=shp_00005`.
-    // Dùng khi một account cần xem đủ 16 màn hình để demo hoặc kiểm thử, mà không phải
-    // bật chế độ shop mẫu cho toàn bộ người bán. Ưu tiên cao hơn AI_DEMO_SHOP_ID.
     aiShopMap: parseShopMap(process.env.AI_SHOP_MAP),
-    // SRS MSG132: service AI trả chậm hơn 5 giây là lỗi.
     aiTimeoutMs: Number(process.env.AI_TIMEOUT_MS) || 5000,
     googleClientId: process.env.GOOGLE_CLIENT_ID || '',
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
@@ -53,8 +46,6 @@ export const config = {
     printerRefundApiKey: process.env.PRINTER_REFUND_API_KEY || '',
     printerWebhookSecret: process.env.PRINTER_WEBHOOK_SECRET || '',
     printerEnv: process.env.PRINTER_ENV || 'sandbox',
-    // Lưu trữ ảnh seller upload. Thiếu credential -> tự fallback về đĩa local (BE/uploads).
-    // Chỉ cần MỘT trong hai: cặp apiKey+apiSecret (signed) hoặc uploadPreset (unsigned).
     cloudinary: {
         url: process.env.CLOUDINARY_URL || '',
         cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
@@ -62,10 +53,8 @@ export const config = {
         apiSecret: process.env.CLOUDINARY_API_SECRET || '',
         uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || '',
         folder: process.env.CLOUDINARY_FOLDER || 'vietcraft',
-        // Chỉ đổi khi chạy test hoặc đi qua proxy nội bộ. Bỏ trống = gọi thẳng Cloudinary.
         apiBase: process.env.CLOUDINARY_API_BASE || 'https://api.cloudinary.com',
     },
-    // Shared secret cổng thanh toán dùng để ký webhook POST /orders/callback/:id.
     paymentCallbackSecret: process.env.PAYMENT_CALLBACK_SECRET || '',
     payos: {
         // Thu tiền (payment link)
@@ -142,7 +131,7 @@ export async function connectMongo() {
             // ignore if not supported in environment
         }
         mongoose.set('strictQuery', false);
-        mongoose.set('bufferCommands', false);  // Fail immediately if not connected
+        mongoose.set('bufferCommands', false);
         await mongoose.connect(uri, {
             serverSelectionTimeoutMS: 8000,
             connectTimeoutMS: 8000,
@@ -163,9 +152,9 @@ export const redisClient = createClient({
         connectTimeout: 4000,
         reconnectStrategy: (retries) => {
             if (retries > 3) {
-                return false; // stop reconnecting after 3 retries
+                return false;
             }
-            return 2000; // try reconnecting after 2 seconds
+            return 2000;
         }
     }
 });

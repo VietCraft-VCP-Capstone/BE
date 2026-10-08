@@ -40,9 +40,6 @@ export class OrdersService {
     let shopId: mongoose.Types.ObjectId | null = null;
     const orderItems: any[] = [];
     let subtotal = 0;
-    // Mỗi dòng hàng có thể chịu mức hoa hồng khác nhau (luật theo danh mục + loại), nên phí
-    // sàn phải cộng dồn theo từng dòng. Nhân một mức phẳng lên subtotal là tính sai ngay khi
-    // đơn có hai mặt hàng khác danh mục.
     let platformFee = 0;
     let hasPodItem = false;
 
@@ -100,8 +97,6 @@ export class OrdersService {
 
       const lineTotal = num(variant.retail_price) * qty;
       subtotal += lineTotal;
-      // Giá niêm yết đã gồm hoa hồng (cộng vào lúc tạo/sửa giá), nên phí sàn phải BÓC LẠI
-      // từ giá đó chứ không nhân thêm — nhân thêm là trừ người bán hai lần.
       platformFee += commissionFromGross(
         lineTotal,
         await CommissionSetting.resolvePercent(
@@ -138,7 +133,6 @@ export class OrdersService {
           if (mockupImg && (mockupImg.startsWith('http://') || mockupImg.startsWith('https://'))) {
             return mockupImg;
           }
-          // Fallback: dùng bất kỳ cái nào có giá trị
           return productImg || mockupImg;
         })(),
         design_file_url: designUrl,
@@ -184,12 +178,9 @@ export class OrdersService {
       isPlatformCoupon = applyResult.coupon?.is_platform ?? true;
       cleanCouponCode = couponCode.trim().toUpperCase();
 
-      // Atomic claim: tăng used_count trước khi tạo order để tránh race condition
-      // Nếu hết lượt hoặc user đã dùng → throw Error, dừng tạo order
       await PromotionService.claimUsage(cleanCouponCode, buyerId);
     }
 
-    // Đọc chính sách phí sàn động từ PlatformCostConfig (fallback 10%, min 10.000đ)
     let commissionRate = 0.10;
     let minOrderFee = 10000;
     try {
@@ -199,16 +190,12 @@ export class OrdersService {
         minOrderFee = financeConfig.policies.min_order_fee ?? 10000;
       }
     } catch {
-      // Giữ default fallback
     }
 
-    const rawPlatformFee = Math.round(subtotal * commissionRate);
-    const platformFee = Math.max(rawPlatformFee, minOrderFee);
+    platformFee = Math.max(platformFee, minOrderFee);
 
-    // Tính tổng chi phí in ấn (base_cost phôi in)
     const totalPrintingCost = orderItems.reduce((acc, it) => acc + (num(it.base_cost) * it.quantity), 0);
 
-    // Nếu là Shop coupon, shop chịu trừ tiền. Nếu là Platform coupon, sàn bù tiền cho shop.
     const sellerPayoutAmount = isPlatformCoupon
       ? Math.max(0, subtotal - platformFee)
       : Math.max(0, subtotal - discount - platformFee);
@@ -221,7 +208,7 @@ export class OrdersService {
     if (hasPodItem && paymentMethod === "COD") {
       // Hoàn lại lượt dùng voucher nếu đơn bị reject ở bước này
       if (cleanCouponCode) {
-        await PromotionService.releaseUsage(cleanCouponCode).catch(() => {});
+        await PromotionService.releaseUsage(cleanCouponCode).catch(() => { });
       }
       throw new Error(
         "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc PAYOS.",
