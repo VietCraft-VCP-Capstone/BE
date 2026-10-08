@@ -136,6 +136,25 @@ export class PaymentController {
     };
 
     /**
+     * POST /api/payment/payos/sync
+     * Đối soát trạng thái thanh toán của đơn với payOS cho chính người mua
+     */
+    syncPayosPayment = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+        try {
+            const { orderId } = req.body;
+            if (!orderId) {
+                res.status(400).json({ success: false, message: 'Thiếu trường bắt buộc: orderId' });
+                return;
+            }
+            const result = await this.payos.syncPayment({ orderId, buyerId: req.user?.id });
+            res.status(200).json({ success: true, data: result });
+        } catch (error: any) {
+            logger.error(`[PaymentController] syncPayosPayment error: ${error.message}`);
+            res.status(400).json({ success: false, message: error.message || 'Không thể kiểm tra thanh toán payOS' });
+        }
+    };
+
+    /**
      * POST /api/payment/payos/webhook
      * 200 khi đã ghi nhận (kể cả webhook thử/đơn lạ); 400 khi chữ ký sai; 500 để payOS gửi lại.
      */

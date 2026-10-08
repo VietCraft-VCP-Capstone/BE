@@ -19,7 +19,10 @@ paymentRouter.post('/vnpay/refund', authenticate, requireRole(['admin']), paymen
 // 5. payOS: tạo link thanh toán (Cần đăng nhập)
 paymentRouter.post('/payos/create', authenticate, paymentController.createPayosPayment);
 
-// 6. Webhook payOS (Public - payOS gọi POST JSON, chữ ký được verify trong service)
+// 6. Hỏi lại payOS trạng thái thanh toán của đơn (khi webhook chưa tới)
+paymentRouter.post('/payos/sync', authenticate, paymentController.syncPayosPayment);
+
+// 7. Webhook payOS (Public - payOS gọi POST JSON, chữ ký được verify trong service)
 paymentRouter.post('/payos/webhook', paymentController.handlePayosWebhook);
 
 export { paymentRouter };
