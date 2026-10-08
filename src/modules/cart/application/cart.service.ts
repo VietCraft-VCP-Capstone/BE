@@ -65,12 +65,13 @@ export class CartService {
         }
 
         let variant = null;
-        if (variantId) {
-            if (!mongoose.Types.ObjectId.isValid(variantId)) throw new Error('Biến thể không hợp lệ');
+        if (variantId && mongoose.Types.ObjectId.isValid(variantId)) {
             variant = await ProductVariant.findOne({ _id: variantId, product_id: product._id });
-            if (!variant) throw new Error('Biến thể không thuộc sản phẩm này');
-            if (variant.is_active === false) throw new Error('Biến thể đã ngừng bán');
-        } else {
+            if (variant && variant.is_active === false) {
+                throw new Error('Biến thể đã ngừng bán');
+            }
+        }
+        if (!variant) {
             // Tự động lấy biến thể đầu tiên còn hoạt động của sản phẩm
             variant = await ProductVariant.findOne({ product_id: product._id, is_active: { $ne: false } })
                 || await ProductVariant.findOne({ product_id: product._id });
