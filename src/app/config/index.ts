@@ -50,6 +50,7 @@ export const config = {
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
     printerApiUrl: process.env.PRINTER_API_URL || 'http://localhost:8880',
     printerApiKey: process.env.PRINTER_API_KEY || '',
+    printerRefundApiKey: process.env.PRINTER_REFUND_API_KEY || '',
     printerWebhookSecret: process.env.PRINTER_WEBHOOK_SECRET || '',
     printerEnv: process.env.PRINTER_ENV || 'sandbox',
     // Lưu trữ ảnh seller upload. Thiếu credential -> tự fallback về đĩa local (BE/uploads).

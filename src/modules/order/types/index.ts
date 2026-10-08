@@ -9,6 +9,7 @@ export interface OrderItemReview {
 }
 
 export interface OrderItem {
+    order_item_id?: string;
     productId: string;
     variantId: string;
     quantity: number;
@@ -40,6 +41,7 @@ export interface OrderResponse {
     shippingFee?: number;
     couponCode?: string | null;
     paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
+    isStatusSimulation?: boolean;
     is_reviewed?: boolean;
     isPod?: boolean;
     orderType?: string;

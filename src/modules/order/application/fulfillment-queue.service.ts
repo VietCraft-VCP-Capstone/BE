@@ -23,6 +23,7 @@ export class FulfillmentQueueService {
         if (!order) {
             throw new Error(`Không tìm thấy đơn hàng ID: ${orderId}`);
         }
+        if (order.is_simulated) throw new Error('Đơn mô phỏng không thể vào hàng đợi fulfillment.');
 
         // Cập nhật trạng thái đơn sang QUEUED
         order.fulfillment_status = 'QUEUED';
@@ -64,6 +65,12 @@ export class FulfillmentQueueService {
         if (!order) {
             job.status = 'FAILED';
             job.last_error = 'Đơn hàng không còn tồn tại trong database';
+            await job.save();
+            return false;
+        }
+        if (order.is_simulated) {
+            job.status = 'FAILED';
+            job.last_error = 'Đơn mô phỏng bị chặn khỏi fulfillment.';
             await job.save();
             return false;
         }

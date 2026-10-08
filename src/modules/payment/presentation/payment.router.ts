@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { paymentController } from './payment.controller';
-import { authenticate } from '../../../app/middleware/auth.middleware';
+import { authenticate, requireRole } from '../../../app/middleware/auth.middleware';
 
 const paymentRouter = Router();
 
@@ -14,7 +14,7 @@ paymentRouter.get('/vnpay/ipn', paymentController.handleIpn);
 paymentRouter.get('/vnpay/return', paymentController.handleReturn);
 
 // 4. API Hoàn tiền qua VNPay (Cần quyền đăng nhập/Admin)
-paymentRouter.post('/vnpay/refund', authenticate, paymentController.refund);
+paymentRouter.post('/vnpay/refund', authenticate, requireRole(['admin']), paymentController.refund);
 
 export { paymentRouter };
 export default paymentRouter;

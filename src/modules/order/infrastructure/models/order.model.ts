@@ -16,6 +16,8 @@ export interface IShippingDetails {
 }
 
 export interface IOrderItem {
+    order_item_id?: string;
+    item_snapshot?: Record<string, unknown>;
     product_id: mongoose.Types.ObjectId;
     variant_id: mongoose.Types.ObjectId;
     title: string;
@@ -57,8 +59,12 @@ export interface IOrder extends Document {
     buyer_id: mongoose.Types.ObjectId;
     shop_id: mongoose.Types.ObjectId;
     order_code: string;
+    simulation_source_id?: mongoose.Types.ObjectId;
+    is_simulated?: boolean;
     payment_method: 'VNPAY' | 'MOMO' | 'COD';
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
+    refund_status: 'NONE' | 'REQUESTED' | 'UNDER_REVIEW' | 'DISPUTED' | 'REFUNDED' | 'REFUND_REJECTED';
+    refund_execution_id?: string;
     order_status: 'ORDERED' | 'PENDING_DESIGN' | 'PROCESSING' | 'SHIPPING' | 'DELIVERED' | 'CANCELLED';
     seller_approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
     is_pod?: boolean;
@@ -93,6 +99,8 @@ const ShippingDetailsSchema = new Schema<IShippingDetails>({
 }, { _id: false });
 
 const OrderItemSchema = new Schema<IOrderItem>({
+    order_item_id: { type: String, immutable: true, index: true },
+    item_snapshot: { type: Schema.Types.Mixed, immutable: true },
     product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
     variant_id: { type: Schema.Types.ObjectId, ref: 'ProductVariant', required: true },
     title: { type: String, required: true },
@@ -129,8 +137,12 @@ const OrderSchema = new Schema<IOrder>({
     buyer_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     shop_id: { type: Schema.Types.ObjectId, ref: 'Shop', required: true, index: true },
     order_code: { type: String, required: true, unique: true, index: true },
+    simulation_source_id: { type: Schema.Types.ObjectId, ref: 'Order', index: true },
+    is_simulated: { type: Boolean, default: false, index: true },
     payment_method: { type: String, required: true, enum: ['VNPAY', 'MOMO', 'COD'] },
     payment_status: { type: String, required: true, enum: ['PENDING', 'PAID', 'REFUNDED'], default: 'PENDING' },
+    refund_status: { type: String, required: true, enum: ['NONE', 'REQUESTED', 'UNDER_REVIEW', 'DISPUTED', 'REFUNDED', 'REFUND_REJECTED'], default: 'NONE', index: true },
+    refund_execution_id: { type: String },
     order_status: {
         type: String,
         required: true,
@@ -164,6 +176,7 @@ const OrderSchema = new Schema<IOrder>({
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
+OrderSchema.index({ simulation_source_id: 1, buyer_id: 1 }, { unique: true, partialFilterExpression: { is_simulated: true } });
 OrderSchema.index({ buyer_id: 1, created_at: -1 });
 OrderSchema.index({ shop_id: 1, created_at: -1 });
 

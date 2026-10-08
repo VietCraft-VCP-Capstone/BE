@@ -101,6 +101,8 @@ export class OrdersService {
       }
 
       orderItems.push({
+        order_item_id: crypto.randomUUID(),
+        item_snapshot: { product_id: String(product._id), variant_id: String(variant._id), title: product.title, color: variant.color, size: variant.size, image: product.images?.[0] || variant.mockup_image },
         product_id: product._id,
         variant_id: variant._id,
         title: product.title,
