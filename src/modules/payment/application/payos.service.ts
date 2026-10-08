@@ -1,6 +1,7 @@
 import { PayOS, Webhook } from '@payos/node';
 import { config } from '../../../app/config';
 import { logger } from '../../../shared/utils/logger';
+import { toNapasBin } from '../domain/bank-codes';
 import { CreatePayosPaymentDto, PayosPaymentResult, PayosWebhookOutcome } from '../types/payos.types';
 import { Order, IOrder } from '../../order/infrastructure/models/order.model';
 import { Transaction } from '../../order/infrastructure/models/transaction.model';
@@ -66,7 +67,8 @@ export class PayosService {
      */
     async resolveRefundDestination(order: { payos_order_codes?: number[] }, tx?: { callback_payload?: Record<string, any> } | null) {
         const pick = (src?: Record<string, any>) => {
-            const bin = text(src?.counterAccountBankId);
+            // payOS trả BIN 6 số hoặc mã CITAD 8 số tuỳ ngân hàng; payout chỉ nhận BIN.
+            const bin = toNapasBin(src?.counterAccountBankId) || '';
             const accountNo = text(src?.counterAccountNumber).replace(/\s+/g, '');
             return isBin(bin) && isAccountNo(accountNo)
                 ? { bin, accountNo, accountName: text(src?.counterAccountName) || undefined }
