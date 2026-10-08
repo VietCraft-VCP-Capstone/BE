@@ -97,6 +97,11 @@ router.post('/seller/refund-requests/:id/decision', authenticate, requireRole(['
     const doc = await RefundRequestService.sellerDecision(req.params.id, req.user!.id, req.body?.decision, req.body?.note);
     return res.json({ success: true, data: doc });
 }));
+router.post('/seller/refund-requests/:id/retry-execution', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {
+    const role = String(req.user!.role).toLowerCase() === 'admin' ? 'ADMIN' : 'SELLER';
+    const doc = await RefundRequestService.retryExecution(req.params.id, req.user!.id, role);
+    return res.json({ success: true, data: doc });
+}));
 router.post('/seller/refund-requests/:id/dispute', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {
     const doc = await RefundRequestService.sellerDispute(req.params.id, req.user!.id, req.body?.reason);
     return res.json({ success: true, data: doc });
