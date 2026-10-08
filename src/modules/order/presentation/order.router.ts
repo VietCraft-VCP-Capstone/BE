@@ -96,6 +96,17 @@ router.get('/:id', authenticate, async (req: AuthenticatedRequest, res) => {
     }
 });
 
+router.post('/:id/cancel', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const buyerId = req.user!.id;
+        const { reason } = req.body || {};
+        const result = await OrdersService.cancelOrderByBuyer(req.params.id, buyerId, reason);
+        res.json(result);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi hủy đơn hàng.' });
+    }
+});
+
 router.post('/:id/confirm-delivery', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const buyerId = req.user!.id;

@@ -57,10 +57,61 @@ const SBV_TO_BIN: Record<string, string> = {
     '901': '970446', // Co-opBank
 };
 
-/** BIN 6 số giữ nguyên; mã CITAD 8 số quy theo bảng; còn lại (không nhận ra) trả undefined. */
+const SHORT_CODE_TO_BIN: Record<string, string> = {
+    'VCB': '970436', // Vietcombank
+    'VIETCOMBANK': '970436',
+    'MB': '970422', // MB Bank
+    'MBBANK': '970422',
+    'TCB': '970407', // Techcombank
+    'TECHCOMBANK': '970407',
+    'BIDV': '970418', // BIDV
+    'CTG': '970415', // VietinBank
+    'VIETINBANK': '970415',
+    'ACB': '970416', // ACB
+    'TPB': '970423', // TPBank
+    'TPBANK': '970423',
+    'VPB': '970432', // VPBank
+    'VPBANK': '970432',
+    'AGR': '970405', // Agribank
+    'AGRIBANK': '970405',
+    'STB': '970403', // Sacombank
+    'SACOMBANK': '970403',
+    'HDB': '970437', // HDBank
+    'HDBANK': '970437',
+    'VIB': '970441', // VIB
+    'MSB': '970426',
+    'SHB': '970443',
+    'OCB': '970448',
+    'LPB': '970449',
+    'LPBANK': '970449',
+    'SEABANK': '970440',
+    'SSB': '970440',
+    'BVB': '970454',
+    'BVBANK': '970454',
+    'NCB': '970419',
+    'PVB': '970412',
+    'PVCOMBANK': '970412',
+    'VIETABANK': '970427',
+    'VAB': '970427',
+    'VIETBANK': '970433',
+    'VBB': '970433',
+    'BVB_BAOVIET': '970438',
+    'BAOVIETBANK': '970438',
+    'SAIGONBANK': '970400',
+    'SGB': '970400',
+    'PGBANK': '970430',
+    'PGB': '970430',
+    'KIENLONGBANK': '970452',
+    'KLB': '970452',
+    'NAMABANK': '970428',
+    'NAB': '970428',
+};
+
+/** BIN 6 số giữ nguyên; mã viết tắt quy theo SHORT_CODE_TO_BIN; mã CITAD 8 số quy theo bảng; còn lại trả undefined. */
 export function toNapasBin(raw: unknown): string | undefined {
-    const code = String(raw ?? '').trim();
+    const code = String(raw ?? '').trim().toUpperCase();
     if (/^\d{6}$/.test(code)) return code;
+    if (SHORT_CODE_TO_BIN[code]) return SHORT_CODE_TO_BIN[code];
     if (/^\d{8}$/.test(code)) return SBV_TO_BIN[code.slice(2, 5)];
     return undefined;
 }

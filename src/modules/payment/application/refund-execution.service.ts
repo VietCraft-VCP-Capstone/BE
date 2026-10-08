@@ -78,7 +78,7 @@ export class RefundExecutionService {
             return output(result.status === 'FAILED' ? 'FAILED' : 'PENDING', result.error);
         }
         if (record.status === 'PROCESSING') return output('PROCESSING');
-        if (context.paymentStatus !== 'PAID') throw new RefundExecutionError('Chỉ hoàn tiền cho đơn đã thanh toán.');
+        if (context.paymentStatus !== 'PAID' && context.paymentStatus !== 'REFUNDED') throw new RefundExecutionError('Chỉ hoàn tiền cho đơn đã thanh toán.');
         if (!context.originalTransactionId) throw new RefundExecutionError('Không tìm thấy giao dịch thanh toán gốc.');
         if (!Number.isSafeInteger(context.paidAmount) || input.amount > context.paidAmount) throw new RefundExecutionError('Số tiền hoàn vượt số tiền đã thanh toán.');
         if (!await this.repository.claim(record)) return output('PROCESSING');

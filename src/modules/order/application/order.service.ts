@@ -15,6 +15,9 @@ import { CommissionSetting } from "../../../shared/services/commission-setting.s
 import { commissionFromGross } from "../../../shared/utils/commission";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
 import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
+import { executeRefund } from "../../payment/application/refund-runtime";
+import { payosService } from "../../payment/application/payos.service";
+import { logger } from "../../../shared/utils/logger";
 
 
 export class OrdersService {
@@ -40,9 +43,6 @@ export class OrdersService {
     let shopId: mongoose.Types.ObjectId | null = null;
     const orderItems: any[] = [];
     let subtotal = 0;
-    // Mỗi dòng hàng có thể chịu mức hoa hồng khác nhau (luật theo danh mục + loại), nên phí
-    // sàn phải cộng dồn theo từng dòng. Nhân một mức phẳng lên subtotal là tính sai ngay khi
-    // đơn có hai mặt hàng khác danh mục.
     let platformFee = 0;
     let hasPodItem = false;
 
@@ -100,8 +100,6 @@ export class OrdersService {
 
       const lineTotal = num(variant.retail_price) * qty;
       subtotal += lineTotal;
-      // Giá niêm yết đã gồm hoa hồng (cộng vào lúc tạo/sửa giá), nên phí sàn phải BÓC LẠI
-      // từ giá đó chứ không nhân thêm — nhân thêm là trừ người bán hai lần.
       platformFee += commissionFromGross(
         lineTotal,
         await CommissionSetting.resolvePercent(
@@ -138,7 +136,6 @@ export class OrdersService {
           if (mockupImg && (mockupImg.startsWith('http://') || mockupImg.startsWith('https://'))) {
             return mockupImg;
           }
-          // Fallback: dùng bất kỳ cái nào có giá trị
           return productImg || mockupImg;
         })(),
         design_file_url: designUrl,
@@ -184,12 +181,9 @@ export class OrdersService {
       isPlatformCoupon = applyResult.coupon?.is_platform ?? true;
       cleanCouponCode = couponCode.trim().toUpperCase();
 
-      // Atomic claim: tăng used_count trước khi tạo order để tránh race condition
-      // Nếu hết lượt hoặc user đã dùng → throw Error, dừng tạo order
       await PromotionService.claimUsage(cleanCouponCode, buyerId);
     }
 
-    // Đọc chính sách phí sàn động từ PlatformCostConfig (fallback 10%, min 10.000đ)
     let commissionRate = 0.10;
     let minOrderFee = 10000;
     try {
@@ -199,16 +193,12 @@ export class OrdersService {
         minOrderFee = financeConfig.policies.min_order_fee ?? 10000;
       }
     } catch {
-      // Giữ default fallback
     }
 
-    const rawPlatformFee = Math.round(subtotal * commissionRate);
-    const platformFee = Math.max(rawPlatformFee, minOrderFee);
+    platformFee = Math.max(platformFee, minOrderFee);
 
-    // Tính tổng chi phí in ấn (base_cost phôi in)
     const totalPrintingCost = orderItems.reduce((acc, it) => acc + (num(it.base_cost) * it.quantity), 0);
 
-    // Nếu là Shop coupon, shop chịu trừ tiền. Nếu là Platform coupon, sàn bù tiền cho shop.
     const sellerPayoutAmount = isPlatformCoupon
       ? Math.max(0, subtotal - platformFee)
       : Math.max(0, subtotal - discount - platformFee);
@@ -221,7 +211,7 @@ export class OrdersService {
     if (hasPodItem && paymentMethod === "COD") {
       // Hoàn lại lượt dùng voucher nếu đơn bị reject ở bước này
       if (cleanCouponCode) {
-        await PromotionService.releaseUsage(cleanCouponCode).catch(() => {});
+        await PromotionService.releaseUsage(cleanCouponCode).catch(() => { });
       }
       throw new Error(
         "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc PAYOS.",
@@ -278,6 +268,15 @@ export class OrdersService {
       order_hour_of_week: now.getDay() * 24 + now.getHours(),
     });
 
+    // Trừ tồn kho biến thể tương ứng
+    for (const it of orderItems) {
+      if (it.variant_id) {
+        await ProductVariant.updateOne(
+          { _id: it.variant_id },
+          { $inc: { stock_quantity: -it.quantity } }
+        ).catch(err => console.error('[STOCK] Lỗi trừ tồn kho khi tạo đơn:', err?.message || err));
+      }
+    }
 
     // Phát thông báo Realtime cho Người mua & Người bán
     try {
@@ -308,6 +307,153 @@ export class OrdersService {
       }
     } catch (err: any) {
       console.error('[NOTIFICATION] Lỗi tạo thông báo đơn hàng mới:', err?.message || err);
+    }
+
+    const populated = await OrderModel.findById(order._id)
+      .populate("shop_id")
+      .populate({ path: 'items.product_id', select: 'images title' });
+    return mapDbOrderToResponse(populated || order);
+  }
+
+  /** Hoàn lại tồn kho và voucher khi đơn hàng bị hủy */
+  static async restoreOrderStockAndCoupon(order: any): Promise<void> {
+    if (order.coupon_code) {
+      await PromotionService.releaseUsage(order.coupon_code).catch(err =>
+        console.error('[COUPON] Lỗi hoàn lượt dùng voucher:', err?.message || err)
+      );
+    }
+    if (Array.isArray(order.items)) {
+      for (const it of order.items) {
+        const vId = it.variant_id?._id || it.variant_id;
+        if (vId) {
+          await ProductVariant.updateOne(
+            { _id: vId },
+            { $inc: { stock_quantity: it.quantity || 1 } }
+          ).catch(err => console.error('[STOCK] Lỗi hoàn tồn kho:', err?.message || err));
+        }
+      }
+    }
+  }
+
+  /** Người mua tự hủy đơn hàng */
+  static async cancelOrderByBuyer(orderId: string, buyerId: string, reason?: string): Promise<OrderResponse> {
+    const query: any = byCodeOrId(orderId);
+    query.buyer_id = toBuyerObjectId(buyerId);
+    const order = await OrderModel.findOne(query);
+
+    if (!order) {
+      throw new Error('Không tìm thấy đơn hàng hoặc bạn không có quyền hủy đơn này');
+    }
+
+    if (order.order_status === 'CANCELLED') {
+      throw new Error('Đơn hàng này đã được hủy trước đó');
+    }
+    if (order.order_status === 'DELIVERED' || order.fulfillment_status === 'SHIPPED' || order.fulfillment_status === 'DELIVERED') {
+      throw new Error('Đơn hàng đã được bàn giao cho bên vận chuyển, không thể hủy');
+    }
+
+    // Đơn POD: nếu xưởng in đã tiếp nhận in hoặc đang in thì không thể tự hủy
+    if (order.is_pod && ['SUBMITTED', 'RECEIVED', 'PRINTING', 'PACKAGED'].includes(order.fulfillment_status || '')) {
+      throw new Error('Đơn hàng POD đã được gửi sang xưởng in và đang sản xuất, không thể hủy');
+    }
+
+    // Đơn hàng có sẵn: nếu người bán đã bấm chuẩn bị hàng (PROCESSING) hoặc duyệt đơn
+    if (!order.is_pod && order.seller_approval_status === 'APPROVED' && order.order_status !== 'ORDERED') {
+      throw new Error('Người bán đã chuẩn bị hàng, không thể tự hủy');
+    }
+
+    // Nếu đơn chọn PayOS nhưng DB đang PENDING: kiểm tra trực tiếp với cổng PayOS xem đã trả chưa
+    if (order.payment_method === 'PAYOS' && order.payment_status === 'PENDING') {
+      try {
+        await payosService.syncPayment({ orderId: String(order._id) });
+        const fresh = await OrderModel.findById(order._id);
+        if (fresh) {
+          order.payment_status = fresh.payment_status;
+          order.paid_at = fresh.paid_at;
+          order.payos_order_codes = fresh.payos_order_codes;
+        }
+      } catch (syncErr: any) {
+        logger.warn(`[PayOS Sync on Cancel] #${order.order_code}: ${syncErr?.message || syncErr}`);
+      }
+    }
+
+    const wasPaid = order.payment_status === 'PAID';
+    const now = new Date();
+
+    order.order_status = 'CANCELLED';
+    order.fulfillment_status = 'CANCELLED';
+    order.seller_approval_status = 'REJECTED';
+    order.status_history.push({
+      status: 'CANCELLED',
+      changed_at: now,
+      note: `Người mua tự hủy đơn hàng. Lý do: ${reason || 'Người mua đổi ý'}`
+    });
+
+    if (wasPaid) {
+      order.payment_status = 'REFUNDED';
+      order.refund_status = 'REFUNDED';
+    }
+
+    await order.save();
+
+    // Hoàn lại kho và voucher
+    await OrdersService.restoreOrderStockAndCoupon(order);
+
+    // Tự động kích hoạt lệnh hoàn tiền qua PayOS Payout / VNPay Refund
+    if (wasPaid && ['PAYOS', 'VNPAY'].includes(order.payment_method)) {
+      const refundAmount = Math.max(0,
+        num(order.financial_breakdown?.subtotal) +
+        num(order.financial_breakdown?.shipping_fee) -
+        num(order.financial_breakdown?.coupon_discount)
+      );
+
+      if (refundAmount > 0) {
+        try {
+          const refundResult = await executeRefund({
+            orderId: String(order._id),
+            businessKey: `CANCEL-${order.order_code}-${Date.now()}`,
+            amount: Math.round(refundAmount),
+            reason: `Người mua tự hủy đơn #${order.order_code}`,
+            createdBy: String(buyerId),
+          });
+          logger.info(`[AUTO-REFUND] Đơn hàng #${order.order_code} hoàn tiền thành công: status=${refundResult.status}, amount=${refundResult.amount}`);
+        } catch (refundErr: any) {
+          logger.error(`[AUTO-REFUND ERROR] #${order.order_code}: ${refundErr?.message || refundErr}`);
+        }
+      }
+    }
+
+    // Thông báo cho Buyer
+    try {
+      await notificationService.createNotification({
+        user_id: buyerId,
+        type: 'ORDER_UPDATE',
+        title: 'Hủy đơn hàng thành công',
+        content: `Đơn hàng #${order.order_code} đã được hủy thành công.${wasPaid ? ' Số tiền thanh toán sẽ được hoàn lại.' : ''}`,
+        link: `/orders/${order._id}`,
+        metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: 'CANCELLED' }
+      });
+    } catch (err: any) {
+      console.error('[NOTIFICATION] Lỗi gửi thông báo hủy đơn cho Buyer:', err?.message || err);
+    }
+
+    // Thông báo cho Seller
+    try {
+      if (order.shop_id) {
+        const shop = await Shop.findById(order.shop_id);
+        if (shop?.owner_id) {
+          await notificationService.createNotification({
+            user_id: shop.owner_id.toString(),
+            type: 'ORDER_UPDATE',
+            title: 'Khách hàng đã hủy đơn',
+            content: `Đơn hàng #${order.order_code} đã bị người mua hủy. Lý do: ${reason || 'Người mua đổi ý'}`,
+            link: `/seller/orders`,
+            metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: 'CANCELLED' }
+          });
+        }
+      }
+    } catch (err: any) {
+      console.error('[NOTIFICATION] Lỗi gửi thông báo hủy đơn cho Seller:', err?.message || err);
     }
 
     const populated = await OrderModel.findById(order._id)
@@ -532,12 +678,8 @@ export class OrdersService {
       });
       await order.save();
 
-      // Hoàn lại lượt dùng voucher khi đơn bị huỷ
-      if (order.coupon_code) {
-        await PromotionService.releaseUsage(order.coupon_code).catch(err =>
-          console.error('[COUPON] Lỗi hoàn lượt dùng voucher:', err?.message || err)
-        );
-      }
+      // Hoàn lại lượt dùng voucher và tồn kho khi đơn bị huỷ
+      await OrdersService.restoreOrderStockAndCoupon(order);
 
       try {
         await notificationService.createNotification({
