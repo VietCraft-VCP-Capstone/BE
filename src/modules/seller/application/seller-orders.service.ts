@@ -301,6 +301,10 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
+        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
+        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
+            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
+        }
 
         const isPod = Boolean(
             order.is_pod ||
@@ -361,6 +365,10 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
+        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
+        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
+            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
+        }
 
         // Cập nhật trạng thái duyệt của người bán
         order.seller_approval_status = 'APPROVED';

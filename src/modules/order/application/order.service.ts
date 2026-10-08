@@ -273,8 +273,9 @@ export class OrdersService {
         metadata: { orderId: order._id.toString(), orderCode: order.order_code }
       });
 
-      // 2. Thông báo cho người bán (nếu có shop)
-      if (shopId) {
+      // 2. Thông báo cho người bán. Đơn trả trước chỉ báo khi tiền đã về (webhook/đối soát
+      // của cổng thanh toán tự báo), tránh người bán thấy đơn mà không duyệt được.
+      if (shopId && paymentMethod === 'COD') {
         const shop = await Shop.findById(shopId);
         if (shop?.owner_id) {
           await notificationService.createNotification({
