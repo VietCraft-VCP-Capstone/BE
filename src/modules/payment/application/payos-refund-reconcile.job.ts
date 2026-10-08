@@ -55,11 +55,14 @@ export class PayosRefundReconcileJob {
 
     private static async resume(businessKey: string): Promise<void> {
         // Import muộn để tránh vòng phụ thuộc payment <-> order.
-        const { RefundRequest } = await import('../../order/infrastructure/models/refund-request.model');
-        if (await RefundRequest.exists({ _id: businessKey })) {
-            const { RefundRequestService } = await import('../../order/application/refund-request.service');
-            await RefundRequestService.retryExecution(businessKey, 'SYSTEM');
-            return;
+        const { Types } = await import('mongoose');
+        if (Types.ObjectId.isValid(businessKey)) {
+            const { RefundRequest } = await import('../../order/infrastructure/models/refund-request.model');
+            if (await RefundRequest.exists({ _id: businessKey })) {
+                const { RefundRequestService } = await import('../../order/application/refund-request.service');
+                await RefundRequestService.retryExecution(businessKey, 'SYSTEM');
+                return;
+            }
         }
         const { MongoReturnRequestV3Repository } = await import('../../order/infrastructure/repositories/return-request-v3.repository');
         const request = await new MongoReturnRequestV3Repository().findById(businessKey);
@@ -67,6 +70,20 @@ export class PayosRefundReconcileJob {
             const { executeReturnRefund } = await import('../../order/application/return-refund-executor');
             await executeReturnRefund(request);
             return;
+        }
+        if (businessKey.startsWith('CANCEL-')) {
+            const { refundExecutionService } = await import('./refund-runtime');
+            const execution = await PaymentRefundExecution.findOne({ business_key: businessKey }).lean();
+            if (execution) {
+                await refundExecutionService.execute({
+                    orderId: execution.order_id,
+                    businessKey: execution.business_key,
+                    amount: execution.amount,
+                    reason: 'Hủy đơn hàng',
+                    createdBy: 'SYSTEM',
+                });
+                return;
+            }
         }
         logger.warn(`[PAYOS REFUND RECONCILE] Không tìm thấy yêu cầu nghiệp vụ cho execution ${businessKey}.`);
     }

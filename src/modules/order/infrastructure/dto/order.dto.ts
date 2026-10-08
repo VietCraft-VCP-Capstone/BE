@@ -119,6 +119,7 @@ export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>
         isPod,
         orderType: dbOrder.order_type || (isPod ? 'POD' : 'READY_TO_SHIP'),
         fulfillmentStatus: dbOrder.fulfillment_status,
+        sellerApprovalStatus: dbOrder.seller_approval_status || (dbOrder.fulfillment_status === 'PENDING_APPROVAL' ? 'PENDING_APPROVAL' : 'APPROVED'),
         printerInfo: dbOrder.printer_info ? {
             printerId: dbOrder.printer_info.printer_id,
             printerName: dbOrder.printer_info.printer_name,
