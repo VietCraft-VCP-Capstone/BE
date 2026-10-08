@@ -29,6 +29,9 @@ async function bootstrap() {
     const { ReturnDeadlineJob } = await import('./modules/order/application/return-deadline.job');
     ReturnDeadlineJob.start();
 
+    const { PayosRefundReconcileJob } = await import('./modules/payment/application/payos-refund-reconcile.job');
+    PayosRefundReconcileJob.start();
+
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);
         logger.info(` VietCraft Backend Monolith Running...`);

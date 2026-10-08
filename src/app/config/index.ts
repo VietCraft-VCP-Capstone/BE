@@ -67,6 +67,21 @@ export const config = {
     },
     // Shared secret cổng thanh toán dùng để ký webhook POST /orders/callback/:id.
     paymentCallbackSecret: process.env.PAYMENT_CALLBACK_SECRET || '',
+    payos: {
+        // Thu tiền (payment link)
+        clientId: process.env.PAYOS_CLIENT_ID || '',
+        apiKey: process.env.PAYOS_API_KEY || '',
+        checksumKey: process.env.PAYOS_CHECKSUM_KEY || '',
+        baseUrl: process.env.PAYOS_BASE_URL || 'https://api-merchant.payos.vn',
+        // Trang FE mở lại sau thanh toán/huỷ; mặc định {FRONTEND_URL}/orders/:id.
+        checkoutReturnUrl: process.env.PAYOS_RETURN_URL || '',
+        checkoutCancelUrl: process.env.PAYOS_CANCEL_URL || '',
+        // Chi tiền (payout) để hoàn tiền tự động
+        payoutClientId: process.env.PAYOS_PAYOUT_CLIENT_ID || '',
+        payoutApiKey: process.env.PAYOS_PAYOUT_API_KEY || '',
+        payoutChecksumKey: process.env.PAYOS_PAYOUT_CHECKSUM_KEY || '',
+        payoutBaseUrl: process.env.PAYOS_PAYOUT_BASE_URL || 'https://api-merchant.payos.vn',
+    },
     speedSmsAccessToken: process.env.SPEEDSMS_ACCESS_TOKEN || '',
     speedSmsType: Number(process.env.SPEEDSMS_SMS_TYPE) || 2,
     vnpay: {

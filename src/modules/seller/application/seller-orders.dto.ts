@@ -48,7 +48,7 @@ export interface SellerOrderDTO {
     isPod: boolean;
     orderType: 'POD' | 'READY_TO_SHIP' | 'STANDARD';
     paymentStatus: 'PENDING' | 'PAID' | 'REFUNDED';
-    paymentMethod: 'VNPAY' | 'MOMO' | 'COD';
+    paymentMethod: 'VNPAY' | 'PAYOS' | 'COD';
     createdAt: string;
     updatedAt: string;
     buyer: {
