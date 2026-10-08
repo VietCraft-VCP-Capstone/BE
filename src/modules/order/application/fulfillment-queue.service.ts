@@ -1,8 +1,6 @@
 import mongoose from 'mongoose';
 import { FulfillmentJob, IFulfillmentJob } from '../infrastructure/models/fulfillment-job.model';
 import { Order as OrderModel } from '../infrastructure/models/order.model';
-import { Refund } from '../../refund/infrastructure/models/refund.model';
-import { OPEN_REFUND_STATUSES } from '../../refund/domain/refund-state';
 import { printingShopApiService, PrintingApiError } from '../infrastructure/services/printing-shop-api.service';
 import { logger } from '../../../shared/utils/logger';
 
@@ -28,6 +26,7 @@ export class FulfillmentQueueService {
         if (!order) {
             throw new Error(`Không tìm thấy đơn hàng ID: ${orderId}`);
         }
+        if (order.is_simulated) throw new Error('Đơn mô phỏng không thể vào hàng đợi fulfillment.');
 
         // Cập nhật trạng thái đơn sang QUEUED
         order.fulfillment_status = 'QUEUED';
@@ -79,6 +78,12 @@ export class FulfillmentQueueService {
             await job.save();
             return false;
         }
+        if (order.is_simulated) {
+            job.status = 'FAILED';
+            job.last_error = 'Đơn mô phỏng bị chặn khỏi fulfillment.';
+            await job.save();
+            return false;
+        }
 
         // Refund/cancel có thể thắng race ngay trước lúc worker nhặt job. Kiểm tra lại
         // order tại thời điểm thực thi để không gửi một đơn đã đóng sang xưởng.
@@ -89,16 +94,6 @@ export class FulfillmentQueueService {
         ) {
             job.status = 'FAILED';
             job.last_error = 'ORDER_CANCELED_OR_REFUNDED';
-            await job.save();
-            return false;
-        }
-
-        // Refund đang chờ duyệt/đang chi tiền: chưa được sản xuất. Chặn cả đường retry job thủ
-        // công. Reject/cancel refund sẽ tự đưa đơn vào hàng đợi lại.
-        const openRefund = await Refund.exists({ order_id: order._id, status: { $in: OPEN_REFUND_STATUSES } });
-        if (openRefund) {
-            job.status = 'FAILED';
-            job.last_error = `REFUND_OPEN:${openRefund._id}`;
             await job.save();
             return false;
         }

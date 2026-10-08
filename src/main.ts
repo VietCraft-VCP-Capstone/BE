@@ -5,8 +5,7 @@ import { config, initializeDatabases } from './app/config';
 import { logger } from './shared/utils/logger';
 import { ChatGateway } from './modules/chat';
 import { NotificationGateway } from './modules/notification';
-import { payosPayoutService, RefundReconcileService } from './modules/refund';
-
+// Khởi động server
 async function bootstrap() {
     const server = http.createServer(app);
     const io = new SocketIOServer(server, {
@@ -21,13 +20,17 @@ async function bootstrap() {
 
     await initializeDatabases();
 
-    // Health-check payout trước khi nhận request. Nếu credential/IP whitelist/channel
-    // chưa sẵn sàng, service tự hạ xuống MANUAL_VIETQR thay vì làm refund treo.
-    await payosPayoutService.initialize();
-    RefundReconcileService.startWorker();
-
     const { FulfillmentQueueService } = await import('./modules/order/application/fulfillment-queue.service');
     FulfillmentQueueService.startWorker();
+
+    const { RefundTimeoutJob } = await import('./modules/order/application/refund-timeout.job');
+    RefundTimeoutJob.start();
+
+    const { ReturnDeadlineJob } = await import('./modules/order/application/return-deadline.job');
+    ReturnDeadlineJob.start();
+
+    const { PayosRefundReconcileJob } = await import('./modules/payment/application/payos-refund-reconcile.job');
+    PayosRefundReconcileJob.start();
 
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);

@@ -34,7 +34,8 @@ router.post('/connect', authenticate, requireRole(['seller', 'admin']), async (r
 
 router.post('/disconnect', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
-        const result = await SellerPrinterService.disconnectPrinter(req.user!.id);
+        const { printer_id } = req.body || {};
+        const result = await SellerPrinterService.disconnectPrinter(req.user!.id, printer_id);
         res.json(result);
     } catch (error: any) {
         res.status(400).json({ error: error.message || 'Lỗi khi ngắt kết nối xưởng in.' });

@@ -13,6 +13,7 @@ export interface VNPayIpnResponse {
 export interface VNPayRefundInput {
     orderId: string;
     amount?: number;
+    refundRequestId?: string;
     reason: string;
     createdBy: string;
     clientIp?: string;
@@ -22,6 +23,8 @@ export interface VNPayRefundInput {
 
 export interface VNPayRefundResult {
     success: boolean;
+    status?: 'REFUNDED' | 'PENDING' | 'PROCESSING' | 'FAILED';
+    executionId?: string;
     message: string;
     data?: Record<string, any>;
 }

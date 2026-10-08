@@ -64,6 +64,7 @@ export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>
         const isReviewed = Boolean(matchedReview);
 
         return {
+            order_item_id: it.order_item_id ?? undefined,
             productId: prodId,
             variantId: it.variant_id?.toString() || '',
             title: it.title,
@@ -111,6 +112,7 @@ export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>
         shippingProvider: dbOrder.shipping_details?.carrier?.toLowerCase() || 'ghn',
         shippingCode: dbOrder.shipping_details?.tracking_number,
         paymentStatus: dbOrder.payment_status,
+        isStatusSimulation: Boolean(dbOrder.is_status_simulation),
         createdAt: dbOrder.created_at || dbOrder.createdAt || new Date(),
         is_reviewed: isOrderReviewed,
         isPod,
@@ -129,4 +131,4 @@ export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>
             address_detail: dbOrder.shipping_address?.address_detail || ''
         }
     };
-}
+}

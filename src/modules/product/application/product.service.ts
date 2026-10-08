@@ -10,7 +10,7 @@ import { tagsService } from '../../tags/application/tags.service';
 import { Design } from '../../design/infrastructure/models/design.model';
 import { generateSlug } from '../../../shared/utils/slug';
 import { BlankClient, Blank } from './blank-client.service';
-import { generateMockup, generateMockupLayers, generateWrapMockup } from './mockup.service';
+import { generateMockup, generateMockupLayers, generateWrapMockup, resolveColorHex } from './mockup.service';
 import { normalizeRole } from '../../../app/middleware/auth.middleware';
 import {
     ProductItemResponseDTO,
@@ -196,7 +196,7 @@ const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
 
 export class ProductsService {
 
-    static async validate(payload: any, opts: { partial?: boolean } = {}): Promise<ValidatedProductData> {
+    static async validate(payload: any, opts: { partial?: boolean; sellerId?: string } = {}): Promise<ValidatedProductData> {
         const errors: string[] = [];
         const partial = opts.partial === true;
 
@@ -265,8 +265,9 @@ export class ProductsService {
         let podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[] | undefined;
         let designPlacements: any[] | undefined;
         if (isPod) {
+            const currentSellerId = payload._sellerId || opts.sellerId;
             try {
-                blank = await BlankClient.getBlank(payload.blankId);
+                blank = await BlankClient.getBlank(payload.blankId, currentSellerId);
             } catch (e: any) {
                 errors.push(`không lấy được phôi: ${e.message}`);
             }
@@ -720,12 +721,16 @@ export class ProductsService {
             const built = await ProductsService.buildPodArtifacts(
                 data.blank, data.podVariants!, data.designPlacements!, data.category?._id?.toString() ?? null,
             );
-            images = built.images;
+            images = (Array.isArray(payload.images) && payload.images.length > 0)
+                ? payload.images
+                : built.images;
             variantsToWrite = built.variants;
             podFields = {
                 product_type: 'POD_TEMPLATE',
                 customization_type: 'ONLINE_MOCKUP',
                 blank_id: payload.blankId,
+                printer_id: payload.printerId || (data.blank as any)?.printer_id || shop.printer_partner?.printer_id,
+                printer_name: payload.printerName || (data.blank as any)?.printer_name || shop.printer_partner?.printer_name || 'Xưởng in đối tác',
                 design_placements: data.designPlacements!.map((p: any) => ({
                     ...p,
                     design_id: p.design_id ? new mongoose.Types.ObjectId(p.design_id) : undefined,
@@ -953,13 +958,17 @@ export class ProductsService {
             if (p.design_id) ids.add(String(p.design_id));
             for (const l of (p.layers || [])) if (l.type === 'image' && l.design_id) ids.add(String(l.design_id));
         }
-        const designs = await Design.find({ _id: { $in: [...ids].map(id => new mongoose.Types.ObjectId(id)) } }).lean();
+        const validIds = [...ids].filter(id => mongoose.Types.ObjectId.isValid(id));
+        const designs = validIds.length > 0
+            ? await Design.find({ _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+            : [];
         const designUrl = (id: string) => designs.find(d => d._id.toString() === String(id))?.file_url;
 
         const mockups: string[] = [];
         for (const p of placements) {
             const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-            const blankImage = (area && (area as any).image) || blank.default_image;
+            const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
+            const blankImage = rawImage || blank.default_image;
 
             if (Array.isArray(p.layers) && p.layers.length) {
 
@@ -1007,18 +1016,25 @@ export class ProductsService {
         return { images, variants };
     }
 
-    static async previewMockups(sellerId: string, blankId: string, designPlacements: any[]): Promise<string[]> {
+    static async previewMockups(
+        sellerId: string,
+        blankId: string,
+        designPlacements: any[],
+        options?: { colorHex?: string; colors?: { color?: string; color_hex?: string; sku?: string }[] }
+    ): Promise<{ images: string[]; byColor: { color: string; color_hex?: string; images: string[] }[] }> {
         if (!blankId) throw new ValidationError(['thiếu blankId']);
-        const blank = await BlankClient.getBlank(blankId);
+        const blank = await BlankClient.getBlank(blankId, sellerId);
         if (!blank) throw new ValidationError(['phôi không tồn tại']);
-
 
         const ids = new Set<string>();
         for (const p of (designPlacements || [])) {
             if (p.design_id) ids.add(String(p.design_id));
             for (const l of (p.layers || [])) if (l.type === 'image' && l.design_id) ids.add(String(l.design_id));
         }
-        const designs = await Design.find({ _id: { $in: [...ids].map(id => new mongoose.Types.ObjectId(id)) } }).lean();
+        const validIds = [...ids].filter(id => mongoose.Types.ObjectId.isValid(id));
+        const designs = validIds.length > 0
+            ? await Design.find({ _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+            : [];
         const ownedUrl = (id: string) => {
             const d = designs.find(x => x._id.toString() === String(id));
             if (!d) return undefined;
@@ -1026,29 +1042,77 @@ export class ProductsService {
             return d.file_url;
         };
 
-        const out: string[] = [];
-        for (const p of (designPlacements || [])) {
-            const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-            const blankImage = (area && (area as any).image) || blank.default_image;
-            if (!Array.isArray(p.layers) || !p.layers.length) continue;
-            const layers = p.layers.map((l: any) => l.type === 'image' ? { ...l, designUrl: ownedUrl(l.design_id) } : l)
-                .filter((l: any) => l.type !== 'image' || l.designUrl);
-            if (!layers.length) continue;
-            if (area && (area as any).surface === 'wrap') {
-                out.push(await generateWrapMockup(blankImage, layers, {
-                    x: p.area?.x ?? area.x,
-                    y: p.area?.y ?? area.y,
-                    width: p.area?.width ?? area.width,
-                    height: p.area?.height ?? area.height,
-                    template_w: (area as any).template_w || 2475,
-                    template_h: (area as any).template_h || 1155,
-                    arc: (area as any).arc || 1.35,
-                }));
-            } else {
-                out.push(await generateMockupLayers(blankImage, layers));
+        const renderPlacements = async (colorHex?: string): Promise<string[]> => {
+            const out: string[] = [];
+            for (const p of (designPlacements || [])) {
+                const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
+                const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
+                const blankImage = rawImage || blank.default_image;
+                if (!Array.isArray(p.layers) || !p.layers.length) continue;
+                const layers = p.layers.map((l: any) => l.type === 'image' ? { ...l, designUrl: ownedUrl(l.design_id) || l.designUrl || l.design?.file_url } : l)
+                    .filter((l: any) => l.type !== 'image' || l.designUrl);
+                if (!layers.length) continue;
+                if (area && (area as any).surface === 'wrap') {
+                    out.push(await generateWrapMockup(blankImage, layers, {
+                        x: p.area?.x ?? area.x,
+                        y: p.area?.y ?? area.y,
+                        width: p.area?.width ?? area.width,
+                        height: p.area?.height ?? area.height,
+                        template_w: (area as any).template_w || 2475,
+                        template_h: (area as any).template_h || 1155,
+                        arc: (area as any).arc || 1.35,
+                    }, colorHex));
+                } else {
+                    out.push(await generateMockupLayers(blankImage, layers, colorHex));
+                }
+            }
+            return out;
+        };
+
+        // Danh sách màu sắc từ options hoặc từ biến thể của phôi do printer khai báo
+        const inputColors = (options?.colors && Array.isArray(options.colors) && options.colors.length > 0)
+            ? options.colors
+            : (blank.variations && blank.variations.length > 0)
+                ? blank.variations.map(v => ({ color: v.color || 'Mặc định', color_hex: (v as any).color_hex || resolveColorHex(v.color) }))
+                : [];
+
+        const distinctColors: { color: string; color_hex?: string }[] = [];
+        const seenColors = new Set<string>();
+        for (const item of inputColors) {
+            const name = (item.color || 'Mặc định').trim();
+            if (name && !seenColors.has(name)) {
+                seenColors.add(name);
+                distinctColors.push({
+                    color: name,
+                    color_hex: item.color_hex || resolveColorHex(name)
+                });
             }
         }
-        return out;
+
+        const byColor: { color: string; color_hex?: string; images: string[] }[] = [];
+        if (distinctColors.length > 0) {
+            for (const c of distinctColors) {
+                const colorImgs = await renderPlacements(c.color_hex);
+                byColor.push({
+                    color: c.color,
+                    color_hex: c.color_hex,
+                    images: colorImgs.length ? colorImgs : [blank.default_image]
+                });
+            }
+        } else {
+            const defaultImgs = await renderPlacements(options?.colorHex);
+            byColor.push({
+                color: 'Mặc định',
+                color_hex: options?.colorHex,
+                images: defaultImgs.length ? defaultImgs : [blank.default_image]
+            });
+        }
+
+        const allImages = byColor.flatMap(c => c.images);
+        return {
+            images: allImages.length ? allImages : [blank.default_image],
+            byColor
+        };
     }
 
 
@@ -1060,7 +1124,7 @@ export class ProductsService {
             }
         }
 
-        const data = await ProductsService.validate(payload, { partial: true });
+        const data = await ProductsService.validate(payload, { partial: true, sellerId: mp.seller_id?.toString() || actor.id });
 
         if (payload.title !== undefined) {
             mp.title = data.title;
