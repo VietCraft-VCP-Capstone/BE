@@ -102,6 +102,15 @@ router.post('/seller/refund-requests/:id/retry-execution', authenticate, require
     const doc = await RefundRequestService.retryExecution(req.params.id, req.user!.id, role);
     return res.json({ success: true, data: doc });
 }));
+router.get('/seller/refund-requests/:id/manual-info', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {
+    const role = String(req.user!.role).toLowerCase() === 'admin' ? 'ADMIN' : 'SELLER';
+    return res.json({ success: true, data: await RefundRequestService.manualRefundInfo(req.params.id, req.user!.id, role) });
+}));
+router.post('/seller/refund-requests/:id/manual-settle', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {
+    const role = String(req.user!.role).toLowerCase() === 'admin' ? 'ADMIN' : 'SELLER';
+    const doc = await RefundRequestService.settleManually(req.params.id, req.user!.id, role, req.body?.reference, req.body?.note);
+    return res.json({ success: true, data: doc });
+}));
 router.post('/seller/refund-requests/:id/dispute', authenticate, requireRole(['seller', 'admin']), asyncHandler(async (req, res) => {
     const doc = await RefundRequestService.sellerDispute(req.params.id, req.user!.id, req.body?.reason);
     return res.json({ success: true, data: doc });

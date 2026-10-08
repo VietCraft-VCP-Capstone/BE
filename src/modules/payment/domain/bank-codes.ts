@@ -64,3 +64,22 @@ export function toNapasBin(raw: unknown): string | undefined {
     if (/^\d{8}$/.test(code)) return SBV_TO_BIN[code.slice(2, 5)];
     return undefined;
 }
+
+/** Tên ngắn theo VietQR cho các BIN ở bảng trên, để người bán chuyển khoản tay biết đúng ngân hàng. */
+const BIN_NAME: Record<string, string> = {
+    '970415': 'VietinBank', '970418': 'BIDV', '970436': 'Vietcombank', '970405': 'Agribank',
+    '970426': 'MSB', '970403': 'Sacombank', '970431': 'Eximbank', '970428': 'Nam A Bank',
+    '970416': 'ACB', '970400': 'Saigonbank', '970432': 'VPBank', '970407': 'Techcombank',
+    '970422': 'MB Bank', '970409': 'Bac A Bank', '970441': 'VIB', '970440': 'SeABank',
+    '970414': 'MBV', '970408': 'GPBank', '970437': 'HDBank', '970425': 'ABBANK',
+    '970454': 'BVBank', '970448': 'OCB', '970429': 'SCB', '970444': 'CBBank',
+    '970430': 'PGBank', '970443': 'SHB', '970419': 'NCB', '970452': 'KienlongBank',
+    '970427': 'VietABank', '970433': 'VietBank', '970449': 'LPBank', '970423': 'TPBank',
+    '970438': 'BaoViet Bank', '970412': 'PVcomBank', '970439': 'Public Bank', '970434': 'Indovina Bank',
+    '970421': 'VRB', '970442': 'Hong Leong Bank', '970410': 'Standard Chartered', '970424': 'Shinhan Bank',
+    '970457': 'Woori Bank', '970458': 'UOB', '970446': 'Co-opBank',
+};
+
+export function bankNameOf(bin?: string | null): string | undefined {
+    return bin ? BIN_NAME[bin] : undefined;
+}

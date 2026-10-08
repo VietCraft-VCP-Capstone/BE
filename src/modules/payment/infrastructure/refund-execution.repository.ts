@@ -56,12 +56,16 @@ export class MongoRefundExecutionRepository implements RefundExecutionRepository
         await Order.updateOne({ _id: orderId, refund_execution_id: executionId }, { $unset: { refund_execution_id: 1 } });
     }
     async materializeSuccess(context: RefundContext, record: PaymentRefundRecord): Promise<void> {
+        // Người bán tự chuyển khoản: ghi gateway MANUAL để đối soát tách khỏi tiền cổng tự chi.
+        const manual = record.gateway_response?.manual === true;
         await Transaction.updateOne({ refund_execution_id: record._id }, { $setOnInsert: {
             order_id: context.orderId, order_code: context.orderCode, user_id: context.buyerId,
-            gateway: context.paymentMethod, gateway_transaction_id: record.gateway_response?.vnp_TransactionNo || record.gateway_response?.reference || record.gateway_response?.payoutId,
+            gateway: manual ? 'MANUAL' : context.paymentMethod, gateway_transaction_id: record.gateway_response?.vnp_TransactionNo || record.gateway_response?.reference || record.gateway_response?.payoutId,
             gateway_response_code: '00', amount: dec(record.amount), type: 'REFUND', status: 'SUCCESS',
             refund_request_id: record.business_key, refund_execution_id: record._id,
-            callback_payload: record.gateway_response || {}, note: `${context.paymentMethod === 'PAYOS' ? 'payOS' : 'VNPay'} xác nhận hoàn ${record.amount}đ cho đơn ${context.orderCode}.`,
+            callback_payload: record.gateway_response || {}, note: manual
+                ? `Người bán chuyển khoản hoàn ${record.amount}đ cho đơn ${context.orderCode} (mã GD ${record.gateway_response?.reference}).`
+                : `${context.paymentMethod === 'PAYOS' ? 'payOS' : 'VNPay'} xác nhận hoàn ${record.amount}đ cho đơn ${context.orderCode}.`,
         } }, { upsert: true, runValidators: true });
         const refunded = await this.refundedAmount(context.orderId);
         await Order.updateOne({ _id: context.orderId }, { $set: { refund_status: 'REFUNDED', ...(refunded >= context.paidAmount ? { payment_status: 'REFUNDED' } : {}) } });
