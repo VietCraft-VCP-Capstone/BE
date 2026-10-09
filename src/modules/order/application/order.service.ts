@@ -377,6 +377,15 @@ export class OrdersService {
       }
     }
 
+    // Nếu đơn PayOS đã PAID: đảm bảo giao dịch gốc đã ghi vào DB để có đủ thông tin ngân hàng hoàn tiền
+    if (order.payment_method === 'PAYOS' && order.payment_status === 'PAID') {
+      try {
+        await payosService.ensurePaymentTransaction(String(order._id));
+      } catch (ensureErr: any) {
+        logger.warn(`[PayOS Ensure Tx on Cancel] #${order.order_code}: ${ensureErr?.message || ensureErr}`);
+      }
+    }
+
     const wasPaid = order.payment_status === 'PAID';
     const now = new Date();
 
@@ -401,6 +410,7 @@ export class OrdersService {
     await OrdersService.restoreOrderStockAndCoupon(order);
 
     // Tự động kích hoạt lệnh hoàn tiền qua PayOS Payout / VNPay Refund
+    let refundMessageSuffix = '';
     if (wasPaid && ['PAYOS', 'VNPAY'].includes(order.payment_method)) {
       const refundAmount = Math.max(0,
         num(order.financial_breakdown?.subtotal) +
@@ -417,9 +427,51 @@ export class OrdersService {
             reason: `Người mua tự hủy đơn #${order.order_code}`,
             createdBy: String(buyerId),
           });
-          logger.info(`[AUTO-REFUND] Đơn hàng #${order.order_code} hoàn tiền thành công: status=${refundResult.status}, amount=${refundResult.amount}`);
+
+          if (refundResult.status === 'REFUNDED') {
+            order.payment_status = 'REFUNDED';
+            order.refund_status = 'REFUNDED';
+            order.status_history.push({
+              status: 'CANCELLED',
+              changed_at: new Date(),
+              note: `Cổng thanh toán đã hoàn trả thành công ${refundAmount.toLocaleString('vi-VN')}đ về tài khoản ngân hàng.`
+            });
+            await order.save();
+            refundMessageSuffix = ' Số tiền thanh toán đã được hoàn về tài khoản ngân hàng của bạn.';
+            logger.info(`[AUTO-REFUND SUCCESS] #${order.order_code}: amount=${refundResult.amount}`);
+          } else if (refundResult.status === 'PENDING') {
+            order.refund_status = 'UNDER_REVIEW';
+            order.status_history.push({
+              status: 'CANCELLED',
+              changed_at: new Date(),
+              note: `Lệnh hoàn tiền ${refundAmount.toLocaleString('vi-VN')}đ đang được cổng thanh toán xử lý.`
+            });
+            await order.save();
+            refundMessageSuffix = ' Lệnh hoàn tiền đang được xử lý về tài khoản ngân hàng của bạn.';
+            logger.info(`[AUTO-REFUND PENDING] #${order.order_code}: ${refundResult.error || 'Đang xử lý'}`);
+          } else {
+            const failReason = refundResult.error || 'Cổng thanh toán từ chối lệnh chi tiền';
+            order.refund_status = 'REFUND_REJECTED';
+            order.status_history.push({
+              status: 'CANCELLED',
+              changed_at: new Date(),
+              note: `Hoàn tiền tự động không thành công: ${failReason}. Đang chờ đối soát hoàn thủ công.`
+            });
+            await order.save();
+            refundMessageSuffix = ` Lưu ý: Lệnh hoàn tiền tự động chưa hoàn tất (${failReason}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
+            logger.error(`[AUTO-REFUND FAILED] #${order.order_code}: ${failReason}`);
+          }
         } catch (refundErr: any) {
-          logger.error(`[AUTO-REFUND ERROR] #${order.order_code}: ${refundErr?.message || refundErr}`);
+          const errMsg = refundErr?.message || String(refundErr);
+          order.refund_status = 'REFUND_REJECTED';
+          order.status_history.push({
+            status: 'CANCELLED',
+            changed_at: new Date(),
+            note: `Lỗi xử lý hoàn tiền: ${errMsg}. Đang chờ đối soát hoàn thủ công.`
+          });
+          await order.save();
+          refundMessageSuffix = ` Lưu ý: Lỗi xử lý hoàn tiền (${errMsg}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
+          logger.error(`[AUTO-REFUND ERROR] #${order.order_code}: ${errMsg}`);
         }
       }
     }
@@ -430,7 +482,7 @@ export class OrdersService {
         user_id: buyerId,
         type: 'ORDER_UPDATE',
         title: 'Hủy đơn hàng thành công',
-        content: `Đơn hàng #${order.order_code} đã được hủy thành công.${wasPaid ? ' Số tiền thanh toán sẽ được hoàn lại.' : ''}`,
+        content: `Đơn hàng #${order.order_code} đã được hủy thành công.${refundMessageSuffix}`,
         link: `/orders/${order._id}`,
         metadata: { orderId: order._id.toString(), orderCode: order.order_code, status: 'CANCELLED' }
       });

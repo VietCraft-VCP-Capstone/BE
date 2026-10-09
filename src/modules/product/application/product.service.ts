@@ -701,7 +701,11 @@ export class ProductsService {
 
     static async getFeaturedShops(): Promise<any[]> {
         return cacheService.getOrSet('vietcraft:shops:featured', async () => {
-            return Shop.find().sort({ average_rating: -1, listing_count: -1 }).limit(5).lean();
+            return Shop.find()
+                .select('shop_name slug logo banner average_rating listing_count')
+                .sort({ average_rating: -1, listing_count: -1 })
+                .limit(5)
+                .lean();
         }, 600);
     }
 
@@ -1166,6 +1170,19 @@ export class ProductsService {
     }
 
     private static async updateSimple(mp: any, actor: ProductActor, payload: Partial<ProductFormDataDTO>): Promise<ProductItemResponseDTO> {
+        if (payload.price !== undefined) {
+            const basePrice = Number(payload.price);
+            if (isNaN(basePrice) || basePrice <= 0) {
+                throw new ValidationError(['Giá bán phải lớn hơn 0']);
+            }
+        }
+        if (payload.stock !== undefined) {
+            const totalStock = Number(payload.stock);
+            if (isNaN(totalStock) || totalStock < 0) {
+                throw new ValidationError(['Tồn kho không được âm']);
+            }
+        }
+
         const catalog = await ProductsService.resolveFlatCatalog(payload, actor.id, { required: false });
 
         if (catalog.category) {
