@@ -149,5 +149,23 @@ router.post('/scan-cccd', authenticate, async (req: AuthenticatedRequest, res: R
     }
 });
 
+/**
+ * 9. Kiểm tra ảnh chân dung bằng AI
+ */
+router.post('/validate-portrait', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const { filename } = req.body;
+        if (!filename) {
+            return res.status(400).json({ success: false, error: 'Thiếu tên file ảnh chân dung để kiểm tra.' });
+        }
+
+        const result = await SellerKycService.validatePortrait(filename);
+        res.status(200).json(result);
+    } catch (error: any) {
+        logger.error(`[Seller KYC Validate Portrait Error] User ${req.user?.id}: ${error.message}`);
+        res.status(400).json({ success: false, error: error.message });
+    }
+});
+
 export const sellerKycRouter = router;
 

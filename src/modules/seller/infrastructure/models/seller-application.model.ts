@@ -12,6 +12,7 @@ export interface IKycData {
     tax_code?: string;
     front_id_image?: string;
     back_id_image?: string;
+    portrait_image?: string;
 
     company_name?: string;
     business_license_number_encrypted?: string;
@@ -101,6 +102,7 @@ const KycDataSchema = new Schema<IKycData>({
     tax_code: { type: String },
     front_id_image: { type: String },
     back_id_image: { type: String },
+    portrait_image: { type: String },
 
     company_name: { type: String },
     business_license_number_encrypted: { type: String },
