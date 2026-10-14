@@ -22,6 +22,36 @@ export class CartService {
         return existing;
     }
 
+    private static mergeDuplicateItems(cart: any): boolean {
+        if (!cart || !Array.isArray(cart.items) || cart.items.length <= 1) return false;
+
+        const mergedMap = new Map<string, any>();
+        let hasDuplicates = false;
+
+        for (const item of cart.items) {
+            const pId = (item.product_id?._id || item.product_id)?.toString();
+            const vId = (item.variant_id?._id || item.variant_id)?.toString() || '';
+            const key = `${pId}::${vId}`;
+
+            if (mergedMap.has(key)) {
+                const existing = mergedMap.get(key);
+                existing.quantity = (Number(existing.quantity) || 1) + (Number(item.quantity) || 1);
+                if (item.custom_notes && !existing.custom_notes) {
+                    existing.custom_notes = item.custom_notes;
+                }
+                existing.updated_at = new Date();
+                hasDuplicates = true;
+            } else {
+                mergedMap.set(key, item);
+            }
+        }
+
+        if (hasDuplicates) {
+            cart.items = Array.from(mergedMap.values());
+        }
+        return hasDuplicates;
+    }
+
     static async getCart(userId: string) {
         const ownerId = toUserObjectId(userId);
         const cart = await CartService.ensureCart(ownerId);
@@ -42,6 +72,9 @@ export class CartService {
                     }
                 }
             }
+            if (CartService.mergeDuplicateItems(cart)) {
+                hasModified = true;
+            }
             if (hasModified) {
                 await cart.save();
             }
@@ -52,9 +85,11 @@ export class CartService {
             .populate(VARIANT_POPULATE);
     }
 
-    static async addItem(userId: string, payload: { productId: string; variantId?: string; quantity: number; customNotes?: string }) {
+    static async addItem(userId: string, payload: { productId?: string; product_id?: string; variantId?: string; variant_id?: string; quantity: number; customNotes?: string }) {
         const ownerId = toUserObjectId(userId);
-        const { productId, variantId, customNotes } = payload;
+        const productId = String(payload.productId || payload.product_id || '').trim();
+        const variantId = (payload.variantId || payload.variant_id) ? String(payload.variantId || payload.variant_id).trim() : undefined;
+        const customNotes = payload.customNotes;
         const quantity = Math.max(1, Number(payload.quantity) || 1);
 
         if (!mongoose.Types.ObjectId.isValid(productId)) throw new Error('Sản phẩm không hợp lệ');
@@ -79,11 +114,23 @@ export class CartService {
 
         const cart = await CartService.ensureCart(ownerId);
 
+        // Chuẩn hóa và gộp các mặt hàng trùng lặp nếu có từ trước
+        CartService.mergeDuplicateItems(cart);
+
         const targetVariantId = variant ? variant._id.toString() : (variantId || undefined);
 
+        // Tìm kiếm xem đã có trong giỏ chưa
         const existingIndex = cart.items.findIndex(
-            item => item.product_id.toString() === productId &&
-                (targetVariantId ? item.variant_id?.toString() === targetVariantId : !item.variant_id)
+            (item: any) => {
+                const itemProdId = (item.product_id?._id || item.product_id)?.toString();
+                const itemVarId = (item.variant_id?._id || item.variant_id)?.toString();
+
+                if (itemProdId !== productId) return false;
+                if (targetVariantId) {
+                    return itemVarId === targetVariantId || !itemVarId;
+                }
+                return !itemVarId;
+            }
         );
 
         const currentQty = existingIndex > -1 ? cart.items[existingIndex].quantity : 0;
@@ -92,13 +139,18 @@ export class CartService {
         }
 
         if (existingIndex > -1) {
+            // Đã có -> Chỉ tăng số lượng
             cart.items[existingIndex].quantity = currentQty + quantity;
+            if (targetVariantId && !cart.items[existingIndex].variant_id) {
+                cart.items[existingIndex].variant_id = variant ? variant._id : new mongoose.Types.ObjectId(targetVariantId);
+            }
             if (customNotes) cart.items[existingIndex].custom_notes = customNotes;
             cart.items[existingIndex].updated_at = new Date();
         } else {
+            // Chưa có -> Mới thêm dòng mới
             cart.items.push({
                 product_id: new mongoose.Types.ObjectId(productId),
-                variant_id: variant ? variant._id : (variantId ? new mongoose.Types.ObjectId(variantId) : undefined),
+                variant_id: variant ? variant._id : (variantId && mongoose.Types.ObjectId.isValid(variantId) ? new mongoose.Types.ObjectId(variantId) : undefined),
                 quantity,
                 is_selected: true,
                 custom_notes: customNotes,
@@ -106,6 +158,7 @@ export class CartService {
             });
         }
 
+        CartService.mergeDuplicateItems(cart);
         await cart.save();
         return this.getCart(userId);
     }

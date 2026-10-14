@@ -184,7 +184,8 @@ class AdminService implements IAdminService {
             filter.seller_type = query.seller_type;
         }
         if (query.search) {
-            const regex = new RegExp(String(query.search).trim(), 'i');
+            const safeSearch = String(query.search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(safeSearch, 'i');
             filter.$or = [
                 { 'shop_info.shop_name': regex },
                 { 'kyc_data.full_name': regex },

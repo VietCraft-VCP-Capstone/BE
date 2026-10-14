@@ -22,6 +22,17 @@ router.get('/commission', authenticate, requireRole(['seller', 'admin']), async 
     }
 });
 
+router.get('/reputation', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const { ReputationService } = await import('../application/reputation.service');
+        const profile = await ReputationService.getShopRiskProfile(req.user!.id);
+        const logs = profile?.shop_id ? await ReputationService.getLogs(profile.shop_id, 10) : [];
+        res.json({ profile, logs });
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tải điểm uy tín gian hàng.' });
+    }
+});
+
 router.get('/', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const settings = await SellerSettingsService.getSettings(req.user!.id);

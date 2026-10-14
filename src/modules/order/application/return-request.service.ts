@@ -5,6 +5,7 @@ import { ReturnStateMachine, type ReturnAction, type ReturnActor, type ReturnSta
 import { validateRequestedQuantity } from './return-quantity-policy';
 import type { ReturnRequestV3Data, ReturnRequestV3Patch, ReturnRequestV3Repository, ReturnRequestLogV3Data, ReturnEvidenceV3Data, ReturnRequestV3ListQuery, ReturnRequestV3Detail } from '../infrastructure/repositories/return-request-v3.repository';
 import type { ReturnV3FaultParty, ReturnV3Resolution, ReturnV3DeadlineType } from '../infrastructure/models/return-request-v3.model';
+import { ReputationService } from '../../seller/application/reputation.service';
 
 export interface DeliveredEventSourceV3 { getVerifiedDeliveredEvent(orderId: string, itemId: string): Promise<VerifiedDeliveredEvent | null>; getVerifiedTracking?(orderId:string,itemId:string):Promise<(R06TrackingEvidence & { faultParty?:'CARRIER'|'PRINTER' })|null> }
 export interface OrderReturnSnapshotSource {
@@ -188,6 +189,9 @@ export class ReturnRequestApplicationService {
         const to:ReturnState=input.resolution==='REFUND'?'CONVERTED_TO_REFUND':input.resolution==='EXCHANGE'?'APPROVED':'ADMIN_REJECTED';
         this.authorize('ADMIN_FINALIZE',current,input.actorId,'ADMIN');
         const saved=await this.commit(current,input.actorId,'ADMIN',action,to,input.reason,base);
+        if (input.faultParty === 'SELLER' && current.seller_id) {
+            void ReputationService.deductBySellerOrShop(current.seller_id, 10, 'Lỗi người bán trong giải quyết tranh chấp (Admin phân xử)', 'DISPUTE', current.id, { id: input.actorId, role: 'ADMIN' });
+        }
         if(input.resolution==='REFUND') return this.createBridge(saved); return saved;
     }
     async adminConfirmRefund(input:{actorId:string;requestId:string;amountMinor:number;currency:string;faultParty:ReturnV3FaultParty}):Promise<ReturnRequestV3Data>{
@@ -198,6 +202,9 @@ export class ReturnRequestApplicationService {
         if(!input.faultParty||!Number.isSafeInteger(input.amountMinor)||input.amountMinor<0||!input.currency.trim()) throw new Error('Admin confirmation requires verified fault and a valid Refund amount/currency.');
         const action:ReturnAction=current.status==='DISPUTED'?'ADMIN_CONFIRM_REFUND':'ADMIN_CONFIRM_REFUND';
         const saved=await this.commit(current,input.actorId,'ADMIN',action,'CONVERTED_TO_REFUND','Admin confirmed Refund before bridge.',{final_resolution:'REFUND',fault_party:input.faultParty,fault_source:'ADMIN',refund_admin_confirmed:true,refund_admin_confirmed_by:input.actorId,refund_admin_confirmed_at:this.now(),refund_amount_minor:input.amountMinor,refund_currency:input.currency,admin_decision_id:this.deps.id()});
+        if (input.faultParty === 'SELLER' && current.seller_id) {
+            void ReputationService.deductBySellerOrShop(current.seller_id, 10, 'Lỗi người bán trong giải quyết tranh chấp (Admin phân xử)', 'DISPUTE', current.id, { id: input.actorId, role: 'ADMIN' });
+        }
         return this.createBridge(saved);
     }
     async adminCorrect(input:{actorId:string;requestId:string;reason:string;resolution:ReturnV3Resolution;faultParty:ReturnV3FaultParty|null;amountMinor?:number;currency?:string}):Promise<ReturnRequestV3Data>{

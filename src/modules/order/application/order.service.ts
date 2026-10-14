@@ -18,7 +18,7 @@ import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
 import { executeRefund } from "../../payment/application/refund-runtime";
 import { payosService } from "../../payment/application/payos.service";
 import { logger } from "../../../shared/utils/logger";
-
+import { ReputationService } from "../../seller/application/reputation.service";
 
 export class OrdersService {
 
@@ -1043,6 +1043,13 @@ export class OrdersService {
 
     await order.save();
 
+    if (order.order_status === 'DELIVERED') {
+      const sellerOrShopId = (order as any).seller_id || (order.shop_id as any)?._id || order.shop_id;
+      if (sellerOrShopId) {
+        void ReputationService.recordCleanOrder(sellerOrShopId, order._id?.toString() || order.order_code);
+      }
+    }
+
     await WebhookLog.create({
       provider: 'PRINTING_SHOP',
       event_type: payload.event || pStatus || (tracking ? 'TRACKING_UPDATE' : 'STATUS_UPDATE'),
@@ -1135,6 +1142,12 @@ export class OrdersService {
       note: 'Khách hàng đã bấm xác nhận nhận được hàng thành công.'
     });
     await order.save();
+
+    // Hồi phục uy tín: Ghi nhận đơn hàng sạch khi giao thành công
+    const sellerOrShopId = (order as any).seller_id || (order.shop_id as any)?._id || order.shop_id;
+    if (sellerOrShopId) {
+      void ReputationService.recordCleanOrder(sellerOrShopId, order._id?.toString() || order.order_code);
+    }
 
     // Thông báo realtime cho Người bán
     const shopOwnerId = (order.shop_id as any)?.owner_id;

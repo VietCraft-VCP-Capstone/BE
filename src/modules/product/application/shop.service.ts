@@ -18,6 +18,8 @@ export interface ShopDetailDTO {
     listingCount: number;
     followersCount: number;
     isFollowing: boolean;
+    reputation_score?: number;
+    reputation_tier?: string;
     createdAt?: Date;
 }
 
@@ -52,6 +54,9 @@ export class ShopService {
             followerDoc?.buyer_ids?.some(id => id.toString() === currentUserId)
         );
 
+        const score = typeof shop.reputation_score === 'number' ? shop.reputation_score : 100;
+        const tier = shop.reputation_tier || (score >= 90 ? 'TRUSTED' : score >= 70 ? 'NORMAL' : score >= 50 ? 'WARNING' : 'RESTRICTED');
+
         return {
             id: shop._id.toString(),
             _id: shop._id.toString(),
@@ -67,6 +72,8 @@ export class ShopService {
             listingCount: typeof shop.listing_count === 'number' ? shop.listing_count : 0,
             followersCount,
             isFollowing,
+            reputation_score: score,
+            reputation_tier: tier,
             createdAt: shop.created_at,
         };
     }

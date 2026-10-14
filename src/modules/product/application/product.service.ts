@@ -475,15 +475,17 @@ export class ProductsService {
 
         if (filter?.category && filter.category.trim() !== ''
             && filter.category !== 'Tất cả danh mục' && filter.category !== 'ALL') {
-            query.categories = { $in: [new RegExp(filter.category.trim(), 'i')] };
+            const safeCat = filter.category.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            query.categories = { $regex: safeCat, $options: 'i' };
         }
 
         if (filter?.search && filter.search.trim() !== '') {
             const s = filter.search.trim();
+            const safeRegex = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             query.$or = [
-                { title: { $regex: s, $options: 'i' } },
-                { description: { $regex: s, $options: 'i' } },
-                { tags: { $in: [new RegExp(s, 'i')] } }
+                { title: { $regex: safeRegex, $options: 'i' } },
+                { description: { $regex: safeRegex, $options: 'i' } },
+                { tags: { $regex: safeRegex, $options: 'i' } }
             ];
         }
 
@@ -517,6 +519,27 @@ export class ProductsService {
                     }
                 },
                 { $sort: { [field]: dir, created_at: -1 } },
+                { $skip: skip },
+                { $limit: limit }
+            ]).exec();
+        } else if (filter?.search && (!sort || sort === 'relevance')) {
+            // SEO Nội sàn: Ưu tiên hiển thị sản phẩm của Shop có điểm uy tín cao (SRS)
+            docsPromise = MongoProduct.aggregate([
+                { $match: query },
+                {
+                    $lookup: {
+                        from: 'shops',
+                        localField: 'shop_id',
+                        foreignField: '_id',
+                        as: '_shop'
+                    }
+                },
+                {
+                    $addFields: {
+                        _reputationScore: { $ifNull: [{ $arrayElemAt: ['$_shop.reputation_score', 0] }, 100] }
+                    }
+                },
+                { $sort: { _reputationScore: -1, created_at: -1 } },
                 { $skip: skip },
                 { $limit: limit }
             ]).exec();

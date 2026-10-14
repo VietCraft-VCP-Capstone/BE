@@ -18,6 +18,8 @@ export interface IPrinterPartner {
     auto_approve?: boolean;
 }
 
+export type ReputationTier = 'TRUSTED' | 'NORMAL' | 'WARNING' | 'RESTRICTED';
+
 export interface IShop extends Document {
     owner_id: mongoose.Types.ObjectId;
     shop_name: string;
@@ -36,6 +38,11 @@ export interface IShop extends Document {
     average_rating: number;
     rating_count: number;
     product_diversity_score?: number;
+    reputation_score: number;
+    reputation_tier: ReputationTier;
+    clean_streak_orders: number;
+    dispute_count_30d: number;
+    penalty_points_30d: number;
     settings?: Record<string, any>;
     created_at: Date;
     updated_at: Date;
@@ -77,7 +84,17 @@ const ShopSchema = new Schema<IShop>({
     listing_count: { type: Number, default: 0 },
     average_rating: { type: Number, default: 0.0 },
     rating_count: { type: Number, default: 0 },
-    product_diversity_score: { type: Number, default: 0.0 }
+    product_diversity_score: { type: Number, default: 0.0 },
+    reputation_score: { type: Number, default: 100, min: 0, max: 100, index: true },
+    reputation_tier: { 
+        type: String, 
+        enum: ['TRUSTED', 'NORMAL', 'WARNING', 'RESTRICTED'], 
+        default: 'TRUSTED', 
+        index: true 
+    },
+    clean_streak_orders: { type: Number, default: 0 },
+    dispute_count_30d: { type: Number, default: 0 },
+    penalty_points_30d: { type: Number, default: 0 }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });

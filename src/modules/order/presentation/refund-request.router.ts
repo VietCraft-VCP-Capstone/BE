@@ -118,12 +118,15 @@ router.post('/seller/refund-requests/:id/dispute', authenticate, requireRole(['s
 
 const listPrinterRefunds = asyncHandler(async (req: PrinterRefundRequest, res) => {
     const printerId = req.printerActorId!;
-    const legacyDocs = await RefundRequest.find({ printer_id: printerId, status: 'PENDING_PRINTER' })
+    const printerQuery = ['PRINTER_SHOP', 'PRINTING_SHOP_MOCK'].includes(printerId)
+        ? { $in: ['PRINTER_SHOP', 'PRINTING_SHOP_MOCK', printerId] }
+        : printerId;
+    const legacyDocs = await RefundRequest.find({ printer_id: printerQuery, status: 'PENDING_PRINTER' })
         .populate('order_id').populate('buyer_id', 'full_name email').sort({ created_at: 1 }).lean();
     
     // Đồng bộ các yêu cầu V3 (Đổi hàng & Hoàn tiền theo món) của xưởng in
     const v3Docs = await ReturnRequestV3.find({
-        printer_id: printerId,
+        printer_id: printerQuery,
         status: { $in: ['PENDING_PRINTER', 'APPROVED', 'REJECTED', 'DISPUTED', 'AWAITING_ADMIN_REFUND'] }
     }).sort({ updated_at: -1, created_at: -1 }).limit(50).lean();
     const v3Mapped = await Promise.all(v3Docs.map(async (v3: any) => {
@@ -145,16 +148,18 @@ const listPrinterRefunds = asyncHandler(async (req: PrinterRefundRequest, res) =
         const isExchange = v3.requested_resolution === 'EXCHANGE';
         const unitPrice = v3.item_snapshot?.unit_price || v3.item_snapshot?.price || 0;
         const totalAmount = unitPrice * (v3.quantity || 1);
+        const orderCode = orderInfo?.order_code || v3.order_id;
 
         return {
             _id: requestId,
             id: requestId,
             is_v3: true,
-            printer_id: printerId,
+            printer_id: v3.printer_id || printerId,
             order_id: {
                 _id: orderInfo?._id || v3.order_id,
-                order_code: orderInfo?.order_code || v3.order_id,
+                order_code: orderCode,
             },
+            order_code: orderCode,
             buyer_id: {
                 _id: v3.buyer_id,
                 full_name: buyerInfo?.full_name || 'Khách hàng VietCraft',
@@ -182,13 +187,18 @@ const listPrinterRefunds = asyncHandler(async (req: PrinterRefundRequest, res) =
 const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, res) => {
     const id = String(req.params.id);
     const printerId = req.printerActorId!;
+    const isMatchedPrinter = (targetId: string | undefined | null) => {
+        if (!targetId || targetId === printerId) return true;
+        if (['PRINTER_SHOP', 'PRINTING_SHOP_MOCK'].includes(printerId) && ['PRINTER_SHOP', 'PRINTING_SHOP_MOCK'].includes(targetId)) return true;
+        return false;
+    };
     const decision = String(req.body?.decision || '').toUpperCase();
     const note = String(req.body?.note || '').trim();
     if (!['APPROVE', 'REJECT'].includes(decision)) throw new Error('decision không hợp lệ');
     if (decision === 'REJECT' && note.length < 3) throw new Error('Khi từ chối, cần ghi rõ lý do (ít nhất 3 ký tự)');
     const v3Doc: any = await ReturnRequestV3.findOne({ $or: [{ id }, { _id: id }] }).lean();
     if (v3Doc) {
-        if (v3Doc.printer_id !== printerId) return res.status(403).json({ error: 'Assigned Printer required' });
+        if (!isMatchedPrinter(v3Doc.printer_id)) return res.status(403).json({ error: 'Assigned Printer required' });
         const requestId = String(v3Doc.id || v3Doc._id);
         // Retry after a lost callback response must acknowledge the original decision.
         const previous = await ReturnRequestLogV3.findOne({ request_id: requestId, actor_id: printerId, actor_role: 'PRINTER',
@@ -220,7 +230,7 @@ const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, re
     if (!idOk(id)) throw new Error('ID không hợp lệ');
     const assigned = await RefundRequest.findById(id).lean();
     if (!assigned) return res.status(404).json({ error: 'Không tìm thấy yêu cầu hoàn tiền' });
-    if (assigned.printer_id !== printerId) return res.status(403).json({ error: 'Assigned Printer required' });
+    if (!isMatchedPrinter(assigned.printer_id)) return res.status(403).json({ error: 'Assigned Printer required' });
     if (assigned.printer_response?.decision === decision) return res.json({ success: true, data: assigned });
     const doc = await RefundRequestService.printerRespond(id, decision as 'APPROVE' | 'REJECT', note);
     return res.json({ success: true, data: doc });
