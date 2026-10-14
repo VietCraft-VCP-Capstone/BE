@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { canReturnActorPerform } from './return-actor-policy';
 import { validateReturnEvidence, type ReturnEvidenceItem } from './return-evidence-policy';
 import { calculateFixedDeadline, evaluateAnchoredWindow, evaluateP16EvidenceWindow, evaluatePodEligibility, inferDefaultFaultParty, type R06TrackingEvidence, type VerifiedDeliveredEvent } from './return-policy';
@@ -5,6 +6,7 @@ import { ReturnStateMachine, type ReturnAction, type ReturnActor, type ReturnSta
 import { validateRequestedQuantity } from './return-quantity-policy';
 import type { ReturnRequestV3Data, ReturnRequestV3Patch, ReturnRequestV3Repository, ReturnRequestLogV3Data, ReturnEvidenceV3Data, ReturnRequestV3ListQuery, ReturnRequestV3Detail } from '../infrastructure/repositories/return-request-v3.repository';
 import type { ReturnV3FaultParty, ReturnV3Resolution, ReturnV3DeadlineType } from '../infrastructure/models/return-request-v3.model';
+import { Order } from '../infrastructure/models/order.model';
 import { ReputationService } from '../../seller/application/reputation.service';
 
 export interface DeliveredEventSourceV3 { getVerifiedDeliveredEvent(orderId: string, itemId: string): Promise<VerifiedDeliveredEvent | null>; getVerifiedTracking?(orderId:string,itemId:string):Promise<(R06TrackingEvidence & { faultParty?:'CARRIER'|'PRINTER' })|null> }
@@ -63,17 +65,32 @@ export class ReturnRequestApplicationService {
     }
     async createBuyerRequest(input: { actorId:string; orderId:string; orderItemId:string; quantity:number; reasonCode:string; description:string; resolution:ReturnV3Resolution; evidence:readonly ReturnEvidenceItem[] }): Promise<ReturnRequestV3Data> {
         const orderId = await this.deps.resolveBuyerOrderId(input.orderId, input.actorId);
-        const snapshot = await this.deps.snapshotSource.getSnapshot(orderId, input.orderItemId);
+        let snapshot = await this.deps.snapshotSource.getSnapshot(orderId, input.orderItemId);
         if (!snapshot || snapshot.orderId !== orderId || snapshot.orderItemId !== input.orderItemId || snapshot.buyerId !== input.actorId) throw Object.assign(new Error('Không tìm thấy đơn hàng.'),{statusCode:404});
         if (snapshot.cohort !== 'POD') throw new Error('POD cohort validation failed.');
         const normalizedInputReason=input.reasonCode.trim().toUpperCase();
-        if(snapshot.itemStatus!=='DELIVERED' && normalizedInputReason!=='R06') throw new Error('Only Delivered items may create requests, except eligible R06 tracking cases.');
+        const now = this.now();
+        if(snapshot.itemStatus!=='DELIVERED' && normalizedInputReason!=='R06') {
+            if(snapshot.itemStatus==='SHIPPING') {
+                await Order.updateOne(
+                    { _id: new mongoose.Types.ObjectId(orderId) },
+                    {
+                        $set: { order_status: 'DELIVERED', fulfillment_status: 'DELIVERED', 'printer_info.printer_status': 'DELIVERED' },
+                        $push: { status_history: { status: 'DELIVERED', changed_at: now, note: 'Khách hàng tạo yêu cầu đổi/trả khi đang giao hàng (xác nhận đã nhận hàng).' } }
+                    }
+                );
+                const updatedSnapshot = await this.deps.snapshotSource.getSnapshot(orderId, input.orderItemId);
+                if(updatedSnapshot) snapshot = updatedSnapshot;
+                (snapshot as any).itemStatus = 'DELIVERED';
+            } else {
+                throw new Error('Only Delivered items may create requests, except eligible R06 tracking cases.');
+            }
+        }
         if(normalizedInputReason==='R06' && snapshot.itemStatus!=='DELIVERED' && snapshot.itemStatus!=='SHIPPING') throw new Error('R06 not-received requests require Delivered or Shipping item status.');
         const evidenceCheck = validateReturnEvidence({ reasonCode:input.reasonCode, description:input.description, evidence:input.evidence });
         if (evidenceCheck.kind !== 'VALID') throw new Error(evidenceCheck.reason);
         const quantity = validateRequestedQuantity({ requested:input.quantity, ordered:snapshot.orderedQuantity, alreadyReplaced:snapshot.replacedQuantity, alreadyRefunded:snapshot.refundedQuantity, activeReserved:snapshot.activeReservedQuantity });
         if (quantity.kind !== 'VALID') throw new Error('Requested quantity exceeds remaining item quantity.');
-        const now = this.now();
         let delivered: VerifiedDeliveredEvent | null = null;
         try { delivered = await this.deps.deliveredEventSource.getVerifiedDeliveredEvent(orderId, input.orderItemId); } catch { /* Missing source evidence is routed to Admin review below. */ }
         if(snapshot.itemStatus==='SHIPPING') delivered=null;
@@ -229,7 +246,7 @@ export class ReturnRequestApplicationService {
             const itemId=row.orderItemId || null; const snapshot=snapshots[index]; const active=itemId ? activeRequests.find(request=>request.order_item_id===itemId) : undefined;
             const remaining=Math.max(0,row.orderedQuantity-row.replacedQuantity-row.refundedQuantity-row.activeReservedQuantity);
             let deadline:Date|null=null;
-            if(itemId && row.itemStatus==='DELIVERED' && row.cohort==='POD') {
+            if(itemId && (row.itemStatus==='DELIVERED' || row.itemStatus==='SHIPPING') && row.cohort==='POD') {
                 try { const delivered=await this.deps.deliveredEventSource.getVerifiedDeliveredEvent(orderId,itemId); const result=evaluatePodEligibility({reasonCode:'R02',now:this.now(),deliveredEvent:delivered,r06DeliveredWindowHours:this.deps.r06DeliveredWindowHours}); if(result.kind==='ELIGIBLE'||result.kind==='EXPIRED') deadline=result.deadline; } catch { deadline=null; }
             }
             let reasonIfNot:ReturnEligibilityItem['reasonIfNot']=null;
@@ -237,8 +254,8 @@ export class ReturnRequestApplicationService {
             else if(row.cohort==='NORMAL') reasonIfNot={code:'NORMAL_UNSUPPORTED',label:'Sản phẩm thường chưa hỗ trợ đổi/trả trực tuyến'};
             else if(active) reasonIfNot={code:'ACTIVE_REQUEST',label:'Đã có yêu cầu đang xử lý'};
             else if(remaining<=0) reasonIfNot={code:'QUANTITY_EXHAUSTED',label:'Đã dùng hết số lượng'};
-            else if(row.itemStatus!=='DELIVERED') reasonIfNot={code:'NOT_DELIVERED',label:'Đơn hàng chưa giao'};
-            else {
+            else if(row.itemStatus!=='DELIVERED' && row.itemStatus!=='SHIPPING') reasonIfNot={code:'NOT_DELIVERED',label:'Đơn hàng chưa giao'};
+            else if(row.itemStatus==='DELIVERED') {
                 const delivered=itemId ? await this.deps.deliveredEventSource.getVerifiedDeliveredEvent(orderId,itemId).catch(()=>null) : null;
                 const policy=evaluatePodEligibility({reasonCode:'R02',now:this.now(),deliveredEvent:delivered,r06DeliveredWindowHours:this.deps.r06DeliveredWindowHours});
                 if(policy.kind==='EXPIRED') reasonIfNot={code:'EXPIRED',label:'Đã quá hạn gửi yêu cầu'};
