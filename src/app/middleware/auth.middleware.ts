@@ -19,7 +19,10 @@ export function hasRole(user: AuthUser | undefined, roles: Role[]): boolean {
 export function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Unauthorized: Missing or malformed token' });
+        return res.status(401).json({
+            error: 'Phiên làm việc đã hết hạn hoặc thiếu thông tin xác thực. Vui lòng đăng nhập lại.',
+            code: 'UNAUTHORIZED'
+        });
     }
 
     const token = authHeader.split(' ')[1];
@@ -28,17 +31,26 @@ export function authenticate(req: AuthenticatedRequest, res: Response, next: Nex
         req.user = { id: decoded.id, email: decoded.email, role: decoded.role };
         next();
     } catch (error) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+        return res.status(401).json({
+            error: 'Phiên đăng nhập đã hết hạn hoặc không hợp lệ. Vui lòng đăng nhập lại.',
+            code: 'INVALID_TOKEN'
+        });
     }
 }
 
 export function requireRole(roles: Role[]) {
     return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
         if (!req.user) {
-            return res.status(401).json({ error: 'Unauthorized: Not authenticated' });
+            return res.status(401).json({
+                error: 'Vui lòng đăng nhập để thực hiện thao tác này.',
+                code: 'UNAUTHORIZED'
+            });
         }
         if (!hasRole(req.user, roles)) {
-            return res.status(403).json({ error: `Forbidden: Requires one of [${roles.join(', ')}] roles` });
+            return res.status(403).json({
+                error: `Bạn không có quyền truy cập chức năng này (yêu cầu quyền: ${roles.join(', ')}).`,
+                code: 'FORBIDDEN'
+            });
         }
         next();
     };
