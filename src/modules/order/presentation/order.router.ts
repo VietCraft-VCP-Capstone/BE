@@ -1,8 +1,9 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { OrdersService } from '../application/order.service';
-import { authenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { config } from '../../../app/config';
+import { authenticate, AuthenticatedRequest, requireRole } from '../../../app/middleware/auth.middleware';
+
 import { logger } from '../../../shared/utils/logger';
 
 const router = Router();
@@ -92,6 +93,27 @@ router.get('/:id', authenticate, async (req: AuthenticatedRequest, res) => {
         res.json(order);
     } catch (error: any) {
         res.status(404).json({ error: error.message });
+    }
+});
+
+router.post('/:id/cancel', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const buyerId = req.user!.id;
+        const { reason } = req.body || {};
+        const result = await OrdersService.cancelOrderByBuyer(req.params.id, buyerId, reason);
+        res.json(result);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi hủy đơn hàng.' });
+    }
+});
+
+router.post('/:id/confirm-delivery', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const buyerId = req.user!.id;
+        const result = await OrdersService.confirmDeliveryByBuyer(req.params.id, buyerId);
+        res.json(result);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi xác nhận nhận hàng.' });
     }
 });
 

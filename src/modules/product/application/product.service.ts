@@ -10,7 +10,7 @@ import { tagsService } from '../../tags/application/tags.service';
 import { Design } from '../../design/infrastructure/models/design.model';
 import { generateSlug } from '../../../shared/utils/slug';
 import { BlankClient, Blank } from './blank-client.service';
-import { generateMockup, generateMockupLayers, generateWrapMockup } from './mockup.service';
+import { generateMockup, generateMockupLayers, generateWrapMockup, resolveColorHex } from './mockup.service';
 import { normalizeRole } from '../../../app/middleware/auth.middleware';
 import {
     ProductItemResponseDTO,
@@ -23,6 +23,8 @@ import {
 } from './product.dto';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
+import { CommissionSetting } from '../../../shared/services/commission-setting.service';
+import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
 
 function getColorHex(colorName: string): string {
@@ -133,6 +135,8 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         } : undefined,
         sellerId: product.shop_id ? product.shop_id.toString() : undefined,
         tags: product.tags || [],
+        rating: typeof product.average_rating === 'number' ? product.average_rating : 5.0,
+        ratingCount: typeof product.rating_count === 'number' ? product.rating_count : 0,
         allowCustomization: Boolean(product.allow_customization),
         customizationType: product.customization_type || 'NONE',
         createdAt: product.created_at ? new Date(product.created_at).toISOString() : new Date().toISOString(),
@@ -192,7 +196,7 @@ const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
 
 export class ProductsService {
 
-    static async validate(payload: any, opts: { partial?: boolean } = {}): Promise<ValidatedProductData> {
+    static async validate(payload: any, opts: { partial?: boolean; sellerId?: string } = {}): Promise<ValidatedProductData> {
         const errors: string[] = [];
         const partial = opts.partial === true;
 
@@ -261,8 +265,9 @@ export class ProductsService {
         let podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[] | undefined;
         let designPlacements: any[] | undefined;
         if (isPod) {
+            const currentSellerId = payload._sellerId || opts.sellerId;
             try {
-                blank = await BlankClient.getBlank(payload.blankId);
+                blank = await BlankClient.getBlank(payload.blankId, currentSellerId);
             } catch (e: any) {
                 errors.push(`không lấy được phôi: ${e.message}`);
             }
@@ -581,8 +586,15 @@ export class ProductsService {
                 const sellerShop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(filter.sellerId) }).lean();
                 if (!sellerShop) return { items: [], total: 0, page: 1, limit: Number(filter?.limit || filter?.pageSize) || 6, totalPages: 0 };
                 base.shop_id = sellerShop._id;
-            } else if (filter?.shopId && mongoose.Types.ObjectId.isValid(filter.shopId)) {
-                base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+            } else if (filter?.shopId) {
+                if (mongoose.Types.ObjectId.isValid(filter.shopId)) {
+                    base.shop_id = new mongoose.Types.ObjectId(filter.shopId);
+                } else {
+                    const shopBySlug = await Shop.findOne({ slug: filter.shopId }).lean();
+                    if (shopBySlug) {
+                        base.shop_id = shopBySlug._id;
+                    }
+                }
             }
 
             return ProductsService.page(ProductsService.buildQuery(base, filter), filter);
@@ -689,7 +701,11 @@ export class ProductsService {
 
     static async getFeaturedShops(): Promise<any[]> {
         return cacheService.getOrSet('vietcraft:shops:featured', async () => {
-            return Shop.find().sort({ average_rating: -1, listing_count: -1 }).limit(5).lean();
+            return Shop.find()
+                .select('shop_name slug logo banner average_rating listing_count')
+                .sort({ average_rating: -1, listing_count: -1 })
+                .limit(5)
+                .lean();
         }, 600);
     }
 
@@ -706,13 +722,19 @@ export class ProductsService {
         let variantsToWrite: VariantInput[] = data.variants;
         let podFields: any = {};
         if (data.isPod && data.blank) {
-            const built = await ProductsService.buildPodArtifacts(data.blank, data.podVariants!, data.designPlacements!);
-            images = built.images;
+            const built = await ProductsService.buildPodArtifacts(
+                data.blank, data.podVariants!, data.designPlacements!, data.category?._id?.toString() ?? null,
+            );
+            images = (Array.isArray(payload.images) && payload.images.length > 0)
+                ? payload.images
+                : built.images;
             variantsToWrite = built.variants;
             podFields = {
                 product_type: 'POD_TEMPLATE',
                 customization_type: 'ONLINE_MOCKUP',
                 blank_id: payload.blankId,
+                printer_id: payload.printerId || (data.blank as any)?.printer_id || shop.printer_partner?.printer_id,
+                printer_name: payload.printerName || (data.blank as any)?.printer_name || shop.printer_partner?.printer_name || 'Xưởng in đối tác',
                 design_placements: data.designPlacements!.map((p: any) => ({
                     ...p,
                     design_id: p.design_id ? new mongoose.Types.ObjectId(p.design_id) : undefined,
@@ -855,7 +877,13 @@ export class ProductsService {
         });
 
         const baseSku = payload.sku || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
-        await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock));
+        // Giá người bán nhập là giá họ nhận; niêm yết lên sàn là giá đó cộng hoa hồng.
+        // Mức hoa hồng tra theo danh mục chính + loại sản phẩm, không phải mức phẳng của sàn.
+        const listPrice = withCommission(
+            basePrice,
+            await CommissionSetting.resolvePercent(catalog.category!._id.toString(), 'READY_TO_SHIP'),
+        );
+        await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice));
         if (tags.length) {
             await Tag.updateMany({ _id: { $in: tags.map(t => t._id) } }, { $inc: { product_count: 1 } });
         }
@@ -866,11 +894,17 @@ export class ProductsService {
     }
 
 
+    /**
+     * `basePrice` là giá người bán nhận (dùng để suy ra giá vốn), `listPrice` là giá niêm yết
+     * đã cộng hoa hồng sàn. Hai số khác nhau nên phải truyền riêng — lấy listPrice tính giá vốn
+     * thì giá vốn bị thổi theo hoa hồng.
+     */
     private static colorsToVariants(
         colors: ProductColorVariantDTO[] | undefined,
         baseSku: string,
         basePrice: number,
-        totalStock: number
+        totalStock: number,
+        listPrice: number
     ): VariantInput[] {
         const baseCost = Math.round(basePrice * 0.7);
 
@@ -879,7 +913,7 @@ export class ProductsService {
                 sku: baseSku,
                 color: 'Tự nhiên',
                 base_cost: baseCost,
-                price: basePrice,
+                price: listPrice,
                 stock: totalStock,
             }];
         }
@@ -890,7 +924,7 @@ export class ProductsService {
             color: c.name,
             mockup_image: c.hex,
             base_cost: baseCost,
-            price: basePrice,
+            price: listPrice,
             stock: i === colors.length - 1 ? totalStock - perColor * (colors.length - 1) : perColor,
         }));
     }
@@ -906,10 +940,21 @@ export class ProductsService {
             : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO);
     }
 
+    /**
+     * Mức hoa hồng áp cho một sản phẩm ĐÃ LƯU, tra theo danh mục chính và loại của nó.
+     * Dùng ở đường sửa, nơi chỉ còn document chứ không còn payload gốc.
+     */
+    private static async resolveProductCommission(mp: any): Promise<number> {
+        const categoryId = mp?.category_ids?.[0] ? String(mp.category_ids[0]) : null;
+        return CommissionSetting.resolvePercent(categoryId, mp?.product_type || 'READY_TO_SHIP');
+    }
+
     private static async buildPodArtifacts(
         blank: Blank,
         podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[],
-        placements: any[]
+        placements: any[],
+        /** Danh mục chính của sản phẩm — quyết định mức hoa hồng áp cho biến thể POD. */
+        categoryId: string | null
     ): Promise<{ images: string[]; variants: VariantInput[] }> {
 
         const ids = new Set<string>();
@@ -917,13 +962,17 @@ export class ProductsService {
             if (p.design_id) ids.add(String(p.design_id));
             for (const l of (p.layers || [])) if (l.type === 'image' && l.design_id) ids.add(String(l.design_id));
         }
-        const designs = await Design.find({ _id: { $in: [...ids].map(id => new mongoose.Types.ObjectId(id)) } }).lean();
+        const validIds = [...ids].filter(id => mongoose.Types.ObjectId.isValid(id));
+        const designs = validIds.length > 0
+            ? await Design.find({ _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+            : [];
         const designUrl = (id: string) => designs.find(d => d._id.toString() === String(id))?.file_url;
 
         const mockups: string[] = [];
         for (const p of placements) {
             const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-            const blankImage = (area && (area as any).image) || blank.default_image;
+            const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
+            const blankImage = rawImage || blank.default_image;
 
             if (Array.isArray(p.layers) && p.layers.length) {
 
@@ -953,33 +1002,43 @@ export class ProductsService {
         }
         const images = mockups.length ? mockups : [blank.default_image];
 
+        // Người bán nhận tiền phôi + markup; hoa hồng sàn cộng thêm lên giá niêm yết.
+        const commissionPercent = await CommissionSetting.resolvePercent(categoryId, 'POD_TEMPLATE');
         const variants: VariantInput[] = podVariants.map(pv => {
             const vari = blank.variations?.find(v => v.sku === pv.sku);
+            const baseCost = pv.base_cost ?? vari?.base_cost ?? 50000;
             return {
                 sku: pv.sku,
                 color: pv.color || vari?.color || 'Màu mặc định',
                 size: pv.size || vari?.size || 'Freesize',
                 material: pv.material || vari?.material || (blank as any)?.material || 'Cotton',
-                base_cost: pv.base_cost ?? vari?.base_cost ?? 50000,
-                price: (pv.base_cost ?? vari?.base_cost ?? 50000) + pv.markup,
+                base_cost: baseCost,
+                price: withCommission(baseCost + pv.markup, commissionPercent),
                 stock: pv.stock,
             };
         });
         return { images, variants };
     }
 
-    static async previewMockups(sellerId: string, blankId: string, designPlacements: any[]): Promise<string[]> {
+    static async previewMockups(
+        sellerId: string,
+        blankId: string,
+        designPlacements: any[],
+        options?: { colorHex?: string; colors?: { color?: string; color_hex?: string; sku?: string }[] }
+    ): Promise<{ images: string[]; byColor: { color: string; color_hex?: string; images: string[] }[] }> {
         if (!blankId) throw new ValidationError(['thiếu blankId']);
-        const blank = await BlankClient.getBlank(blankId);
+        const blank = await BlankClient.getBlank(blankId, sellerId);
         if (!blank) throw new ValidationError(['phôi không tồn tại']);
-
 
         const ids = new Set<string>();
         for (const p of (designPlacements || [])) {
             if (p.design_id) ids.add(String(p.design_id));
             for (const l of (p.layers || [])) if (l.type === 'image' && l.design_id) ids.add(String(l.design_id));
         }
-        const designs = await Design.find({ _id: { $in: [...ids].map(id => new mongoose.Types.ObjectId(id)) } }).lean();
+        const validIds = [...ids].filter(id => mongoose.Types.ObjectId.isValid(id));
+        const designs = validIds.length > 0
+            ? await Design.find({ _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+            : [];
         const ownedUrl = (id: string) => {
             const d = designs.find(x => x._id.toString() === String(id));
             if (!d) return undefined;
@@ -987,29 +1046,77 @@ export class ProductsService {
             return d.file_url;
         };
 
-        const out: string[] = [];
-        for (const p of (designPlacements || [])) {
-            const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-            const blankImage = (area && (area as any).image) || blank.default_image;
-            if (!Array.isArray(p.layers) || !p.layers.length) continue;
-            const layers = p.layers.map((l: any) => l.type === 'image' ? { ...l, designUrl: ownedUrl(l.design_id) } : l)
-                .filter((l: any) => l.type !== 'image' || l.designUrl);
-            if (!layers.length) continue;
-            if (area && (area as any).surface === 'wrap') {
-                out.push(await generateWrapMockup(blankImage, layers, {
-                    x: p.area?.x ?? area.x,
-                    y: p.area?.y ?? area.y,
-                    width: p.area?.width ?? area.width,
-                    height: p.area?.height ?? area.height,
-                    template_w: (area as any).template_w || 2475,
-                    template_h: (area as any).template_h || 1155,
-                    arc: (area as any).arc || 1.35,
-                }));
-            } else {
-                out.push(await generateMockupLayers(blankImage, layers));
+        const renderPlacements = async (colorHex?: string): Promise<string[]> => {
+            const out: string[] = [];
+            for (const p of (designPlacements || [])) {
+                const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
+                const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
+                const blankImage = rawImage || blank.default_image;
+                if (!Array.isArray(p.layers) || !p.layers.length) continue;
+                const layers = p.layers.map((l: any) => l.type === 'image' ? { ...l, designUrl: ownedUrl(l.design_id) || l.designUrl || l.design?.file_url } : l)
+                    .filter((l: any) => l.type !== 'image' || l.designUrl);
+                if (!layers.length) continue;
+                if (area && (area as any).surface === 'wrap') {
+                    out.push(await generateWrapMockup(blankImage, layers, {
+                        x: p.area?.x ?? area.x,
+                        y: p.area?.y ?? area.y,
+                        width: p.area?.width ?? area.width,
+                        height: p.area?.height ?? area.height,
+                        template_w: (area as any).template_w || 2475,
+                        template_h: (area as any).template_h || 1155,
+                        arc: (area as any).arc || 1.35,
+                    }, colorHex));
+                } else {
+                    out.push(await generateMockupLayers(blankImage, layers, colorHex));
+                }
+            }
+            return out;
+        };
+
+        // Danh sách màu sắc từ options hoặc từ biến thể của phôi do printer khai báo
+        const inputColors = (options?.colors && Array.isArray(options.colors) && options.colors.length > 0)
+            ? options.colors
+            : (blank.variations && blank.variations.length > 0)
+                ? blank.variations.map(v => ({ color: v.color || 'Mặc định', color_hex: (v as any).color_hex || resolveColorHex(v.color) }))
+                : [];
+
+        const distinctColors: { color: string; color_hex?: string }[] = [];
+        const seenColors = new Set<string>();
+        for (const item of inputColors) {
+            const name = (item.color || 'Mặc định').trim();
+            if (name && !seenColors.has(name)) {
+                seenColors.add(name);
+                distinctColors.push({
+                    color: name,
+                    color_hex: item.color_hex || resolveColorHex(name)
+                });
             }
         }
-        return out;
+
+        const byColor: { color: string; color_hex?: string; images: string[] }[] = [];
+        if (distinctColors.length > 0) {
+            for (const c of distinctColors) {
+                const colorImgs = await renderPlacements(c.color_hex);
+                byColor.push({
+                    color: c.color,
+                    color_hex: c.color_hex,
+                    images: colorImgs.length ? colorImgs : [blank.default_image]
+                });
+            }
+        } else {
+            const defaultImgs = await renderPlacements(options?.colorHex);
+            byColor.push({
+                color: 'Mặc định',
+                color_hex: options?.colorHex,
+                images: defaultImgs.length ? defaultImgs : [blank.default_image]
+            });
+        }
+
+        const allImages = byColor.flatMap(c => c.images);
+        return {
+            images: allImages.length ? allImages : [blank.default_image],
+            byColor
+        };
     }
 
 
@@ -1021,7 +1128,7 @@ export class ProductsService {
             }
         }
 
-        const data = await ProductsService.validate(payload, { partial: true });
+        const data = await ProductsService.validate(payload, { partial: true, sellerId: mp.seller_id?.toString() || actor.id });
 
         if (payload.title !== undefined) {
             mp.title = data.title;
@@ -1063,6 +1170,19 @@ export class ProductsService {
     }
 
     private static async updateSimple(mp: any, actor: ProductActor, payload: Partial<ProductFormDataDTO>): Promise<ProductItemResponseDTO> {
+        if (payload.price !== undefined) {
+            const basePrice = Number(payload.price);
+            if (isNaN(basePrice) || basePrice <= 0) {
+                throw new ValidationError(['Giá bán phải lớn hơn 0']);
+            }
+        }
+        if (payload.stock !== undefined) {
+            const totalStock = Number(payload.stock);
+            if (isNaN(totalStock) || totalStock < 0) {
+                throw new ValidationError(['Tồn kho không được âm']);
+            }
+        }
+
         const catalog = await ProductsService.resolveFlatCatalog(payload, actor.id, { required: false });
 
         if (catalog.category) {
@@ -1111,19 +1231,29 @@ export class ProductsService {
         if (payload.colors && payload.colors.length > 0) {
             const existing = await MongoVariant.find({ product_id: mp._id }).lean();
             const baseSku = payload.sku || existing[0]?.sku?.replace(/-\d+$/, '') || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
-            const basePrice = payload.price !== undefined
-                ? Number(payload.price)
-                : parseFloat(existing[0]?.retail_price?.toString() || '0');
             const totalStock = payload.stock !== undefined
                 ? Number(payload.stock)
                 : existing.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
 
-            await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock));
+            // `payload.price` là giá người bán NHẬN, còn giá trong DB là giá NIÊM YẾT (đã gồm
+            // hoa hồng). Sửa màu mà không nhập giá thì giữ nguyên giá niêm yết từng đồng, đồng
+            // thời bóc hoa hồng ra để giá vốn vẫn tính trên cùng cơ sở như lúc tạo sản phẩm.
+            const dbPrice = parseFloat(existing[0]?.retail_price?.toString() || '0');
+            const commissionPercent = await ProductsService.resolveProductCommission(mp);
+            const basePrice = payload.price !== undefined
+                ? Number(payload.price)
+                : dbPrice - commissionFromGross(dbPrice, commissionPercent);
+            const listPrice = payload.price !== undefined
+                ? withCommission(basePrice, commissionPercent)
+                : dbPrice;
+            await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice));
         } else {
             const updates: any = {};
             if (payload.price !== undefined) {
-                updates.retail_price = mongoose.Types.Decimal128.fromString(Number(payload.price).toString());
-                updates.base_cost = mongoose.Types.Decimal128.fromString((Number(payload.price) * 0.7).toFixed(0));
+                const netPrice = Number(payload.price);
+                const grossPrice = withCommission(netPrice, await ProductsService.resolveProductCommission(mp));
+                updates.retail_price = mongoose.Types.Decimal128.fromString(grossPrice.toString());
+                updates.base_cost = mongoose.Types.Decimal128.fromString((netPrice * 0.7).toFixed(0));
             }
             if (payload.stock !== undefined) updates.stock_quantity = Number(payload.stock);
             if (payload.sku !== undefined) updates.sku = payload.sku;

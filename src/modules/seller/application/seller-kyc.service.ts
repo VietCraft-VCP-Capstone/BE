@@ -18,6 +18,7 @@ import {
     verifyPresignedToken
 } from '../../../shared/utils/crypto.service';
 import { resolveKycFilePath, KYC_STORAGE_ROOT } from '../../../shared/upload/kyc-storage.middleware';
+import { config } from '../../../app/config';
 import { generateSlug } from '../../../shared/utils/slug';
 import { logger } from '../../../shared/utils/logger';
 import { sendPhoneVerificationOtpEmail } from '../../../shared/utils/email.service';
@@ -45,6 +46,7 @@ export class SellerKycService {
             if (portrait_image) {
                 fileUrls.portrait_url = `/api/seller/kyc/files/${portrait_image}?token=${generatePresignedToken(portrait_image).token}`;
             }
+
             if (business_license_image) {
                 fileUrls.business_license_url = `/api/seller/kyc/files/${business_license_image}?token=${generatePresignedToken(business_license_image).token}`;
             }
@@ -224,8 +226,22 @@ export class SellerKycService {
             if (!kyc.front_id_image || !kyc.back_id_image) {
                 throw new Error('Vui lòng tải lên đầy đủ ảnh chụp 2 mặt Căn cước công dân.');
             }
+            const taxCode = String(kyc.tax_code || '').trim();
+            if (!taxCode) {
+                throw new Error('Vui lòng nhập Mã số thuế cá nhân.');
+            }
+            if (!/^(\d{10}|\d{10}-\d{3}|\d{13})$/.test(taxCode)) {
+                throw new Error('Mã số thuế cá nhân không hợp lệ. Vui lòng nhập đúng 10 chữ số (hoặc 13 số dạng XXXXXXXXXX-XXX).');
+            }
         } else {
             if (!kyc.company_name) throw new Error('Vui lòng nhập tên Hộ kinh doanh hoặc Doanh nghiệp.');
+            const bizTax = String(kyc.business_license_number || kyc.tax_code || '').trim();
+            if (!bizTax) {
+                throw new Error('Vui lòng nhập Mã số thuế / Mã số doanh nghiệp.');
+            }
+            if (!/^(\d{10}|\d{10}-\d{3}|\d{13})$/.test(bizTax)) {
+                throw new Error('Mã số thuế doanh nghiệp không hợp lệ (10 hoặc 13 chữ số).');
+            }
             if (!kyc.business_license_image) throw new Error('Vui lòng tải lên Giấy chứng nhận đăng ký kinh doanh.');
             if (!kyc.legal_rep_name) throw new Error('Vui lòng nhập thông tin người đại diện pháp luật.');
         }
@@ -235,8 +251,12 @@ export class SellerKycService {
         if (!shopName) throw new Error('Tên gian hàng không được để trống.');
 
         const pickup = shop.pickup_address || {};
-        if (!pickup.recipient_name || !pickup.phone || !pickup.province_id || !pickup.district_id || !pickup.address_detail) {
+        const pickupPhone = String(pickup.phone || '').trim();
+        if (!pickup.recipient_name || !pickupPhone || !pickup.province_id || !pickup.district_id || !pickup.address_detail) {
             throw new Error('Vui lòng nhập đầy đủ thông tin địa chỉ lấy hàng.');
+        }
+        if (!/^0(3|5|7|8|9)\d{8}$/.test(pickupPhone)) {
+            throw new Error('Số điện thoại liên hệ kho lấy hàng không hợp lệ. Vui lòng nhập số điện thoại di động 10 chữ số hợp lệ (bắt đầu bằng 03, 05, 07, 08, 09).');
         }
 
         const bank = payload.bank_info || {};
@@ -244,6 +264,9 @@ export class SellerKycService {
         const accountNumber = String(bank.account_number || '').trim();
         if (!bank.bank_code || !accountNumber || !accountHolder) {
             throw new Error('Vui lòng nhập đầy đủ thông tin tài khoản ngân hàng nhận thanh toán.');
+        }
+        if (!/^\d{6,20}$/.test(accountNumber)) {
+            throw new Error('Số tài khoản ngân hàng không hợp lệ. Số tài khoản chỉ bao gồm từ 6 đến 20 chữ số.');
         }
 
         const nameToMatch = sellerType === 'INDIVIDUAL' ? fullName : (kyc.legal_rep_name || kyc.company_name);
@@ -291,6 +314,7 @@ export class SellerKycService {
                 front_id_image: kyc.front_id_image,
                 back_id_image: kyc.back_id_image,
                 portrait_image: kyc.portrait_image,
+
                 company_name: kyc.company_name,
                 business_license_number_encrypted: encryptedBusinessLicense,
                 business_license_image: kyc.business_license_image,
@@ -416,4 +440,94 @@ export class SellerKycService {
 
         return null;
     }
+
+    static async scanCccd(filename: string, side: 'front' | 'back' = 'front') {
+        const absPath = resolveKycFilePath(filename);
+        if (!absPath || !fs.existsSync(absPath)) {
+            throw new Error('Không tìm thấy file ảnh tài liệu để quét.');
+        }
+
+        const fileBuffer = fs.readFileSync(absPath);
+        const ext = path.extname(filename).toLowerCase();
+        let mimeType = 'image/jpeg';
+        if (ext === '.png') mimeType = 'image/png';
+        if (ext === '.webp') mimeType = 'image/webp';
+
+        const formData = new FormData();
+        const blob = new Blob([fileBuffer], { type: mimeType });
+        formData.append('file', blob, filename);
+        formData.append('side', side);
+
+        const aiUrl = `${config.aiAnalyticsUrl}/api/v1/ocr/cccd/`;
+        logger.info(`[Seller KYC] Sending CCCD scan request to AI service: ${aiUrl} (side=${side})`);
+
+        try {
+            const response = await fetch(aiUrl, {
+                method: 'POST',
+                body: formData,
+                signal: AbortSignal.timeout(30000), // OCR quét ảnh tiếng Việt mất 5-15s trên CPU
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                logger.error(`[Seller KYC] AI OCR Service Error (${response.status}): ${errText}`);
+                throw new Error(`AI OCR Service trả về lỗi: ${errText}`);
+            }
+
+            const data = await response.json();
+            return data;
+        } catch (error: any) {
+            const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+            if (timedOut) {
+                logger.error('[Seller KYC] AI OCR Service timeout sau 30s');
+                throw new Error('Hệ thống AI xử lý quá thời gian quy định (timeout 30s). Vui lòng thử lại.');
+            }
+            throw error;
+        }
+    }
+
+    static async validatePortrait(filename: string) {
+        const absPath = resolveKycFilePath(filename);
+        if (!absPath || !fs.existsSync(absPath)) {
+            throw new Error('Không tìm thấy file ảnh chân dung để kiểm tra.');
+        }
+
+        const fileBuffer = fs.readFileSync(absPath);
+        const ext = path.extname(filename).toLowerCase();
+        let mimeType = 'image/jpeg';
+        if (ext === '.png') mimeType = 'image/png';
+        if (ext === '.webp') mimeType = 'image/webp';
+
+        const formData = new FormData();
+        const blob = new Blob([fileBuffer], { type: mimeType });
+        formData.append('file', blob, filename);
+
+        const aiUrl = `${config.aiAnalyticsUrl}/api/v1/portrait/validate`;
+        logger.info(`[Seller KYC] Sending portrait validation request to AI service: ${aiUrl}`);
+
+        try {
+            const response = await fetch(aiUrl, {
+                method: 'POST',
+                body: formData,
+                signal: AbortSignal.timeout(30000),
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                logger.error(`[Seller KYC] AI Portrait Validation Error (${response.status}): ${errText}`);
+                throw new Error(`AI Portrait Service trả về lỗi: ${errText}`);
+            }
+
+            const data = await response.json();
+            return data;
+        } catch (error: any) {
+            const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+            if (timedOut) {
+                logger.error('[Seller KYC] AI Portrait Service timeout sau 30s');
+                throw new Error('Hệ thống AI xử lý quá thời gian quy định (timeout 30s). Vui lòng thử lại.');
+            }
+            throw error;
+        }
+    }
 }
+

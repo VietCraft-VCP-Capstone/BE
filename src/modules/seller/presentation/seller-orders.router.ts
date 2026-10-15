@@ -37,12 +37,31 @@ router.patch('/:id/status', authenticate, requireRole(['seller', 'admin']), asyn
     }
 });
 
+router.post('/:id/approve', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const order = await SellerOrdersService.approveOrder(req.user!.id, req.params.id);
+        res.json({ message: 'Đã duyệt đơn hàng thành công.', order });
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi duyệt đơn hàng.' });
+    }
+});
+
 router.post('/:id/dispatch-printer', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const order = await SellerOrdersService.dispatchOrderToPrinter(req.user!.id, req.params.id);
-        res.json({ message: 'Đã gửi đơn hàng sang xưởng in thành công.', order });
+        res.json({ message: 'Đã duyệt đơn và gửi sang xưởng in thành công.', order });
     } catch (error: any) {
         res.status(400).json({ error: error.message || 'Lỗi khi gửi đơn hàng sang xưởng in.' });
+    }
+});
+
+router.post('/:id/reject', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const { reason } = req.body || {};
+        const order = await SellerOrdersService.rejectOrder(req.user!.id, req.params.id, reason);
+        res.json({ message: 'Đã từ chối đơn hàng.', order });
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi từ chối đơn hàng.' });
     }
 });
 

@@ -16,6 +16,8 @@ export interface IShippingDetails {
 }
 
 export interface IOrderItem {
+    order_item_id?: string;
+    item_snapshot?: Record<string, unknown>;
     product_id: mongoose.Types.ObjectId;
     variant_id: mongoose.Types.ObjectId;
     title: string;
@@ -36,6 +38,8 @@ export interface IFinancialBreakdown {
     coupon_discount: mongoose.Types.Decimal128;
     platform_fee: mongoose.Types.Decimal128;
     seller_payout_amount: mongoose.Types.Decimal128;
+    commission_rate?: number;
+    total_printing_cost?: mongoose.Types.Decimal128;
 }
 
 export interface IStatusHistory {
@@ -44,19 +48,41 @@ export interface IStatusHistory {
     note?: string;
 }
 
+export interface IPrinterOrderInfo {
+    printer_id?: string;
+    printer_name?: string;
+    supplier_order_id?: string;
+    dispatched_at?: Date;
+    printer_status?: string;
+    rejection_reason?: string;
+}
+
 export interface IOrder extends Document {
     buyer_id: mongoose.Types.ObjectId;
     shop_id: mongoose.Types.ObjectId;
     order_code: string;
-    payment_method: 'VNPAY' | 'MOMO' | 'COD';
+    simulation_source_id?: mongoose.Types.ObjectId;
+    is_simulated?: boolean;
+    payment_method: 'VNPAY' | 'PAYOS' | 'COD';
+    /** Mọi mã số payOS đã cấp cho đơn (mỗi lần tạo link là một mã mới) để webhook đối chiếu được link cũ. */
+    payos_order_codes?: number[];
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
+    /** Thời điểm provider xác nhận tiền về; refund window tính từ mốc này. */
+    paid_at?: Date;
+    refund_status: 'NONE' | 'REQUESTED' | 'UNDER_REVIEW' | 'DISPUTED' | 'REFUNDED' | 'REFUND_REJECTED';
+    refund_execution_id?: string;
     order_status: 'ORDERED' | 'PENDING_DESIGN' | 'PROCESSING' | 'SHIPPING' | 'DELIVERED' | 'CANCELLED';
+    seller_approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
+    is_pod?: boolean;
+    order_type?: 'POD' | 'READY_TO_SHIP' | 'STANDARD';
     shipping_address: IShippingAddress;
     shipping_details: IShippingDetails;
     supplier_order_id?: string;
-    fulfillment_status?: 'UNFULFILLED' | 'QUEUED' | 'SUBMITTED' | 'RECEIVED' | 'PRINTING' | 'PACKAGED' | 'SHIPPED' | 'FAILED' | 'CANCELLED';
+    fulfillment_status?: 'UNFULFILLED' | 'PENDING_APPROVAL' | 'QUEUED' | 'SUBMITTED' | 'RECEIVED' | 'PRINTING' | 'PACKAGED' | 'SHIPPED' | 'DELIVERED' | 'FAILED' | 'CANCELLED';
+    printer_info?: IPrinterOrderInfo;
     items: IOrderItem[];
     financial_breakdown: IFinancialBreakdown;
+    coupon_code?: string;
     status_history: IStatusHistory[];
     order_hour_of_week: number;
     created_at: Date;
@@ -79,6 +105,8 @@ const ShippingDetailsSchema = new Schema<IShippingDetails>({
 }, { _id: false });
 
 const OrderItemSchema = new Schema<IOrderItem>({
+    order_item_id: { type: String, immutable: true, index: true },
+    item_snapshot: { type: Schema.Types.Mixed, immutable: true },
     product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
     variant_id: { type: Schema.Types.ObjectId, ref: 'ProductVariant', required: true },
     title: { type: String, required: true },
@@ -98,7 +126,9 @@ const FinancialBreakdownSchema = new Schema<IFinancialBreakdown>({
     shipping_fee: { type: Schema.Types.Decimal128, required: true },
     coupon_discount: { type: Schema.Types.Decimal128, required: true, default: 0.0 },
     platform_fee: { type: Schema.Types.Decimal128, required: true },
-    seller_payout_amount: { type: Schema.Types.Decimal128, required: true }
+    seller_payout_amount: { type: Schema.Types.Decimal128, required: true },
+    commission_rate: { type: Number, default: 0.10 },
+    total_printing_cost: { type: Schema.Types.Decimal128, default: 0.0 }
 }, { _id: false });
 
 const StatusHistorySchema = new Schema<IStatusHistory>({
@@ -115,31 +145,48 @@ const OrderSchema = new Schema<IOrder>({
     buyer_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     shop_id: { type: Schema.Types.ObjectId, ref: 'Shop', required: true, index: true },
     order_code: { type: String, required: true, unique: true, index: true },
-    payment_method: { type: String, required: true, enum: ['VNPAY', 'MOMO', 'COD'] },
+    simulation_source_id: { type: Schema.Types.ObjectId, ref: 'Order', index: true },
+    is_simulated: { type: Boolean, default: false, index: true },
+    payment_method: { type: String, required: true, enum: ['VNPAY', 'PAYOS', 'COD'] },
+    payos_order_codes: { type: [Number], default: undefined, index: true },
     payment_status: { type: String, required: true, enum: ['PENDING', 'PAID', 'REFUNDED'], default: 'PENDING' },
+    paid_at: { type: Date, index: true },
+    refund_status: { type: String, required: true, enum: ['NONE', 'REQUESTED', 'UNDER_REVIEW', 'DISPUTED', 'REFUNDED', 'REFUND_REJECTED'], default: 'NONE', index: true },
+    refund_execution_id: { type: String },
     order_status: {
         type: String,
         required: true,
         enum: ['ORDERED', 'PENDING_DESIGN', 'PROCESSING', 'SHIPPING', 'DELIVERED', 'CANCELLED'],
         default: 'ORDERED'
     },
+    seller_approval_status: {
+        type: String,
+        enum: ['PENDING_APPROVAL', 'APPROVED', 'REJECTED'],
+        default: 'PENDING_APPROVAL',
+        index: true
+    },
+    is_pod: { type: Boolean, default: false, index: true },
+    order_type: { type: String, enum: ['POD', 'READY_TO_SHIP', 'STANDARD'], default: 'STANDARD', index: true },
     shipping_address: { type: ShippingAddressSchema, required: true },
     shipping_details: { type: ShippingDetailsSchema, required: true },
     supplier_order_id: { type: String, index: true },
     fulfillment_status: {
         type: String,
-        enum: ['UNFULFILLED', 'QUEUED', 'SUBMITTED', 'RECEIVED', 'PRINTING', 'PACKAGED', 'SHIPPED', 'FAILED', 'CANCELLED'],
+        enum: ['UNFULFILLED', 'PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'RECEIVED', 'PRINTING', 'PACKAGED', 'SHIPPED', 'DELIVERED', 'FAILED', 'CANCELLED'],
         default: 'UNFULFILLED',
         index: true
     },
+    printer_info: { type: Schema.Types.Mixed, default: {} },
     items: { type: [OrderItemSchema], required: true },
     financial_breakdown: { type: FinancialBreakdownSchema, required: true },
+    coupon_code: { type: String, default: null, index: true },
     status_history: { type: [StatusHistorySchema], default: [] },
     order_hour_of_week: { type: Number, required: true, index: true }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
+OrderSchema.index({ simulation_source_id: 1, buyer_id: 1 }, { unique: true, partialFilterExpression: { is_simulated: true } });
 OrderSchema.index({ buyer_id: 1, created_at: -1 });
 OrderSchema.index({ shop_id: 1, created_at: -1 });
 

@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { ProductsService, ValidationError, ForbiddenError, ProductActor } from '../application/product.service';
 import { BlankClient } from '../application/blank-client.service';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { ReviewService } from '../../order';
 
 const router = Router();
 
@@ -82,9 +83,10 @@ router.get('/mine', authenticate, requireRole(['seller', 'admin']), async (req: 
     }
 });
 
-router.get('/meta/blanks', authenticate, requireRole(['seller', 'admin']), async (req, res) => {
+router.get('/meta/blanks', authenticate, requireRole(['seller', 'admin']), async (req: any, res) => {
     try {
-        res.json(await BlankClient.listBlanks());
+        const sellerId = req.user?.id;
+        res.json(await BlankClient.listBlanks(sellerId));
     } catch (error: any) {
         res.status(502).json({ error: error.message });
     }
@@ -92,12 +94,16 @@ router.get('/meta/blanks', authenticate, requireRole(['seller', 'admin']), async
 
 router.post('/preview-mockup', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
     try {
-        const images = await ProductsService.previewMockups(
+        const result = await ProductsService.previewMockups(
             req.user!.id,
             req.body?.blankId,
-            req.body?.designPlacements || []
+            req.body?.designPlacements || [],
+            {
+                colorHex: req.body?.colorHex,
+                colors: req.body?.colors
+            }
         );
-        res.json({ images });
+        res.json(result);
     } catch (error: any) {
         handleError(res, error);
     }
@@ -120,6 +126,20 @@ router.patch('/batch-status', authenticate, requireRole(['seller', 'admin']), as
 });
 
 // ==================== CHI TIẾT CÔNG KHAI ====================
+
+router.get('/:id/reviews', async (req, res) => {
+    try {
+        const { page, limit, rating } = req.query;
+        const result = await ReviewService.getProductReviews(req.params.id, {
+            page: page ? Number(page) : undefined,
+            limit: limit ? Number(limit) : undefined,
+            rating: rating ? Number(rating) : undefined,
+        });
+        res.json(result);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi tải danh sách đánh giá.' });
+    }
+});
 
 router.get('/:id/related', async (req, res) => {
     try {

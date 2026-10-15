@@ -1,10 +1,28 @@
 import dotenv from 'dotenv';
+import dns from 'dns';
 import { Pool } from 'pg';
 import mongoose from 'mongoose';
 import { createClient } from 'redis';
 import { logger } from '../../shared/utils/logger';
 
 dotenv.config();
+
+/**
+ * Đọc `AI_SHOP_MAP` dạng `email=shop,email2=shop2` thành map email đã hạ chữ thường.
+ *
+ * Bỏ qua mục sai cú pháp thay vì ném lỗi: một dấu phẩy thừa trong .env không đáng để
+ * làm sập cả server, và phần còn lại của map vẫn dùng được.
+ */
+function parseShopMap(raw?: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const pair of (raw || '').split(',')) {
+        const [email, shop] = pair.split('=').map(s => s?.trim());
+        if (!email || !shop) continue;
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(shop)) continue;
+        out[email.toLowerCase()] = shop;
+    }
+    return out;
+}
 
 export const config = {
     port: process.env.PORT || 8080,
@@ -14,6 +32,10 @@ export const config = {
     redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
     jwtSecret: process.env.JWT_SECRET || '',
     aiAnalyticsUrl: process.env.AI_ANALYTICS_URL || 'http://localhost:8000',
+    aiGatewaySecret: process.env.AI_GATEWAY_SECRET || '',
+    aiDemoShopId: process.env.AI_DEMO_SHOP_ID || '',
+    aiShopMap: parseShopMap(process.env.AI_SHOP_MAP),
+    aiTimeoutMs: Number(process.env.AI_TIMEOUT_MS) || 5000,
     googleClientId: process.env.GOOGLE_CLIENT_ID || '',
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
     mailUser: process.env.MAIL_USER || '',
@@ -21,10 +43,9 @@ export const config = {
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
     printerApiUrl: process.env.PRINTER_API_URL || 'http://localhost:8880',
     printerApiKey: process.env.PRINTER_API_KEY || '',
+    printerRefundApiKey: process.env.PRINTER_REFUND_API_KEY || '',
     printerWebhookSecret: process.env.PRINTER_WEBHOOK_SECRET || '',
     printerEnv: process.env.PRINTER_ENV || 'sandbox',
-    // Lưu trữ ảnh seller upload. Thiếu credential -> tự fallback về đĩa local (BE/uploads).
-    // Chỉ cần MỘT trong hai: cặp apiKey+apiSecret (signed) hoặc uploadPreset (unsigned).
     cloudinary: {
         url: process.env.CLOUDINARY_URL || '',
         cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
@@ -32,11 +53,24 @@ export const config = {
         apiSecret: process.env.CLOUDINARY_API_SECRET || '',
         uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || '',
         folder: process.env.CLOUDINARY_FOLDER || 'vietcraft',
-        // Chỉ đổi khi chạy test hoặc đi qua proxy nội bộ. Bỏ trống = gọi thẳng Cloudinary.
         apiBase: process.env.CLOUDINARY_API_BASE || 'https://api.cloudinary.com',
     },
-    // Shared secret cổng thanh toán dùng để ký webhook POST /orders/callback/:id.
     paymentCallbackSecret: process.env.PAYMENT_CALLBACK_SECRET || '',
+    payos: {
+        // Thu tiền (payment link)
+        clientId: process.env.PAYOS_CLIENT_ID || '',
+        apiKey: process.env.PAYOS_API_KEY || '',
+        checksumKey: process.env.PAYOS_CHECKSUM_KEY || '',
+        baseUrl: process.env.PAYOS_BASE_URL || 'https://api-merchant.payos.vn',
+        // Trang FE mở lại sau thanh toán/huỷ; mặc định {FRONTEND_URL}/orders/:id.
+        checkoutReturnUrl: process.env.PAYOS_RETURN_URL || '',
+        checkoutCancelUrl: process.env.PAYOS_CANCEL_URL || '',
+        // Chi tiền (payout) để hoàn tiền tự động
+        payoutClientId: process.env.PAYOS_PAYOUT_CLIENT_ID || '',
+        payoutApiKey: process.env.PAYOS_PAYOUT_API_KEY || '',
+        payoutChecksumKey: process.env.PAYOS_PAYOUT_CHECKSUM_KEY || '',
+        payoutBaseUrl: process.env.PAYOS_PAYOUT_BASE_URL || 'https://api-merchant.payos.vn',
+    },
     speedSmsAccessToken: process.env.SPEEDSMS_ACCESS_TOKEN || '',
     speedSmsType: Number(process.env.SPEEDSMS_SMS_TYPE) || 2,
     vnpay: {
@@ -91,8 +125,13 @@ export async function connectMongo() {
         ? config.mongoUri.replace('/?', '/vietcraft?')
         : config.mongoUri;
     try {
+        try {
+            dns.setServers(['8.8.8.8', '1.1.1.1']);
+        } catch {
+            // ignore if not supported in environment
+        }
         mongoose.set('strictQuery', false);
-        mongoose.set('bufferCommands', false);  // Fail immediately if not connected
+        mongoose.set('bufferCommands', false);
         await mongoose.connect(uri, {
             serverSelectionTimeoutMS: 8000,
             connectTimeoutMS: 8000,
@@ -113,9 +152,9 @@ export const redisClient = createClient({
         connectTimeout: 4000,
         reconnectStrategy: (retries) => {
             if (retries > 3) {
-                return false; // stop reconnecting after 3 retries
+                return false;
             }
-            return 2000; // try reconnecting after 2 seconds
+            return 2000;
         }
     }
 });

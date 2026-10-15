@@ -2,6 +2,7 @@ import axios, { AxiosInstance, AxiosError } from 'axios';
 import { config } from '../../../../app/config';
 import { logger } from '../../../../shared/utils/logger';
 import { User } from '../../../user/infrastructure/models/user.model';
+import { Shop } from '../../../product/infrastructure/models/shop.model';
 
 export class PrintingApiError extends Error {
     public statusCode?: number;
@@ -42,10 +43,20 @@ export class PrintingShopApiService {
      */
     async createFulfillmentOrder(order: any): Promise<{
         supplier_order_id: string;
+        printer_id?: string;
+        printer_name?: string;
         rawResponse: any;
     }> {
-        if (!config.printerApiUrl) {
-            throw new PrintingApiError('PRINTER_API_URL chưa được cấu hình', undefined, false);
+        const shop = order.shop_id ? await Shop.findById(order.shop_id).lean().catch(() => null) : null;
+        const targetBaseUrl = (shop?.printer_partner?.is_connected && shop.printer_partner.api_url) 
+            ? shop.printer_partner.api_url 
+            : (config.printerApiUrl || 'http://localhost:8880');
+        const targetApiKey = (shop?.printer_partner?.is_connected && shop.printer_partner.api_key)
+            ? shop.printer_partner.api_key
+            : (config.printerApiKey || '');
+
+        if (!targetBaseUrl) {
+            throw new PrintingApiError('Địa chỉ xưởng in (PRINTER_API_URL) chưa được cấu hình', undefined, false);
         }
 
         const buyer = await User.findById(order.buyer_id).select('full_name email').lean().catch(() => null);
@@ -75,6 +86,11 @@ export class PrintingShopApiService {
         const payload = {
             vietcraft_order_id: order._id ? order._id.toString() : order.id,
             order_code: order.order_code,
+            printer_id: shop?.printer_partner?.printer_id,
+            printer_name: shop?.printer_partner?.printer_name,
+            shop_id: order.shop_id ? order.shop_id.toString() : undefined,
+            shop_name: shop?.shop_name || 'VietCraft Shop',
+            seller_id: shop?.owner_id ? shop.owner_id.toString() : undefined,
             buyer_name: (buyer as any)?.full_name || (buyer as any)?.email || order.shipping_address?.recipient_name || 'Khách hàng VietCraft',
             recipient_phone: order.shipping_address?.phone || '',
             shipping_address: order.shipping_address,
@@ -82,15 +98,24 @@ export class PrintingShopApiService {
         };
 
         try {
-            const res = await this.client.post('/api/orders', payload);
+            logger.info(`[PRINTER DISPATCH] Gửi đơn ${order.order_code} tới ${targetBaseUrl}/api/orders`);
+            const res = await axios.post(`${targetBaseUrl}/api/orders`, payload, {
+                timeout: 10000,
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(targetApiKey ? { 'X-API-Key': targetApiKey } : {})
+                }
+            });
             const data = res.data;
 
             // Xưởng trả về newPrintOrder hoặc object có _id / supplier_order_id
             const supplierOrderId = data?.supplier_order_id || data?.order?._id || data?._id || '';
 
-            logger.info(`[PRINTER API SUCCESS] Đã gửi đơn ${order.order_code} sang xưởng in. Supplier Order ID: ${supplierOrderId}`);
+            logger.info(`[PRINTER API SUCCESS] Đã gửi đơn ${order.order_code} sang xưởng in (${targetBaseUrl}). Supplier Order ID: ${supplierOrderId}`);
             return {
                 supplier_order_id: String(supplierOrderId),
+                printer_id: shop?.printer_partner?.printer_id,
+                printer_name: shop?.printer_partner?.printer_name || 'Xưởng in VietCraft Partner',
                 rawResponse: data,
             };
         } catch (err: any) {
