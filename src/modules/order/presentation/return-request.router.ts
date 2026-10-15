@@ -131,7 +131,17 @@ export function createReturnRequestRouter({ service, authenticate, clock }: Retu
     }));
     router.post('/requests/:id/admin/decision', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(req.user?403:401).json({error:'Admin role required.'});
-        const data=await service.adminDecide({actorId:req.user.id,requestId:req.params.id,resolution:req.body?.resolution,faultParty:req.body?.faultParty,reason:req.body?.reason,amountMinor:req.body?.amountMinor,currency:req.body?.currency}); return res.json({data});
+        const data=await service.adminDecide({actorId:req.user.id,requestId:req.params.id,resolution:req.body?.resolution,faultParty:req.body?.faultParty,reason:req.body?.reason,amountMinor:req.body?.amountMinor,currency:req.body?.currency});
+        if(req.body?.resolution === 'EXCHANGE' || data.final_resolution === 'EXCHANGE') {
+            try {
+                await ReplacementOrderService.createAndDispatchReplacement(req.params.id);
+                const freshDoc = await ReturnRequestV3.findOne({ $or: [{ id: req.params.id }, { _id: req.params.id }] }).lean();
+                return res.json({ data: freshDoc || data });
+            } catch (err: any) {
+                console.error('[ADMIN EXCHANGE REPLACEMENT CREATION ERROR]', err.message);
+            }
+        }
+        return res.json({data});
     }));
     router.post('/requests/:id/admin/confirm-refund', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(req.user?403:401).json({error:'Admin role required.'});

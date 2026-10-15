@@ -47,7 +47,7 @@ export class ReplacementOrderService {
         const replacementOrderCode = `REPLACE-${cleanParentCode}-${shortSuffix}`;
 
         // 3. Chuẩn bị thông tin sản phẩm in bù
-        const targetItem = parentOrder?.items?.find((it: any) => 
+        const targetItem = parentOrder?.items?.find((it: any) =>
             it.order_item_id === v3Doc.order_item_id || String(it._id) === v3Doc.order_item_id
         );
         const itemSnapshot = v3Doc.item_snapshot || {};

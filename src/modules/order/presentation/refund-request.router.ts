@@ -207,11 +207,18 @@ const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, re
         const service = createReturnRequestService();
         const printerAction = decision as 'APPROVE' | 'REJECT';
         const reason = note || 'Xưởng in đã xác nhận và chấp thuận';
+        const rawEvidence: any[] = Array.isArray(req.body?.evidence) ? req.body.evidence : (Array.isArray(req.body?.evidence_urls) ? req.body.evidence_urls.map((u: string) => ({ id: crypto.randomUUID(), kind: 'IMAGE' as const, uri: u })) : []);
+        const printerEvidence = rawEvidence.map((e: any) => ({
+            id: e.id || crypto.randomUUID(),
+            kind: e.kind === 'VIDEO' ? 'VIDEO' as const : 'IMAGE' as const,
+            uri: e.uri || e.url || e.storage_ref || String(e),
+        })).filter(e => typeof e.uri === 'string' && e.uri.trim());
         const updated = await service.printerDecision({
             actorId: printerId,
             requestId,
             action: printerAction,
             reason,
+            evidence: printerEvidence,
         });
 
         if (printerAction === 'APPROVE' && (v3Doc.requested_resolution === 'EXCHANGE' || updated.final_resolution === 'EXCHANGE')) {
