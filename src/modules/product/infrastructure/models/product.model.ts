@@ -49,6 +49,11 @@ export interface IProduct extends Document {
     }[];
     average_rating?: number;
     rating_count?: number;
+    // Không khai báo trong ProductSchema bên dưới — field này do script seed ghi
+    // thẳng qua driver Mongo (`BE/scripts/link-seed-shop-to-seller.js`), không qua
+    // Mongoose. Khai báo ở đây chỉ để các query `{ seed_ref: { $exists: false } }`
+    // (lọc sản phẩm seed, xem F29 listing health) có kiểu rõ ràng khi đọc qua `.lean()`.
+    seed_ref?: string;
     created_at: Date;
     updated_at: Date;
 }
