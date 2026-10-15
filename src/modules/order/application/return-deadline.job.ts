@@ -2,6 +2,7 @@ import { ReturnRequestV3, RETURN_REQUEST_V3_ACTIVE_STATUSES } from '../infrastru
 import { User } from '../../user/infrastructure/models/user.model';
 import { notificationService } from '../../notification/application/notification.service';
 import { logger } from '../../../shared/utils/logger';
+import { isMongoReady } from '../../../app/config';
 import { createReturnRequestService } from './return-request.runtime';
 
 export interface ReturnDeadlineJobDependencies {
@@ -64,7 +65,7 @@ export class ReturnDeadlineJob {
     static start(intervalMs = 60_000): void {
         if (this.timer) return;
         const run = async () => {
-            if (this.running) return;
+            if (!isMongoReady() || this.running) return;
             this.running = true;
             try { await processExpiredReturnDeadlines(defaultDependencies()); }
             catch (error: any) { logger.error(`[RETURN DEADLINE] ${error.message}`); }

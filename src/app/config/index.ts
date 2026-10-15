@@ -116,6 +116,10 @@ export async function connectPostgres() {
 }
 
 // MongoDB connection
+export function isMongoReady(): boolean {
+    return mongoose.connection.readyState === 1;
+}
+
 export async function connectMongo() {
     if (!config.mongoUri) {
         logger.warn('Failed to connect to MongoDB: MONGO_URI is not defined.');

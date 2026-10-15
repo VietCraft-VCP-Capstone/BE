@@ -34,6 +34,9 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/forecast/niches', ai: () => '/api/analytics/forecast/niches', query: ['categoryId'] },
     { method: 'get', path: '/forecast/radar', ai: () => '/api/analytics/forecast/radar' },
     { method: 'get', path: '/forecast/recommendations', ai: () => '/api/analytics/forecast/recommendations' },
+    // Gợi ý sản phẩm thông minh (F42)
+    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'productType', 'keywords', 'blankCost'] },
+    { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion' },
 ];
 
 const MAX_QUERY_LENGTH = 120;
@@ -95,6 +98,8 @@ for (const route of ROUTES) {
                     return res.status(400).json({ error: 'invalid_param', field: 'shop_id' });
                 }
                 body = { shop_id: target };
+            } else if (req.body && typeof req.body === 'object') {
+                body = req.body;
             }
 
             const viewer = await viewerOrReply(req, res);

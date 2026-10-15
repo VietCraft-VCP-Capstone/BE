@@ -358,6 +358,7 @@ export class PromotionService {
                 applicable_scope: scope,
                 applicable_product_ids: allowedIds,
                 applicable_products_count: allowedIds.length,
+                shop_id: shopObj?._id?.toString() || null,
                 start_date: c.start_date,
                 end_date: c.end_date,
                 is_platform: !c.shop_id,

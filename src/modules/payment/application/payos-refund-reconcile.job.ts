@@ -1,4 +1,5 @@
 import { logger } from '../../../shared/utils/logger';
+import { isMongoReady } from '../../../app/config';
 import { PaymentRefundExecution } from '../infrastructure/refund-execution.model';
 import { Order } from '../../order/infrastructure/models/order.model';
 import { PROCESSING_STALE_MS } from './refund-execution.service';
@@ -26,7 +27,7 @@ export class PayosRefundReconcileJob {
 
     /** Trả về số execution đã được chạy lại. */
     static async runOnce(minAgeMs = 10_000): Promise<number> {
-        if (this.running) return 0;
+        if (!isMongoReady() || this.running) return 0;
         this.running = true;
         let processed = 0;
         try {

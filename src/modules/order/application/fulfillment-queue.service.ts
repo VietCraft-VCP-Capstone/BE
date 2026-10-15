@@ -181,6 +181,7 @@ export class FulfillmentQueueService {
         logger.info(`[FULFILLMENT QUEUE WORKER] Khởi động hàng đợi nền (Chu kỳ kiểm tra: ${intervalMs / 1000}s)`);
 
         this.timer = setInterval(async () => {
+            if (mongoose.connection.readyState !== 1) return;
             try {
                 const now = new Date();
                 const pendingJobs = await FulfillmentJob.find({
