@@ -8,6 +8,21 @@ import { sendOtpEmail, sendResetPasswordEmail } from '../../../shared/utils/emai
 const OTP_TTL_MS = 10 * 60 * 1000;
 const MAX_OTP_ATTEMPTS = 5;
 const MIN_PASSWORD_LENGTH = 8;
+const RESEND_COOLDOWN_MS = 30 * 1000;
+
+export class AuthError extends Error {
+    statusCode: number;
+    code: string;
+    errors?: string[];
+
+    constructor(message: string, statusCode = 400, code = 'AUTH_ERROR', errors?: string[]) {
+        super(message);
+        this.name = 'AuthError';
+        this.statusCode = statusCode;
+        this.code = code;
+        this.errors = errors;
+    }
+}
 
 /** Role được phép TỰ đăng ký. ADMIN cố tình không nằm ở đây: không ai tự phong admin. */
 const SELF_SIGNUP_ROLES = ['BUYER', 'SELLER'] as const;
@@ -19,18 +34,24 @@ function generateOtp(): string {
 
 /** Email luôn được chuẩn hoá về lowercase: nếu không, 'A@x.com' và 'a@x.com'
  *  tạo ra hai tài khoản khác nhau và OTP tra theo email sẽ không khớp. */
-function normalizeEmail(email?: string): string {
+export function normalizeEmail(email?: string): string {
     const value = String(email || '').trim().toLowerCase();
-    if (!value || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-        throw new Error('Email không hợp lệ.');
+    if (!value) {
+        throw new AuthError('Vui lòng nhập địa chỉ email.', 400, 'VALIDATION_ERROR');
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+        throw new AuthError('Email không đúng định dạng (ví dụ: name@example.com).', 400, 'VALIDATION_ERROR');
     }
     return value;
 }
 
-function assertPassword(password?: string): string {
+export function assertPassword(password?: string): string {
     const value = String(password || '');
+    if (!value) {
+        throw new AuthError('Vui lòng nhập mật khẩu.', 400, 'VALIDATION_ERROR');
+    }
     if (value.length < MIN_PASSWORD_LENGTH) {
-        throw new Error(`Mật khẩu phải có ít nhất ${MIN_PASSWORD_LENGTH} ký tự.`);
+        throw new AuthError(`Mật khẩu phải có ít nhất ${MIN_PASSWORD_LENGTH} ký tự.`, 400, 'VALIDATION_ERROR');
     }
     return value;
 }
@@ -39,7 +60,7 @@ function assertPassword(password?: string): string {
 function normalizeSignupRole(role?: string): SelfSignupRole {
     const value = String(role || 'BUYER').trim().toUpperCase();
     if (!SELF_SIGNUP_ROLES.includes(value as SelfSignupRole)) {
-        throw new Error("Vai trò đăng ký không hợp lệ. Chỉ chấp nhận 'BUYER' hoặc 'SELLER'.");
+        throw new AuthError("Vai trò đăng ký không hợp lệ. Chỉ chấp nhận 'BUYER' hoặc 'SELLER'.", 400, 'VALIDATION_ERROR');
     }
     return value as SelfSignupRole;
 }
@@ -70,46 +91,65 @@ export class AuthService {
         code: string,
         purpose: 'REGISTER' | 'FORGOT_PASSWORD'
     ): Promise<IOtpVerification> {
-        const invalid = () => new Error('Mã OTP không hợp lệ hoặc đã hết hạn.');
+        const cleanCode = String(code || '').trim();
+        if (!cleanCode) {
+            throw new AuthError('Vui lòng nhập mã OTP.', 400, 'VALIDATION_ERROR');
+        }
+        if (cleanCode.length !== 6) {
+            throw new AuthError('Mã OTP phải có đúng 6 chữ số.', 400, 'VALIDATION_ERROR');
+        }
 
         const pending = await OtpVerification.findOne({ email, purpose });
-        if (!pending) throw invalid();
+        if (!pending) {
+            throw new AuthError('Không tìm thấy yêu cầu xác thực hoặc mã OTP đã hết hạn. Vui lòng bấm gửi lại mã.', 400, 'OTP_NOT_FOUND');
+        }
 
         if (pending.expired_at.getTime() <= Date.now()) {
             await OtpVerification.deleteOne({ _id: pending._id });
-            throw new Error('Mã OTP đã hết hạn. Vui lòng bấm gửi lại mã.');
+            throw new AuthError('Mã OTP đã hết hạn. Vui lòng bấm gửi lại mã mới.', 400, 'OTP_EXPIRED');
         }
 
-        if (pending.otp_code !== String(code || '').trim()) {
+        if (pending.otp_code !== cleanCode) {
             const updated = await OtpVerification.findOneAndUpdate(
                 { _id: pending._id },
                 { $inc: { attempts: 1 } },
                 { new: true }
             );
-            if (updated && updated.attempts >= MAX_OTP_ATTEMPTS) {
+            const currentAttempts = updated?.attempts || 1;
+            const remaining = Math.max(0, MAX_OTP_ATTEMPTS - currentAttempts);
+            if (currentAttempts >= MAX_OTP_ATTEMPTS) {
                 await OtpVerification.deleteOne({ _id: pending._id });
-                throw new Error('Bạn đã nhập sai mã quá số lần cho phép. Vui lòng yêu cầu mã mới.');
+                throw new AuthError('Bạn đã nhập sai mã OTP quá 5 lần. Vui lòng yêu cầu gửi lại mã mới.', 400, 'MAX_ATTEMPTS_EXCEEDED');
             }
-            throw invalid();
+            throw new AuthError(`Mã OTP không chính xác. Bạn còn ${remaining} lần thử.`, 400, 'INVALID_OTP');
         }
 
         // Xoá có điều kiện: chỉ request ĐẦU TIÊN nhận deletedCount = 1,
         // request thứ hai (dùng lại mã / chạy song song) rơi vào nhánh lỗi.
         const consumed = await OtpVerification.deleteOne({ _id: pending._id, otp_code: pending.otp_code });
-        if (consumed.deletedCount !== 1) throw invalid();
+        if (consumed.deletedCount !== 1) {
+            throw new AuthError('Mã OTP này đã được sử dụng. Vui lòng yêu cầu mã mới.', 400, 'OTP_ALREADY_USED');
+        }
         return pending;
     }
 
     static async register(payload: { email: string; password: string; name: string; role?: string }) {
+        const rawName = String(payload?.name || '').trim();
+        if (!rawName) {
+            throw new AuthError('Vui lòng nhập họ và tên.', 400, 'VALIDATION_ERROR');
+        }
+        if (rawName.length < 2) {
+            throw new AuthError('Họ và tên phải có ít nhất 2 ký tự.', 400, 'VALIDATION_ERROR');
+        }
+
         const email = normalizeEmail(payload?.email);
         const password = assertPassword(payload?.password);
-        const name = String(payload?.name || '').trim();
-        if (!name) throw new Error('Vui lòng nhập họ tên.');
-        // Mặc định BUYER; SELLER được phép tự đăng ký để hệ thống có tài khoản người bán.
         const role = normalizeSignupRole(payload?.role);
 
         const existing = await User.findOne({ email });
-        if (existing) throw new Error('Email đã được sử dụng.');
+        if (existing) {
+            throw new AuthError('Email này đã được sử dụng để đăng ký tài khoản. Vui lòng đăng nhập hoặc dùng email khác.', 400, 'EMAIL_ALREADY_EXISTS');
+        }
 
         const password_hash = await bcrypt.hash(password, 12);
 
@@ -122,7 +162,7 @@ export class AuthService {
             purpose: 'REGISTER',
             expired_at,
             temp_password_hash: password_hash,
-            temp_full_name: name,
+            temp_full_name: rawName,
             temp_role: role,
             attempts: 0,
         });
@@ -133,20 +173,30 @@ export class AuthService {
             logOtpFallback('GỬI EMAIL THẤT BẠI', error, otp);
         }
 
-        return { message: 'Đăng ký thành công. Vui lòng kiểm tra email để lấy mã OTP.', email };
+        return { message: 'Đăng ký thành công. Vui lòng kiểm tra email để lấy mã xác thực OTP.', email };
     }
 
     static async verifyOtp(email: string, code: string) {
         const normalizedEmail = normalizeEmail(email);
+        const cleanCode = String(code || '').trim();
+
+        if (!cleanCode) {
+            throw new AuthError('Vui lòng nhập mã OTP.', 400, 'VALIDATION_ERROR');
+        }
+        if (cleanCode.length !== 6) {
+            throw new AuthError('Mã OTP phải có đúng 6 chữ số.', 400, 'VALIDATION_ERROR');
+        }
 
         // Kiểm tra trùng email TRƯỚC khi tiêu thụ OTP để không đốt mã một cách vô ích.
         const existing = await User.findOne({ email: normalizedEmail });
-        if (existing) throw new Error('Email đã được sử dụng.');
+        if (existing) {
+            throw new AuthError('Tài khoản đã được xác thực trước đó. Vui lòng chuyển sang trang đăng nhập.', 400, 'ALREADY_VERIFIED');
+        }
 
-        const record = await this.consumeOtp(normalizedEmail, code, 'REGISTER');
+        const record = await this.consumeOtp(normalizedEmail, cleanCode, 'REGISTER');
 
         if (!record.temp_password_hash || !record.temp_full_name) {
-            throw new Error('Dữ liệu đăng ký không hợp lệ.');
+            throw new AuthError('Dữ liệu đăng ký không hợp lệ hoặc đã bị xóa. Vui lòng đăng ký lại từ đầu.', 400, 'INVALID_REGISTRATION_DATA');
         }
 
         const user = await User.create({
@@ -163,40 +213,59 @@ export class AuthService {
     }
 
     static async login(payload: { email: string; password: string }) {
-        const email = normalizeEmail(payload?.email);
-        const password = String(payload?.password || '');
+        const rawEmail = String(payload?.email || '').trim();
+        const rawPassword = String(payload?.password || '');
+
+        if (!rawEmail) {
+            throw new AuthError('Vui lòng nhập địa chỉ email.', 400, 'VALIDATION_ERROR');
+        }
+        if (!rawPassword) {
+            throw new AuthError('Vui lòng nhập mật khẩu.', 400, 'VALIDATION_ERROR');
+        }
+
+        const email = normalizeEmail(rawEmail);
 
         const user = await User.findOne({ email });
         if (!user) {
             const pendingReg = await OtpVerification.findOne({ email, purpose: 'REGISTER' });
             if (pendingReg) {
-                const err = new Error('Tài khoản chưa được xác thực. Vui lòng xác thực bằng mã OTP.') as any;
-                err.code = 'USER_NOT_VERIFIED';
-                throw err;
+                throw new AuthError('Tài khoản chưa được kích hoạt. Vui lòng xác thực bằng mã OTP.', 401, 'USER_NOT_VERIFIED');
             }
-            const err = new Error('Email hoặc mật khẩu không đúng.') as any;
-            err.code = 'USER_NOT_FOUND';
-            throw err;
-        }
-        if (user.is_locked) {
-            throw new Error('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên.');
+            throw new AuthError('Email hoặc mật khẩu không chính xác.', 401, 'USER_NOT_FOUND');
         }
 
-        const valid = await bcrypt.compare(password, user.password_hash);
+        if (user.is_locked) {
+            throw new AuthError('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên để được hỗ trợ.', 403, 'ACCOUNT_LOCKED');
+        }
+
+        const valid = await bcrypt.compare(rawPassword, user.password_hash);
         if (!valid) {
-            const err = new Error('Email hoặc mật khẩu không đúng.') as any;
-            err.code = 'INVALID_PASSWORD';
-            throw err;
+            throw new AuthError('Mật khẩu không chính xác.', 401, 'INVALID_PASSWORD');
         }
 
         return authResponse(user);
     }
 
     static async googleAuth(accessToken: string) {
-        const res = await fetch(`https://www.googleapis.com/oauth2/v3/userinfo?access_token=${accessToken}`);
-        if (!res.ok) throw new Error('Token Google không hợp lệ.');
-        const gInfo = await res.json() as any;
-        if (!gInfo.email) throw new Error('Không lấy được thông tin Google.');
+        if (!accessToken || !String(accessToken).trim()) {
+            throw new AuthError('Thiếu access token Google.', 400, 'VALIDATION_ERROR');
+        }
+
+        let res: globalThis.Response;
+        try {
+            res = await fetch(`https://www.googleapis.com/oauth2/v3/userinfo?access_token=${accessToken}`);
+        } catch {
+            throw new AuthError('Không thể kết nối đến máy chủ Google để xác thực tài khoản.', 400, 'GOOGLE_CONNECTION_ERROR');
+        }
+
+        if (!res.ok) {
+            throw new AuthError('Phiên đăng nhập Google đã hết hạn hoặc không hợp lệ. Vui lòng thử lại.', 401, 'INVALID_GOOGLE_TOKEN');
+        }
+
+        const gInfo = (await res.json()) as any;
+        if (!gInfo?.email) {
+            throw new AuthError('Không lấy được thông tin email từ tài khoản Google.', 400, 'GOOGLE_NO_EMAIL');
+        }
 
         const email = normalizeEmail(gInfo.email);
 
@@ -205,7 +274,10 @@ export class AuthService {
             const password_hash = await bcrypt.hash(Math.random().toString(36), 12);
             user = await User.create({ email, password_hash, full_name: gInfo.name || email, avatar: gInfo.picture, role: 'BUYER' });
         }
-        if (user.is_locked) throw new Error('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên.');
+
+        if (user.is_locked) {
+            throw new AuthError('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên để được hỗ trợ.', 403, 'ACCOUNT_LOCKED');
+        }
 
         await OtpVerification.deleteMany({ email, purpose: 'REGISTER' });
 
@@ -215,19 +287,24 @@ export class AuthService {
     static async resendOtp(email: string) {
         const normalizedEmail = normalizeEmail(email);
 
-        // Ở luồng đăng ký, User CHƯA tồn tại (chỉ được tạo ở verify-otp).
-        // Bản cũ đòi User phải tồn tại nên resend-otp luôn hỏng, và mã mới sinh ra
-        // cũng mất temp_password_hash/temp_full_name khiến verify-otp không dùng được.
         const pending = await OtpVerification.findOne({ email: normalizedEmail, purpose: 'REGISTER' });
 
         if (!pending) {
             const user = await User.findOne({ email: normalizedEmail });
-            if (user) throw new Error('Tài khoản đã được xác thực. Vui lòng đăng nhập.');
-            throw new Error('Không tìm thấy yêu cầu đăng ký cho email này. Vui lòng đăng ký lại.');
+            if (user) {
+                throw new AuthError('Tài khoản này đã được xác thực trước đó. Vui lòng đăng nhập.', 400, 'ALREADY_VERIFIED');
+            }
+            throw new AuthError('Không tìm thấy yêu cầu đăng ký cho email này. Vui lòng đăng ký lại tài khoản.', 400, 'REGISTRATION_NOT_FOUND');
+        }
+
+        // Chống spam: Cooldown giữa các lần gửi lại
+        const lastUpdated = pending.get('updated_at') as Date;
+        if (lastUpdated && Date.now() - new Date(lastUpdated).getTime() < RESEND_COOLDOWN_MS) {
+            const waitSeconds = Math.ceil((RESEND_COOLDOWN_MS - (Date.now() - new Date(lastUpdated).getTime())) / 1000);
+            throw new AuthError(`Vui lòng đợi ${waitSeconds} giây trước khi yêu cầu gửi lại mã OTP mới.`, 429, 'RATE_LIMITED');
         }
 
         const otp = generateOtp();
-        // Cập nhật tại chỗ để GIỮ NGUYÊN temp_password_hash / temp_full_name / temp_role
         pending.otp_code = otp;
         pending.expired_at = new Date(Date.now() + OTP_TTL_MS);
         pending.attempts = 0;
@@ -239,13 +316,28 @@ export class AuthService {
             logOtpFallback('GỬI EMAIL THẤT BẠI', error, otp);
         }
 
-        return { message: 'Đã gửi lại mã OTP.' };
+        return { message: 'Đã gửi lại mã OTP mới. Vui lòng kiểm tra hộp thư của bạn.' };
     }
 
     static async forgotPassword(email: string) {
         const normalizedEmail = normalizeEmail(email);
         const user = await User.findOne({ email: normalizedEmail });
-        if (!user) throw new Error('Email không tồn tại trong hệ thống.');
+        if (!user) {
+            throw new AuthError('Email này không tồn tại trong hệ thống. Vui lòng kiểm tra lại hoặc tạo tài khoản mới.', 404, 'USER_NOT_FOUND');
+        }
+        if (user.is_locked) {
+            throw new AuthError('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên để được hỗ trợ.', 403, 'ACCOUNT_LOCKED');
+        }
+
+        // Cooldown check
+        const pending = await OtpVerification.findOne({ email: normalizedEmail, purpose: 'FORGOT_PASSWORD' });
+        if (pending) {
+            const lastUpdated = pending.get('updated_at') as Date;
+            if (lastUpdated && Date.now() - new Date(lastUpdated).getTime() < RESEND_COOLDOWN_MS) {
+                const waitSeconds = Math.ceil((RESEND_COOLDOWN_MS - (Date.now() - new Date(lastUpdated).getTime())) / 1000);
+                throw new AuthError(`Vui lòng đợi ${waitSeconds} giây trước khi yêu cầu gửi mã mới.`, 429, 'RATE_LIMITED');
+            }
+        }
 
         const otp = generateOtp();
         const expired_at = new Date(Date.now() + OTP_TTL_MS);
@@ -264,18 +356,31 @@ export class AuthService {
             logOtpFallback('GỬI EMAIL ĐẶT LẠI MẬT KHẨU THẤT BẠI', error, otp);
         }
 
-        return { message: 'Vui lòng kiểm tra email để nhận mã đặt lại mật khẩu.', email: normalizedEmail };
+        return { message: 'Mã xác thực đặt lại mật khẩu đã được gửi đến email của bạn.', email: normalizedEmail };
     }
 
     static async resetPassword(payload: { email: string; code: string; newPassword: string }) {
         const email = normalizeEmail(payload?.email);
+        const code = String(payload?.code || '').trim();
+        if (!code) {
+            throw new AuthError('Vui lòng nhập mã OTP xác thực.', 400, 'VALIDATION_ERROR');
+        }
+        if (code.length !== 6) {
+            throw new AuthError('Mã OTP phải có đúng 6 chữ số.', 400, 'VALIDATION_ERROR');
+        }
+
         const newPassword = assertPassword(payload?.newPassword);
 
         const user = await User.findOne({ email });
-        if (!user) throw new Error('Tài khoản không tồn tại.');
+        if (!user) {
+            throw new AuthError('Tài khoản không tồn tại trong hệ thống.', 404, 'USER_NOT_FOUND');
+        }
+        if (user.is_locked) {
+            throw new AuthError('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên để được hỗ trợ.', 403, 'ACCOUNT_LOCKED');
+        }
 
         // consumeOtp xoá mã ngay khi khớp -> mã reset chỉ dùng được đúng một lần
-        await this.consumeOtp(email, payload?.code, 'FORGOT_PASSWORD');
+        await this.consumeOtp(email, code, 'FORGOT_PASSWORD');
 
         user.password_hash = await bcrypt.hash(newPassword, 12);
         await user.save();
@@ -283,7 +388,7 @@ export class AuthService {
         // Dọn mọi mã còn lại của email này
         await OtpVerification.deleteMany({ email });
 
-        return { message: 'Đặt lại mật khẩu thành công. Vui lòng đăng nhập lại.' };
+        return { message: 'Đặt lại mật khẩu thành công. Vui lòng đăng nhập bằng mật khẩu mới.' };
     }
 
     static async getAllUsers() {
@@ -292,7 +397,9 @@ export class AuthService {
 
     static async toggleLockUser(userId: string) {
         const user = await User.findById(userId);
-        if (!user) throw new Error('Không tìm thấy người dùng.');
+        if (!user) {
+            throw new AuthError('Không tìm thấy người dùng.', 404, 'USER_NOT_FOUND');
+        }
         user.is_locked = !user.is_locked;
         await user.save();
         return user;
