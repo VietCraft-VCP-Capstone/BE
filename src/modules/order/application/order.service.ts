@@ -402,7 +402,8 @@ export class OrdersService {
       order.refund_status = 'REQUESTED';
     }
 
-    await order.save();
+    // Chỉ validate các trường vừa thay đổi: đơn cũ có thể thiếu trường bắt buộc (ward_code, base_cost...) khiến save() báo 400
+    await order.save({ validateModifiedOnly: true });
 
     // Hoàn lại kho và voucher
     await OrdersService.restoreOrderStockAndCoupon(order);
@@ -434,7 +435,7 @@ export class OrdersService {
               changed_at: new Date(),
               note: `Cổng thanh toán đã hoàn trả thành công ${refundAmount.toLocaleString('vi-VN')}đ về tài khoản ngân hàng.`
             });
-            await order.save();
+            await order.save({ validateModifiedOnly: true });
             refundMessageSuffix = ' Số tiền thanh toán đã được hoàn về tài khoản ngân hàng của bạn.';
             logger.info(`[AUTO-REFUND SUCCESS] #${order.order_code}: amount=${refundResult.amount}`);
           } else if (refundResult.status === 'PENDING') {
@@ -444,7 +445,7 @@ export class OrdersService {
               changed_at: new Date(),
               note: `Lệnh hoàn tiền ${refundAmount.toLocaleString('vi-VN')}đ đang được cổng thanh toán xử lý.`
             });
-            await order.save();
+            await order.save({ validateModifiedOnly: true });
             refundMessageSuffix = ' Lệnh hoàn tiền đang được xử lý về tài khoản ngân hàng của bạn.';
             logger.info(`[AUTO-REFUND PENDING] #${order.order_code}: ${refundResult.error || 'Đang xử lý'}`);
           } else {
@@ -455,7 +456,7 @@ export class OrdersService {
               changed_at: new Date(),
               note: `Hoàn tiền tự động không thành công: ${failReason}. Đang chờ đối soát hoàn thủ công.`
             });
-            await order.save();
+            await order.save({ validateModifiedOnly: true });
             refundMessageSuffix = ` Lưu ý: Lệnh hoàn tiền tự động chưa hoàn tất (${failReason}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
             logger.error(`[AUTO-REFUND FAILED] #${order.order_code}: ${failReason}`);
           }
@@ -467,7 +468,7 @@ export class OrdersService {
             changed_at: new Date(),
             note: `Lỗi xử lý hoàn tiền: ${errMsg}. Đang chờ đối soát hoàn thủ công.`
           });
-          await order.save();
+          await order.save({ validateModifiedOnly: true });
           refundMessageSuffix = ` Lưu ý: Lỗi xử lý hoàn tiền (${errMsg}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
           logger.error(`[AUTO-REFUND ERROR] #${order.order_code}: ${errMsg}`);
         }

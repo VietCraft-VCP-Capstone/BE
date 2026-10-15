@@ -295,15 +295,20 @@ export class PromotionService {
             ? { $or: [{ shop_id: null }, { shop_id: new mongoose.Types.ObjectId(shopId) }] }
             : { shop_id: null };
 
+        // Dùng $and: nếu spread shopQuery cùng cấp, key $or bên dưới sẽ ghi đè $or lọc shop → trả về voucher của mọi shop
         const coupons = await Coupon.find({
-            ...shopQuery,
+            $and: [
+                shopQuery,
+                {
+                    $or: [
+                        { usage_limit: null },
+                        { $expr: { $lt: ['$used_count', '$usage_limit'] } }
+                    ]
+                }
+            ],
             is_active: true,
             start_date: { $lte: now },
-            end_date: { $gte: now },
-            $or: [
-                { usage_limit: null },
-                { $expr: { $lt: ['$used_count', '$usage_limit'] } }
-            ]
+            end_date: { $gte: now }
         })
         .populate('shop_id', 'shop_name logo')
         .sort({ end_date: 1 })
