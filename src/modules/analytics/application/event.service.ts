@@ -19,6 +19,8 @@ const BOT_PATTERNS = [
     /baiduspider/i,
 ];
 
+const DEDUPE_WINDOW_MS = 30 * 60 * 1000;
+
 const isBot = (userAgent: string): boolean => {
     // Empty user-agent for server-side events should not be considered a bot
     if (!userAgent) return false;
@@ -88,34 +90,28 @@ export class EventService {
                 }
             }
 
-            // Deduplication: check if event exists in 30-min window
-            const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
-            const existingEvent = await ProductEvent.findOne({
-                session_id: sessionId,
-                product_id: new mongoose.Types.ObjectId(productId),
-                event_type: eventType,
-                created_at: { $gt: thirtyMinutesAgo }
-            });
-
-            if (existingEvent) {
-                logger.debug(`Duplicate event filtered: session=${sessionId}, product=${productId}, type=${eventType}`);
-                return false;
-            }
-
-            // Record the event
-            await ProductEvent.create({
-                product_id: new mongoose.Types.ObjectId(productId),
-                session_id: sessionId,
-                event_type: eventType,
-                user_id: userId ? new mongoose.Types.ObjectId(userId) : undefined,
-                user_agent: userAgent,
-                ip_address: ipAddress,
-                created_at: new Date()
-            });
-
-            logger.debug(`Event recorded: product=${productId}, type=${eventType}, session=${sessionId}`);
-            return true;
-        } catch (error) {
+            const now = new Date();
+            const dedupeKey = `${sessionId}:${productId}:${eventType}:${Math.floor(now.getTime() / DEDUPE_WINDOW_MS)}`;
+            const result = await ProductEvent.updateOne(
+                { dedupe_key: dedupeKey },
+                {
+                    $setOnInsert: {
+                        dedupe_key: dedupeKey,
+                        product_id: new mongoose.Types.ObjectId(productId),
+                        session_id: sessionId,
+                        event_type: eventType,
+                        user_id: userId ? new mongoose.Types.ObjectId(userId) : undefined,
+                        user_agent: userAgent,
+                        ip_address: ipAddress,
+                        created_at: now,
+                    },
+                },
+                { upsert: true },
+            );
+            return result.upsertedCount === 1;
+        } catch (error: any) {
+            // Hai request cùng khoá tới cùng lúc: bản thứ hai chạm unique index, coi là trùng.
+            if (error?.code === 11000) return false;
             logger.error(`Error recording event: ${error}`);
             return false;
         }

@@ -1,7 +1,9 @@
 import mongoose from 'mongoose';
 import { Product } from '../../product/infrastructure/models/product.model';
+import { Tag } from '../../tags/infrastructure/models/tag.model';
 import { ListingHealthScore, IAxis, ITodo, IConversionDetail } from '../../product/infrastructure/models/listing-health-score.model';
 import { buildMeta, ok, insufficient, Envelope } from './envelope';
+import { EMPTY_SALES, HealthInputs, ListingProductInfo, ListingSales, healthInputs, salesByProduct } from './listing-sales';
 
 // Đọc thẳng điểm do job AI (app/core/f29_scheduler.py) ghi, nên AI tắt thì route vẫn chạy.
 
@@ -19,6 +21,10 @@ export interface HealthDetailData {
     axes_missing: string[];
     todos: ITodo[];
     conversion_detail: IConversionDetail | null;
+    /** Giá trị thật đang dùng để chấm, để FE nói "hiện có 1 ảnh, cần 5". */
+    inputs: HealthInputs;
+    product: ListingProductInfo;
+    sales: ListingSales;
 }
 
 export interface HealthListItem {
@@ -27,12 +33,18 @@ export interface HealthListItem {
     thumbnail: string | null;
     score: number | null;
     status: HealthStatus | null;
+    /** Điểm từng tiêu chí của lần chấm mới nhất, để FE tính trung bình shop. */
+    axes: IAxis;
     axes_missing: string[];
     computed_at: string | null;
-    /** Việc tăng điểm đáng làm nhất (engine đã sắp theo lợi ích/công sức). */
-    top_todo: ITodo | null;
+    /** Việc tăng điểm (engine đã sắp theo lợi ích/công sức, tối đa 4 loại) và mọi cảnh báo. */
+    todos: ITodo[];
     n_todos: number;
-    n_warnings: number;
+    warnings: ITodo[];
+    /** Tag đang gắn; `pending` = chờ admin duyệt, chưa hiện với người mua. */
+    tags: { name: string; pending: boolean }[];
+    /** Lượt xem, đơn, số món, doanh thu 30 ngày trên đơn thật không huỷ. */
+    sales: ListingSales;
 }
 
 export interface HealthHistoryPoint {
@@ -65,6 +77,17 @@ function metaForListing(productId: string, opts: {
     });
 }
 
+type OwnedProduct = {
+    _id: mongoose.Types.ObjectId;
+    title?: string;
+    images?: string[];
+    description?: string;
+    tags?: string[];
+    tag_ids?: mongoose.Types.ObjectId[];
+    product_type?: string;
+    updated_at?: Date;
+};
+
 export class ListingHealthService {
     static isValidObjectId(value: unknown): value is string {
         return typeof value === 'string' && mongoose.Types.ObjectId.isValid(value);
@@ -72,17 +95,19 @@ export class ListingHealthService {
 
     /** Sản phẩm thuộc shop đang xem, hoặc phản hồi 404/403 dựng sẵn. */
     static async ownedProduct(productId: string, shopId: string): Promise<
-        | { product: { _id: mongoose.Types.ObjectId; title?: string } }
+        | { product: OwnedProduct }
         | { denied: { httpStatus: number; body: { error: string; resource?: string } } }
     > {
-        const product = await Product.findById(productId).select('_id shop_id title').lean();
+        const product = await Product.findById(productId)
+            .select('_id shop_id title images description tags tag_ids product_type updated_at')
+            .lean();
         if (!product) {
             return { denied: { httpStatus: 404, body: { error: 'not_found', resource: 'listing' } } };
         }
         if (String(product.shop_id) !== shopId) {
             return { denied: { httpStatus: 403, body: { error: 'forbidden' } } };
         }
-        return { product: { _id: product._id as mongoose.Types.ObjectId, title: product.title } };
+        return { product: product as OwnedProduct };
     }
 
     /**
@@ -129,6 +154,10 @@ export class ListingHealthService {
             };
         }
 
+        const [{ inputs, info }, sales] = await Promise.all([
+            healthInputs(product, record.content_changed_at),
+            salesByProduct([product._id]),
+        ]);
         const data: HealthDetailData = {
             product_id: productId,
             title: product.title ?? null,
@@ -138,6 +167,9 @@ export class ListingHealthService {
             axes_missing: record.axes_missing || [],
             todos: record.todos || [],
             conversion_detail: record.conversion_detail ?? null,
+            inputs,
+            product: info,
+            sales: sales.get(String(product._id)) ?? { ...EMPTY_SALES },
         };
 
         return {
@@ -228,12 +260,12 @@ export class ListingHealthService {
         }
 
         const products = await Product.find({ shop_id: shopId, seed_ref: { $exists: false } })
-            .select('_id title images')
+            .select('_id title images tags tag_ids')
             .lean();
 
         const productIds = products.map(p => p._id);
 
-        const latestByProduct = new Map<string, { score: number | null; status: HealthStatus | null; axes_missing: string[]; computed_at: Date | string | null; model_version?: string; todos: ITodo[] }>();
+        const latestByProduct = new Map<string, { score: number | null; status: HealthStatus | null; axes: IAxis; axes_missing: string[]; computed_at: Date | string | null; model_version?: string; todos: ITodo[] }>();
 
         if (productIds.length > 0) {
             const rows = await ListingHealthScore.aggregate([
@@ -244,6 +276,7 @@ export class ListingHealthService {
                         _id: '$product_id',
                         score: { $first: '$score' },
                         status: { $first: '$status' },
+                        axes: { $first: '$axes' },
                         axes_missing: { $first: '$axes_missing' },
                         computed_at: { $first: '$computed_at' },
                         model_version: { $first: '$model_version' },
@@ -255,6 +288,7 @@ export class ListingHealthService {
                 latestByProduct.set(String(row._id), {
                     score: row.score ?? null,
                     status: row.status ?? null,
+                    axes: row.axes || {},
                     axes_missing: row.axes_missing || [],
                     computed_at: row.computed_at ?? null,
                     model_version: row.model_version,
@@ -263,6 +297,17 @@ export class ListingHealthService {
             }
         }
 
+        // Tên + trạng thái duyệt của mọi tag mà shop đang dùng, một truy vấn cho cả shop.
+        const tagIds = products.flatMap(p => p.tag_ids ?? []);
+        const tagDocs = tagIds.length ? await Tag.find({ _id: { $in: tagIds } }).select('_id name status').lean() : [];
+        const tagById = new Map(tagDocs.map(t => [String(t._id), { name: t.name, pending: t.status === 'pending' }]));
+        const tagsOf = (p: (typeof products)[number]) =>
+            p.tag_ids?.length
+                ? p.tag_ids.map(id => tagById.get(String(id))).filter((t): t is { name: string; pending: boolean } => Boolean(t))
+                // Sản phẩm cũ chưa có tag_ids: không biết trạng thái duyệt, coi như đã duyệt.
+                : (p.tags ?? []).filter(Boolean).map(name => ({ name, pending: false }));
+
+        const sales = await salesByProduct(productIds);
         let items: HealthListItem[] = products.map(p => {
             const latest = latestByProduct.get(String(p._id));
             const todos = latest?.todos ?? [];
@@ -272,11 +317,14 @@ export class ListingHealthService {
                 thumbnail: Array.isArray(p.images) && p.images.length > 0 ? p.images[0] : null,
                 score: latest?.score ?? null,
                 status: latest?.status ?? null,
+                axes: latest?.axes ?? {},
                 axes_missing: latest?.axes_missing ?? [],
                 computed_at: latest?.computed_at ? new Date(latest.computed_at).toISOString() : null,
-                top_todo: todos.find(t => t.type === 'todo') ?? null,
+                todos: todos.filter(t => t.type === 'todo'),
                 n_todos: todos.filter(t => t.type === 'todo').length,
-                n_warnings: todos.filter(t => t.type === 'warning').length,
+                warnings: todos.filter(t => t.type === 'warning'),
+                tags: tagsOf(p),
+                sales: sales.get(String(p._id)) ?? { ...EMPTY_SALES },
             };
         });
 

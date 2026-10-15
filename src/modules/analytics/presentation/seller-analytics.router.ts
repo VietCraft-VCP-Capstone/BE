@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { AiGatewayService, AnalyticsViewer } from '../application/ai-gateway.service';
 import { ListingHealthService, HealthStatus } from '../application/listing-health.service';
+import { healthSummary } from '../application/listing-health-summary.service';
 import { parsePreviewBody, PreviewBodyResult } from '../application/health-preview';
 
 type Method = 'get' | 'post' | 'delete';
@@ -144,6 +145,24 @@ router.get('/listings/health', async (req: AuthenticatedRequest, res: Response) 
         return res.status(httpStatus).json(payload);
     } catch (error: any) {
         return res.status(500).json({ error: error?.message || 'Lỗi khi đọc danh sách sức khoẻ listing.' });
+    }
+});
+
+/** F29 · Điểm trung bình và số sản phẩm theo mức điểm của cả shop, theo ngày. */
+router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const days = req.query.days === undefined ? 30 : Number(req.query.days);
+        if (!HISTORY_DAYS.includes(days)) {
+            return res.status(400).json({ error: 'invalid_param', field: 'days', expected: HISTORY_DAYS.join('|') });
+        }
+
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+
+        const { httpStatus, body } = await healthSummary(viewer.analysed_shop_id!, days);
+        return res.status(httpStatus).json({ ...body, viewer });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc điểm sức khoẻ của shop.' });
     }
 });
 
