@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { Product as MongoProduct } from '../infrastructure/models/product.model';
-import { ProductVariant as MongoVariant } from '../infrastructure/models/product-variant.model';
+import { ProductVariant as MongoVariant, syncProductDenorm } from '../infrastructure/models/product-variant.model';
 import { Shop } from '../infrastructure/models/shop.model';
 import { User } from '../../user/infrastructure/models/user.model';
 import { Category } from '../../category';
@@ -19,8 +19,19 @@ import {
     ProductColorVariantDTO,
     InventoryTrendPointDTO,
     ProductFilterQueryDTO,
-    PaginatedProductsResponseDTO
+    PaginatedProductsResponseDTO,
+    SearchProductsParams,
+    SuggestResultDTO
 } from './product.dto';
+import { SearchLog } from '../../analytics/infrastructure/models/search-log.model';
+import {
+    normalizeVi,
+    nfcLower,
+    hasTone,
+    escapeRegex,
+    extractSearchTerms,
+    buildPrefixes
+} from '../../../shared/utils/vietnamese-search.util';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
@@ -131,14 +142,18 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
             id: shop._id.toString(),
             name: shop.shop_name,
             logo: shop.logo,
-            rating: shop.average_rating || 5.0,
+            rating: shop.average_rating ?? 5.0,
         } : undefined,
         sellerId: product.shop_id ? product.shop_id.toString() : undefined,
         tags: product.tags || [],
-        rating: typeof product.average_rating === 'number' ? product.average_rating : 5.0,
+        rating: (typeof product.rating_count === 'number' && product.rating_count > 0)
+            ? (typeof product.average_rating === 'number' ? product.average_rating : 0)
+            : 0,
         ratingCount: typeof product.rating_count === 'number' ? product.rating_count : 0,
         allowCustomization: Boolean(product.allow_customization),
         customizationType: product.customization_type || 'NONE',
+        productType: product.product_type || 'READY_TO_SHIP',
+        soldCount: typeof product.sold_count === 'number' ? product.sold_count : 0,
         createdAt: product.created_at ? new Date(product.created_at).toISOString() : new Date().toISOString(),
         updatedAt: product.updated_at ? new Date(product.updated_at).toISOString() : new Date().toISOString(),
     };
@@ -411,6 +426,7 @@ export class ProductsService {
             is_active: true,
         }));
         await MongoVariant.insertMany(docs);
+        await syncProductDenorm(productId);
     }
 
     static async resolveProposedTags(names: string[], sellerId: string): Promise<{ docs: { _id: mongoose.Types.ObjectId; name: string }[]; proposed: number }> {
@@ -623,6 +639,317 @@ export class ProductsService {
             return ProductsService.page(ProductsService.buildQuery(base, filter), filter);
         }, 120);
     }
+
+    /**
+     * Tìm kiếm sản phẩm thông minh kết hợp tiếng Việt (có dấu + không dấu),
+     * Điểm liên quan (Relevance Text Score + Exact Match Bonus) và Điểm uy tín Gian hàng (SRS Boost).
+     */
+    static async search(params: SearchProductsParams): Promise<PaginatedProductsResponseDTO> {
+        const q = (typeof params.q === 'string' ? params.q : '').slice(0, 100).trim();
+        const norm = normalizeVi(q);
+        const terms = extractSearchTerms(q, 8);
+        const page = Math.max(1, Number(params.page) || 1);
+        const limit = Math.min(48, Math.max(1, Number(params.limit || params.pageSize) || 12));
+        const useText = terms.length > 0;
+
+        // Ghi nhận lịch sử tìm kiếm: CHỈ ghi khi trang đầu tiên (page === 1) và tìm kiếm gốc
+        // Tránh bị thổi phồng khi chuyển trang hoặc thay đổi bộ lọc giá/sắp xếp
+        if (q && q.length >= 2 && page === 1 && !params.sort && !params.category && !params.minPrice && !params.maxPrice) {
+            SearchLog.create({
+                keyword: q,
+                user_id: params.userId && mongoose.Types.ObjectId.isValid(params.userId) ? new mongoose.Types.ObjectId(params.userId) : undefined
+            }).catch(() => {});
+        }
+
+        const match: any = {
+            status: 'PUBLISHED',
+            is_hidden: { $ne: true },
+            listing_status: 'ACTIVE',
+            moderation_status: 'APPROVED',
+        };
+
+        if (useText) {
+            match.$text = { $search: terms.map(t => `"${t}"`).join(' ') };
+        }
+
+        const andConditions: any[] = [];
+
+        if (params.category && params.category !== 'ALL' && params.category !== 'Tất cả danh mục') {
+            const rawCat = params.category.trim();
+            if (/^[0-9a-fA-F]{24}$/.test(rawCat)) {
+                andConditions.push({
+                    $or: [
+                        { category_ids: new mongoose.Types.ObjectId(rawCat) },
+                        { categories_norm: normalizeVi(rawCat) }
+                    ]
+                });
+            } else {
+                const normCat = normalizeVi(rawCat);
+                andConditions.push({
+                    $or: [
+                        { categories_norm: normCat },
+                        { categories: { $regex: escapeRegex(rawCat), $options: 'i' } }
+                    ]
+                });
+            }
+        }
+
+        const pType = params.productType || params.craftType;
+        if (pType && pType !== 'ALL') {
+            match.product_type = pType;
+        }
+
+        if (params.location && params.location.trim()) {
+            match.location = { $regex: escapeRegex(params.location.trim()), $options: 'i' };
+        }
+
+        if (params.rating) {
+            match.average_rating = { $gte: Number(params.rating) };
+        }
+
+        if (params.minPrice != null && params.minPrice !== '') {
+            match.max_price = { $gte: Number(params.minPrice) };
+        }
+
+        if (params.maxPrice != null && params.maxPrice !== '') {
+            match.min_price = { $lte: Number(params.maxPrice) };
+        }
+
+        if (params.inStockOnly === true || params.inStockOnly === 'true') {
+            andConditions.push({
+                $or: [
+                    { product_type: 'POD_TEMPLATE' }, // POD là in theo yêu cầu, luôn sẵn sàng phục vụ
+                    { total_stock: { $gt: 0 } },
+                    { listing_status: 'ACTIVE', product_type: { $ne: 'READY_TO_SHIP' } }
+                ]
+            });
+        }
+
+        if (andConditions.length > 0) {
+            match.$and = andConditions;
+        }
+
+        const queryHasTone = hasTone(q);
+        const qLower = nfcLower(q);
+
+        const relevance = {
+            $add: [
+                useText ? { $meta: 'textScore' } : 0,
+                useText ? { $cond: [{ $regexMatch: { input: '$title_norm', regex: escapeRegex(norm) } }, 3, 0] } : 0,
+                useText && queryHasTone ? { $cond: [{ $regexMatch: { input: '$title_lc', regex: escapeRegex(qLower) } }, 4, 0] } : 0,
+                { $multiply: ['$_reputationScore', 0.02] }, // SRS 0-100 -> tối đa +2 điểm
+                { $multiply: [{ $ifNull: ['$average_rating', 0] }, 0.3] },
+                { $multiply: [{ $ln: { $add: [{ $ifNull: ['$sold_count', 0] }, 1] } }, 0.2] },
+            ]
+        };
+
+        const SORTS: Record<string, any> = {
+            relevance:   { _relevance: -1, created_at: -1 },
+            newest:      { created_at: -1 },
+            price_asc:   { min_price: 1, created_at: -1 },
+            price_desc:  { max_price: -1, created_at: -1 },
+            rating_desc: { average_rating: -1, created_at: -1 },
+            best_seller: { sold_count: -1, created_at: -1 },
+        };
+
+        const sortStage = SORTS[params.sort as string] ?? SORTS.relevance;
+
+        let [res] = await MongoProduct.aggregate([
+            { $match: match },
+            {
+                $lookup: {
+                    from: 'shops',
+                    localField: 'shop_id',
+                    foreignField: '_id',
+                    as: '_shop',
+                    pipeline: [{ $project: { reputation_score: 1 } }]
+                }
+            },
+            {
+                $addFields: {
+                    _reputationScore: { $ifNull: [{ $arrayElemAt: ['$_shop.reputation_score', 0] }, 100] },
+                }
+            },
+            { $addFields: { _relevance: relevance } },
+            {
+                $project: {
+                    title_prefixes: 0,
+                    description: 0,
+                    description_norm: 0,
+                    design_placements: 0,
+                    _shop: 0
+                }
+            },
+            { $sort: sortStage },
+            {
+                $facet: {
+                    items: [
+                        { $skip: (page - 1) * limit },
+                        { $limit: limit },
+                    ],
+                    total: [{ $count: 'n' }],
+                }
+            },
+        ], { allowDiskUse: true });
+
+        // Fallback khi 0 kết quả: nếu total === 0 và có terms, chạy lại với title_prefixes
+        if ((res?.total?.[0]?.n ?? 0) === 0 && useText) {
+            const fallbackMatch = { ...match };
+            delete fallbackMatch.$text;
+            fallbackMatch.title_prefixes = { $all: terms.map(t => t.slice(0, 10)) };
+
+            const fallbackRelevance = {
+                $add: [
+                    { $cond: [{ $regexMatch: { input: '$title_norm', regex: escapeRegex(norm) } }, 3, 0] },
+                    queryHasTone ? { $cond: [{ $regexMatch: { input: '$title_lc', regex: escapeRegex(qLower) } }, 4, 0] } : 0,
+                    { $multiply: ['$_reputationScore', 0.02] },
+                    { $multiply: [{ $ifNull: ['$average_rating', 0] }, 0.3] },
+                    { $multiply: [{ $ln: { $add: [{ $ifNull: ['$sold_count', 0] }, 1] } }, 0.2] },
+                ]
+            };
+
+            const [fallbackRes] = await MongoProduct.aggregate([
+                { $match: fallbackMatch },
+                {
+                    $lookup: {
+                        from: 'shops',
+                        localField: 'shop_id',
+                        foreignField: '_id',
+                        as: '_shop',
+                        pipeline: [{ $project: { reputation_score: 1 } }]
+                    }
+                },
+                {
+                    $addFields: {
+                        _reputationScore: { $ifNull: [{ $arrayElemAt: ['$_shop.reputation_score', 0] }, 100] },
+                    }
+                },
+                { $addFields: { _relevance: fallbackRelevance } },
+                {
+                    $project: {
+                        title_prefixes: 0,
+                        description: 0,
+                        description_norm: 0,
+                        design_placements: 0,
+                        _shop: 0
+                    }
+                },
+                { $sort: sortStage },
+                {
+                    $facet: {
+                        items: [
+                            { $skip: (page - 1) * limit },
+                            { $limit: limit },
+                        ],
+                        total: [{ $count: 'n' }],
+                    }
+                },
+            ], { allowDiskUse: true });
+
+            if ((fallbackRes?.total?.[0]?.n ?? 0) > 0) {
+                res = fallbackRes;
+            }
+        }
+
+        const rawDocs = res?.items || [];
+        const total = res?.total?.[0]?.n ?? 0;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+        const items = await ProductsService.mapMany(rawDocs);
+
+        return { items, total, page, limit, totalPages };
+    }
+
+    /**
+     * Gợi ý nhanh (Search-as-you-type) phục vụ Dropdown Popover tại Header.
+     * Trả về kết quả tức thì (< 30ms): Top 4 sản phẩm, Top 2 gian hàng, Top 3 danh mục.
+     */
+    static async suggest(queryStr?: string): Promise<SuggestResultDTO> {
+        const q = (typeof queryStr === 'string' ? queryStr : '').slice(0, 60).trim();
+        if (!q) {
+            return { products: [], shops: [], categories: [] };
+        }
+
+        const norm = normalizeVi(q);
+        const terms = extractSearchTerms(q, 4).map(t => t.slice(0, 12));
+        const safeRegex = escapeRegex(norm);
+        const slugQ = norm.replace(/\s+/g, '-');
+        const safeSlugQ = escapeRegex(slugQ);
+
+        const prodMatch: any = {
+            status: 'PUBLISHED',
+            is_hidden: { $ne: true },
+            listing_status: 'ACTIVE',
+            moderation_status: 'APPROVED',
+        };
+
+        if (terms.length > 0) {
+            // Tận dụng chỉ mục IXSCAN trên title_prefixes, tags_norm, categories_norm và title_norm (không dùng 'i' để giữ bounded index scan)
+            prodMatch.$or = [
+                { title_prefixes: norm },
+                { title_prefixes: { $all: terms } },
+                { tags_norm: { $all: terms } },
+                { categories_norm: { $all: terms } },
+                { title_norm: { $regex: '^' + safeRegex } }
+            ];
+        }
+
+        const [matchingProducts, matchingShops, matchingCategories] = await Promise.all([
+            MongoProduct.find(prodMatch)
+                .select('_id title slug images min_price original_price average_rating rating_count')
+                .sort({ average_rating: -1, created_at: -1 })
+                .limit(4)
+                .lean(),
+
+            Shop.find({
+                reputation_tier: { $ne: 'RESTRICTED' },
+                status: 'ACTIVE',
+                $or: [
+                    { shop_name_norm: { $regex: '^' + safeRegex } },
+                    { slug: { $regex: '^' + safeSlugQ } }
+                ]
+            })
+                .select('_id shop_name slug logo reputation_score reputation_tier')
+                .sort({ reputation_score: -1 })
+                .limit(2)
+                .lean(),
+
+            Category.find({
+                is_active: true,
+                $or: [
+                    { name_norm: { $regex: '^' + safeRegex } },
+                    { slug: { $regex: '^' + safeSlugQ } }
+                ]
+            })
+                .select('_id name slug')
+                .limit(3)
+                .lean()
+        ]);
+
+        return {
+            products: matchingProducts.map((p: any) => ({
+                id: p._id.toString(),
+                title: p.title,
+                thumbnail: Array.isArray(p.images) && p.images[0] ? p.images[0] : '',
+                price: (p.min_price && p.min_price > 0) ? p.min_price : (p.original_price ?? 0),
+                average_rating: (p.rating_count ?? 0) > 0 ? (p.average_rating ?? 0) : 0,
+                slug: p.slug
+            })),
+            shops: matchingShops.map((s: any) => ({
+                id: s._id.toString(),
+                name: s.shop_name,
+                slug: s.slug,
+                logo: s.logo,
+                reputationScore: s.reputation_score ?? 100,
+                reputationTier: s.reputation_tier || 'NORMAL'
+            })),
+            categories: matchingCategories.map((c: any) => ({
+                id: c._id.toString(),
+                name: c.name,
+                slug: c.slug
+            }))
+        };
+    }
+
 
 
     static async getMine(actor: ProductActor, filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
@@ -1282,6 +1609,7 @@ export class ProductsService {
             if (payload.sku !== undefined) updates.sku = payload.sku;
             if (Object.keys(updates).length > 0) {
                 await MongoVariant.updateMany({ product_id: mp._id }, updates);
+                await syncProductDenorm(mp._id);
             }
         }
 
@@ -1318,6 +1646,7 @@ export class ProductsService {
         mp.listing_status = 'INACTIVE';
         await mp.save();
         await MongoVariant.updateMany({ product_id: mp._id }, { $set: { is_active: false } });
+        await syncProductDenorm(mp._id);
         await Shop.updateOne({ _id: mp.shop_id }, { $inc: { listing_count: -1 } });
 
         await ProductsService.invalidateProductCache(id);
@@ -1334,6 +1663,7 @@ export class ProductsService {
             { $set: { is_hidden: true, status: 'UNPUBLISHED', listing_status: 'INACTIVE' } }
         );
         await MongoVariant.updateMany({ product_id: { $in: scoped } }, { $set: { is_active: false } });
+        await Promise.all(scoped.map(id => syncProductDenorm(id)));
 
         await ProductsService.invalidateProductCache();
         logger.info(`Batch soft deleted ${result.modifiedCount} products by ${actor.id}`);

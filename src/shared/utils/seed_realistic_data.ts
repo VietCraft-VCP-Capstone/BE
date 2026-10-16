@@ -8,6 +8,7 @@ import { ShopFollower } from '../../modules/product/infrastructure/models/shop-f
 import { Order } from '../../modules/order/infrastructure/models/order.model';
 import { Review } from '../../modules/order/infrastructure/models/review.model';
 import { Coupon } from '../../modules/promotion/infrastructure/models/coupon.model';
+import { Category } from '../../modules/category/infrastructure/models/category.model';
 import { logger } from './logger';
 import { config } from '../../app/config';
 
@@ -18,15 +19,36 @@ export async function seedRealisticData() {
 
     const passwordHash = await bcrypt.hash(SEED_PASSWORD, 12);
 
+    // 0. Tạo Danh mục (Categories) nếu chưa có
+    const catCount = await Category.countDocuments();
+    if (catCount === 0) {
+        logger.info('Tạo các danh mục sản phẩm thủ công mỹ nghệ...');
+        await Category.create([
+            { name: 'Gốm sứ & Mỹ nghệ', slug: 'gom-su-my-nghe', is_active: true, sort_order: 1 },
+            { name: 'Phụ kiện & Quà tặng', slug: 'phu-kien-qua-tang', is_active: true, sort_order: 2 },
+            { name: 'Túi Tote & Canvas', slug: 'tui-tote-canvas', is_active: true, sort_order: 3 },
+            { name: 'Thời trang & Đồ da', slug: 'thoi-trang-do-da', is_active: true, sort_order: 4 },
+            { name: 'Đồ gỗ mỹ nghệ', slug: 'do-go-my-nghe', is_active: true, sort_order: 5 },
+            { name: 'Trang trí', slug: 'trang-tri', is_active: true, sort_order: 6 },
+            { name: 'Ly tách', slug: 'ly-tach', is_active: true, sort_order: 7 },
+            { name: 'Phụ kiện', slug: 'phu-kien', is_active: true, sort_order: 8 },
+            { name: 'Trang sức', slug: 'trang-suc', is_active: true, sort_order: 9 },
+            { name: 'Tranh ảnh', slug: 'tranh-anh', is_active: true, sort_order: 10 },
+            { name: 'Nhà cửa', slug: 'nha-cua', is_active: true, sort_order: 11 },
+            { name: 'Vải len', slug: 'vai-len', is_active: true, sort_order: 12 },
+            { name: 'Áo thun', slug: 'ao-thun', is_active: true, sort_order: 13 }
+        ]);
+    }
+
     // 1. Tạo Coupons nếu chưa có
     const couponCount = await Coupon.countDocuments();
     if (couponCount === 0) {
         logger.info('Tạo mã ưu đãi mẫu...');
         await Coupon.create([
-            { code: 'VCP50K', discount_type: 'FIXED_AMOUNT', discount_value: mongoose.Types.Decimal128.fromString('50000'), min_order_value: mongoose.Types.Decimal128.fromString('200000'), start_date: new Date(), end_date: new Date(Date.now() + 60 * 86400000) },
-            { code: 'VCPFREE', discount_type: 'FIXED_AMOUNT', discount_value: mongoose.Types.Decimal128.fromString('30000'), min_order_value: mongoose.Types.Decimal128.fromString('0'), start_date: new Date(), end_date: new Date(Date.now() + 60 * 86400000) },
-            { code: 'VCP100K', discount_type: 'FIXED_AMOUNT', discount_value: mongoose.Types.Decimal128.fromString('100000'), min_order_value: mongoose.Types.Decimal128.fromString('1000000'), start_date: new Date(), end_date: new Date(Date.now() + 60 * 86400000) },
-            { code: 'VCP10', discount_type: 'PERCENTAGE', discount_value: mongoose.Types.Decimal128.fromString('10'), min_order_value: mongoose.Types.Decimal128.fromString('0'), start_date: new Date(), end_date: new Date(Date.now() + 60 * 86400000) },
+            { code: 'VCP50K', title: 'Giảm 50K cho đơn từ 200K', discount_type: 'FIXED_AMOUNT', discount_value: mongoose.Types.Decimal128.fromString('50000'), min_order_value: mongoose.Types.Decimal128.fromString('200000'), start_date: new Date(), end_date: new Date(Date.now() + 60 * 86400000) },
+            { code: 'VCPFREE', title: 'Miễn phí vận chuyển 30K', discount_type: 'FIXED_AMOUNT', discount_value: mongoose.Types.Decimal128.fromString('30000'), min_order_value: mongoose.Types.Decimal128.fromString('0'), start_date: new Date(), end_date: new Date(Date.now() + 60 * 86400000) },
+            { code: 'VCP100K', title: 'Giảm 100K cho đơn từ 1 triệu', discount_type: 'FIXED_AMOUNT', discount_value: mongoose.Types.Decimal128.fromString('100000'), min_order_value: mongoose.Types.Decimal128.fromString('1000000'), start_date: new Date(), end_date: new Date(Date.now() + 60 * 86400000) },
+            { code: 'VCP10', title: 'Giảm 10% toàn sàn', discount_type: 'PERCENTAGE', discount_value: mongoose.Types.Decimal128.fromString('10'), min_order_value: mongoose.Types.Decimal128.fromString('0'), start_date: new Date(), end_date: new Date(Date.now() + 60 * 86400000) },
         ]);
     }
 
@@ -345,6 +367,272 @@ export async function seedRealisticData() {
             original_price: 360000,
             variants: [
                 { sku: 'VC-GO-KHAY-OVAL', name: 'Dáng Oval 32x22cm', color: 'Nâu Cánh Gián', material: 'Gỗ xà cừ', price: 299000, stock: 25, mockup: '#6B4226' }
+            ]
+        },
+        {
+            key: 'sp_am_chen_tu_sa',
+            shop_id: shop1._id,
+            title: 'Bộ Ấm Chén Tử Sa Bát Tràng Dáng Quả Chuông',
+            slug: 'seed-bo-am-chen-tu-sa-bat-trang',
+            description: 'Bộ ấm chén đất tử sa Bát Tràng nung nhiệt độ cao 1250°C, giữ hương trà nguyên bản, dung tích ấm 280ml kèm 6 chén và 1 khay tròn.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Gốm sứ & Mỹ nghệ', 'Ly tách', 'Trang trí'],
+            tags: ['Bát Tràng', 'Tử sa', 'Ấm chén', 'Trà đạo'],
+            location: 'Bát Tràng, Hà Nội',
+            images: [
+                'https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 1100,
+            dimensions_cm: { length: 25, width: 25, height: 12 },
+            display_rank: 8,
+            original_price: 750000,
+            variants: [
+                { sku: 'VC-GOM-AM-TUSA', name: 'Đất Nâu Đỏ Tử Sa', color: 'Nâu Đỏ', material: 'Đất tử sa Bát Tràng', price: 650000, stock: 18, mockup: '#8B4513' }
+            ]
+        },
+        {
+            key: 'sp_binh_hoa_bien',
+            shop_id: shop1._id,
+            title: 'Bình Gốm Hỏa Biến Men Lam Dáng Bầu Nghệ Thuật',
+            slug: 'seed-binh-gom-hoa-bien-men-lam',
+            description: 'Bình hoa gốm thủ công men hỏa biến sắc xanh sâu thẳm độc bản, tạo nét chấm phá sang trọng tĩnh tại cho không gian trà thất hoặc phòng khách.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Gốm sứ & Mỹ nghệ', 'Trang trí', 'Nhà cửa'],
+            tags: ['Bát Tràng', 'Hỏa biến', 'Men lam', 'Bình hoa'],
+            location: 'Bát Tràng, Hà Nội',
+            images: [
+                'https://images.unsplash.com/photo-1612196808214-b8e1d6145a8c?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1581783342308-f792dbdd27c5?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 800,
+            dimensions_cm: { length: 15, width: 15, height: 26 },
+            display_rank: 9,
+            original_price: 580000,
+            variants: [
+                { sku: 'VC-GOM-BH-LAM', name: 'Xanh Hỏa Biến Đại Dương', color: 'Xanh Lam Đậm', material: 'Gốm men hỏa biến', price: 480000, stock: 22, mockup: '#1E3A8A' }
+            ]
+        },
+        {
+            key: 'sp_tui_coi_hoi_an',
+            shop_id: shop2._id,
+            title: 'Túi Cói Đi Biển Dệt Tay Họa Tiết Boho Hội An',
+            slug: 'seed-tui-coi-di-bien-det-tay-hoi-an',
+            description: 'Túi cói tự nhiên đan tay tỉ mỉ bởi nghệ nhân làng nghề Hội An, lót vải mộc có dây rút an toàn, quai xách chắc chắn thích hợp dạo phố và du lịch biển.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Phụ kiện & Quà tặng', 'Túi Tote & Canvas', 'Thời trang & Đồ da'],
+            tags: ['Hội An', 'Cói', 'Túi cói', 'Boho', 'Thủ công'],
+            location: 'Hội An, Quảng Nam',
+            images: [
+                'https://images.unsplash.com/photo-1590874103328-eac38a683ce7?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 350,
+            dimensions_cm: { length: 30, width: 12, height: 25 },
+            display_rank: 10,
+            original_price: 320000,
+            variants: [
+                { sku: 'VC-COI-TB-BOHO', name: 'Cói Vàng Tự Nhiên', color: 'Vàng Rơm', material: 'Sợi cói tự nhiên', price: 260000, stock: 35, mockup: '#D4A373' }
+            ]
+        },
+        {
+            key: 'sp_gio_may_tre',
+            shop_id: shop1._id,
+            title: 'Giỏ Mây Tre Đan Xuất Khẩu Quai Da Tự Nhiên',
+            slug: 'seed-gio-may-tre-dan-xuat-khau',
+            description: 'Giỏ mây tre đan tay hình trụ tròn quai da bò mộc, chuyên dùng đựng đồ lưu niệm, chậu cây nội thất hoặc decor không gian sống phong cách tối giản.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Nhà cửa', 'Trang trí', 'Phụ kiện & Quà tặng'],
+            tags: ['Bao La', 'Mây tre', 'Đan lát', 'Eco-friendly'],
+            location: 'Huế',
+            images: [
+                'https://images.unsplash.com/photo-1592078615290-033ee584e267?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1578749556568-bc2c40e68b61?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 400,
+            dimensions_cm: { length: 22, width: 22, height: 20 },
+            display_rank: 11,
+            original_price: 230000,
+            variants: [
+                { sku: 'VC-MAY-GIO-TRON', name: 'Mây Vàng Mộc', color: 'Mộc Tự Nhiên', material: 'Sợi mây tre xử lý chống mốc', price: 185000, stock: 40, mockup: '#E9D5A1' }
+            ]
+        },
+        {
+            key: 'sp_tranh_son_mai',
+            shop_id: shop1._id,
+            title: 'Tranh Sơn Mài Khảm Trai Phong Cảnh Phố Cổ Hà Nội',
+            slug: 'seed-tranh-son-mai-kham-trai-pho-co',
+            description: 'Bức tranh sơn mài truyền thống cẩn xà cừ tinh xảo tái hiện góc phố cổ rêu phong dưới ánh chiều, độ bóng tráng gương bền vững hàng chục năm.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Tranh ảnh', 'Gốm sứ & Mỹ nghệ', 'Trang trí'],
+            tags: ['Hạ Thái', 'Sơn mài', 'Khảm trai', 'Phố cổ', 'Hà Nội'],
+            location: 'Hạ Thái, Hà Nội',
+            images: [
+                'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1602751584552-8ba73aad10e1?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 1500,
+            dimensions_cm: { length: 45, width: 35, height: 4 },
+            display_rank: 12,
+            original_price: 1150000,
+            variants: [
+                { sku: 'VC-SM-TRANH-PHOCO', name: 'Khung Gỗ Sơn Mài 45x35cm', color: 'Đen Vàng Khảm Trai', material: 'Vóc sơn mài khảm ốc', price: 950000, stock: 10, mockup: '#000000' }
+            ]
+        },
+        {
+            key: 'sp_tranh_theu_hoa_sen',
+            shop_id: shop2._id,
+            title: 'Tranh Thêu Tay Hoa Sen Nghệ Thuật Chỉ Tơ Tằm',
+            slug: 'seed-tranh-theu-tay-hoa-sen-to-tam',
+            description: 'Tác phẩm thêu tay hai mặt bằng chỉ tơ tằm nguyên chất trên nền lụa tự nhiên, từng đường kim mũi chỉ mềm mại khắc họa đóa sen thanh tao thoát tục.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Tranh ảnh', 'Trang trí', 'Vải len'],
+            tags: ['Quất Động', 'Thêu tay', 'Hoa sen', 'Tơ tằm'],
+            location: 'Hà Nội',
+            images: [
+                'https://images.unsplash.com/photo-1582561424760-0321d75e81fa?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 1200,
+            dimensions_cm: { length: 40, width: 40, height: 3 },
+            display_rank: 13,
+            original_price: 980000,
+            variants: [
+                { sku: 'VC-THEU-SEN-LUA', name: 'Khung Gỗ Sồi 40x40cm', color: 'Hồng Phấn Sen', material: 'Chỉ tơ tằm dệt tay', price: 820000, stock: 12, mockup: '#F472B6' }
+            ]
+        },
+        {
+            key: 'sp_khan_lua_van_phuc',
+            shop_id: shop2._id,
+            title: 'Khăn Lụa Tơ Tằm Vạn Phúc Dệt Tay Họa Tiết Hoa Cúc',
+            slug: 'seed-khan-lua-to-tam-van-phuc',
+            description: 'Khăn choàng lụa tơ tằm thủ công làng Vạn Phúc mềm mại bóng mượt, dệt hoa cúc chìm thanh nhã, giữ ấm mùa đông thoáng mát mùa hè.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Vải len', 'Thời trang & Đồ da', 'Phụ kiện & Quà tặng'],
+            tags: ['Vạn Phúc', 'Lụa', 'Tơ tằm', 'Khăn lụa', 'Hà Đông'],
+            location: 'Vạn Phúc, Hà Đông',
+            images: [
+                'https://images.unsplash.com/photo-1601924994987-69e26d50dc26?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 150,
+            dimensions_cm: { length: 180, width: 70, height: 1 },
+            display_rank: 14,
+            original_price: 550000,
+            variants: [
+                { sku: 'VC-LUA-KHAN-CUC-VANG', name: 'Vàng Hoàng Yến', color: 'Vàng Tơ', material: '100% Lụa tơ tằm Vạn Phúc', price: 450000, stock: 25, mockup: '#FDE047' },
+                { sku: 'VC-LUA-KHAN-CUC-XANH', name: 'Xanh Cổ Vịt', color: 'Xanh Cổ Vịt', material: '100% Lụa tơ tằm Vạn Phúc', price: 450000, stock: 20, mockup: '#0D9488' }
+            ]
+        },
+        {
+            key: 'sp_ao_thun_theu_trong_dong',
+            shop_id: shop2._id,
+            title: 'Áo Thun Cotton Organic Thêu Họa Tiết Trống Đồng',
+            slug: 'seed-ao-thun-cotton-theu-trong-dong',
+            description: 'Áo thun cotton 100% 250gsm định lượng dày dặn thoáng mát, trước ngực thêu viền chỉ vàng biểu tượng mặt trời Trống Đồng Đông Sơn độc đáo.',
+            product_type: 'POD_TEMPLATE',
+            allow_customization: true,
+            customization_type: 'ONLINE_MOCKUP',
+            categories: ['Áo thun', 'Thời trang & Đồ da'],
+            tags: ['Organic', 'Áo thun', 'Trống đồng', 'Cotton'],
+            location: 'TP. Hồ Chí Minh',
+            images: [
+                'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1583743814966-8936f5b7be1a?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 280,
+            dimensions_cm: { length: 30, width: 25, height: 2 },
+            display_rank: 15,
+            original_price: 290000,
+            variants: [
+                { sku: 'VC-AO-TD-DEN-L', name: 'Đen Mực - Size L', color: 'Đen', size: 'L', material: '100% Cotton 250gsm', price: 240000, stock: 45, mockup: '#18181B' },
+                { sku: 'VC-AO-TD-TRANG-M', name: 'Trắng Sữa - Size M', color: 'Trắng', size: 'M', material: '100% Cotton 250gsm', price: 240000, stock: 35, mockup: '#FAFAFA' }
+            ]
+        },
+        {
+            key: 'sp_vong_tram_huong',
+            shop_id: shop2._id,
+            title: 'Vòng Tay Trầm Hương Tự Nhiên 108 Hạt Bọc Bạc',
+            slug: 'seed-vong-tay-tram-huong-tu-nhien',
+            description: 'Chuỗi 108 hạt trầm hương tốc bông tự nhiên rừng Tiên Phước Quảng Nam, tỏa hương thơm ngọt ấm vĩnh cửu, kết hợp charm bạc 925 thủ công.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Trang sức', 'Phụ kiện & Quà tặng'],
+            tags: ['Quảng Nam', 'Trầm hương', 'Vòng tay', 'Phong thủy'],
+            location: 'Tiên Phước, Quảng Nam',
+            images: [
+                'https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 80,
+            dimensions_cm: { length: 12, width: 12, height: 4 },
+            display_rank: 16,
+            original_price: 1100000,
+            variants: [
+                { sku: 'VC-TRAM-108-6MM', name: 'Trầm Tốc Bông 6mm', color: 'Nâu Trầm', material: 'Trầm hương tự nhiên', price: 890000, stock: 15, mockup: '#5C3A21' }
+            ]
+        },
+        {
+            key: 'sp_nen_thom_hoang_dan',
+            shop_id: shop1._id,
+            title: 'Nến Thơm Sáp Đậu Nành Tinh Dầu Gỗ Hoàng Đàn & Quế',
+            slug: 'seed-nen-thom-sap-dau-nanh-hoang-dan',
+            description: 'Nến thơm đổ tay từ 100% sáp đậu nành thiên nhiên, bấc gỗ nổ lách tách thư giãn, hương gỗ hoàng đàn trầm ấm quyện tinh dầu quế hồi Tây Bắc.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Trang trí', 'Nhà cửa', 'Phụ kiện & Quà tặng'],
+            tags: ['Nến thơm', 'Aromatherapy', 'Eco-friendly', 'Thủ công'],
+            location: 'Đà Lạt',
+            images: [
+                'https://images.unsplash.com/photo-1603006905003-be475563bc59?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 300,
+            dimensions_cm: { length: 8, width: 8, height: 9 },
+            display_rank: 17,
+            original_price: 210000,
+            variants: [
+                { sku: 'VC-NEN-HD-200G', name: 'Hũ Thủy Tinh Hổ Phách 200g', color: 'Hổ Phách', material: 'Sáp đậu nành & Bấc gỗ', price: 165000, stock: 50, mockup: '#B45309' }
+            ]
+        },
+        {
+            key: 'sp_hop_tra_go_huong',
+            shop_id: shop1._id,
+            title: 'Hộp Đựng Trà Gỗ Hương Khắc Chữ Phúc Tinh Xảo',
+            slug: 'seed-hop-dung-tra-go-huong-chu-phuc',
+            description: 'Hộp đựng trà bát giác chế tác từ gỗ hương đỏ Đồng Kỵ nguyên khối, nắp đậy khít chống ẩm giữ trọn hương trà thơm ngon, khắc chữ Phúc thư pháp tinh tế.',
+            product_type: 'READY_TO_SHIP',
+            allow_customization: false,
+            customization_type: 'NONE',
+            categories: ['Đồ gỗ mỹ nghệ', 'Phụ kiện & Quà tặng', 'Nhà cửa'],
+            tags: ['Đồng Kỵ', 'Gỗ hương', 'Trà đạo', 'Hộp gỗ'],
+            location: 'Bắc Ninh',
+            images: [
+                'https://images.unsplash.com/photo-1513519245088-0e12902e5a38?auto=format&fit=crop&q=80&w=800',
+                'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&q=80&w=800'
+            ],
+            weight_g: 600,
+            dimensions_cm: { length: 15, width: 15, height: 18 },
+            display_rank: 18,
+            original_price: 460000,
+            variants: [
+                { sku: 'VC-GO-HOP-TRA-PHUC', name: 'Gỗ Hương Đỏ Bát Giác', color: 'Đỏ Hương', material: 'Gỗ hương đỏ tự nhiên', price: 380000, stock: 20, mockup: '#7F1D1D' }
             ]
         }
     ];

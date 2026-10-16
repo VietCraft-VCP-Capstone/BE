@@ -1,5 +1,6 @@
 import { Router, Response } from 'express';
 import { ProductsService, ValidationError, ForbiddenError, ProductActor } from '../application/product.service';
+import { SearchProductsParams } from '../application/product.dto';
 import { BlankClient } from '../application/blank-client.service';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { ReviewService } from '../../order';
@@ -46,6 +47,49 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
         res.json(await ProductsService.getAll(filterOf(req)));
     } catch (error: any) {
         res.status(500).json({ error: error.message || 'Lỗi khi tải danh sách sản phẩm.' });
+    }
+});
+
+router.get('/search', async (req: AuthenticatedRequest, res) => {
+    try {
+        const {
+            q, search, category, productType, craftType, location,
+            rating, minPrice, maxPrice, sort, page, pageSize, limit, inStockOnly
+        } = req.query;
+
+        const str = (v: any) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined);
+        const num = (v: any) => (v !== undefined && v !== '' && !isNaN(Number(v)) ? Number(v) : undefined);
+        const bool = (v: any) => (v === 'true' || v === true);
+
+        const params: SearchProductsParams = {
+            q: str(q || search),
+            category: str(category),
+            productType: str(productType),
+            craftType: str(craftType),
+            location: str(location),
+            rating: num(rating),
+            minPrice: num(minPrice),
+            maxPrice: num(maxPrice),
+            sort: str(sort),
+            page: num(page),
+            pageSize: num(pageSize),
+            limit: num(limit),
+            inStockOnly: bool(inStockOnly),
+            userId: req.user?.id
+        };
+
+        res.json(await ProductsService.search(params));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tìm kiếm sản phẩm.' });
+    }
+});
+
+router.get('/suggest', async (req, res) => {
+    try {
+        const q = typeof req.query.q === 'string' ? req.query.q : (typeof req.query.search === 'string' ? req.query.search : '');
+        res.json(await ProductsService.suggest(q));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi lấy gợi ý tìm kiếm.' });
     }
 });
 

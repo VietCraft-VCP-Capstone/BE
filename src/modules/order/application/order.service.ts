@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 import { Order as OrderModel } from "../infrastructure/models/order.model";
 import { WebhookLog } from "../infrastructure/models/webhook-log.model";
 import { Product } from "../../product/infrastructure/models/product.model";
-import { ProductVariant } from "../../product/infrastructure/models/product-variant.model";
+import { ProductVariant, syncProductDenorm } from "../../product/infrastructure/models/product-variant.model";
 import { Shop } from "../../product/infrastructure/models/shop.model";
 import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
@@ -268,13 +268,17 @@ export class OrdersService {
       order_hour_of_week: now.getDay() * 24 + now.getHours(),
     });
 
-    // Trừ tồn kho biến thể tương ứng
+    // Trừ tồn kho biến thể tương ứng và đồng bộ tồn kho sản phẩm cha
     for (const it of orderItems) {
       if (it.variant_id) {
         await ProductVariant.updateOne(
           { _id: it.variant_id },
           { $inc: { stock_quantity: -it.quantity } }
         ).catch(err => console.error('[STOCK] Lỗi trừ tồn kho khi tạo đơn:', err?.message || err));
+
+        if (it.product_id) {
+          syncProductDenorm(it.product_id).catch(() => {});
+        }
       }
     }
 
@@ -330,6 +334,11 @@ export class OrdersService {
             { _id: vId },
             { $inc: { stock_quantity: it.quantity || 1 } }
           ).catch(err => console.error('[STOCK] Lỗi hoàn tồn kho:', err?.message || err));
+
+          const pId = it.product_id?._id || it.product_id;
+          if (pId) {
+            syncProductDenorm(pId).catch(() => {});
+          }
         }
       }
     }

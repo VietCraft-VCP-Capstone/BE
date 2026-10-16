@@ -30,4 +30,48 @@ const ProductVariantSchema = new Schema<IProductVariant>({
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
+export async function syncProductDenorm(productId: mongoose.Types.ObjectId | string) {
+    if (!productId) return;
+    try {
+        const pId = typeof productId === 'string' ? new mongoose.Types.ObjectId(productId) : productId;
+        const variants = await mongoose.model('ProductVariant').find({ product_id: pId, is_active: true }).lean();
+        let min_price = 0;
+        let max_price = 0;
+        let total_stock = 0;
+
+        if (variants && variants.length > 0) {
+            const prices = variants
+                .map((v: any) => parseFloat(v.retail_price?.toString() || '0'))
+                .filter((p: number) => !isNaN(p) && p > 0);
+            min_price = prices.length > 0 ? Math.min(...prices) : 0;
+            max_price = prices.length > 0 ? Math.max(...prices) : 0;
+            total_stock = variants.reduce((sum: number, v: any) => sum + (Number(v.stock_quantity) || 0), 0);
+        }
+        await mongoose.model('Product').updateOne(
+            { _id: pId },
+            { $set: { min_price, max_price, total_stock } }
+        );
+    } catch (err) {
+        // Silently skip if model is not loaded yet during early bootstrap
+    }
+}
+
+ProductVariantSchema.post('save', function () {
+    if (this.product_id) {
+        syncProductDenorm(this.product_id);
+    }
+});
+
+ProductVariantSchema.post('findOneAndUpdate', function (doc) {
+    if (doc && doc.product_id) {
+        syncProductDenorm(doc.product_id);
+    }
+});
+
+ProductVariantSchema.post('findOneAndDelete', function (doc) {
+    if (doc && doc.product_id) {
+        syncProductDenorm(doc.product_id);
+    }
+});
+
 export const ProductVariant = mongoose.model<IProductVariant>('ProductVariant', ProductVariantSchema, 'product_variants');
