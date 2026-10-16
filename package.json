@@ -6,8 +6,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",
-    "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
-    "seed": "ts-node-dev --transpile-only src/shared/utils/seed_realistic_data.ts"
+    "dev": "ts-node-dev --respawn --transpile-only src/main.ts"
   },
   "dependencies": {
     "@payos/node": "^2.0.5",
