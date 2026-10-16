@@ -49,8 +49,14 @@ const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
                 estimatedTime: '2 - 3 ngày'
             }
         ],
-        useFlatRate: false,
-        flatRateFee: 0
+        pricingType: 'FLAT_RATE',
+        useFlatRate: true,
+        flatRateFee: 0,
+        zoneRates: {
+            intraProvince: 22000,
+            intraRegion: 30000,
+            interRegion: 38000
+        }
     },
     payment: {
         bankAccounts: [],
@@ -126,10 +132,21 @@ export class SellerSettingsService {
             email: user?.email || customSettings.brand?.email || DEFAULT_SETTINGS.brand.email,
         };
 
+        const rawShipping = customSettings.shipping || {};
+        const pricingType = rawShipping.pricingType || (rawShipping.useFlatRate !== false ? 'FLAT_RATE' : 'ZONE_BASED');
+
         const shipping: SellerShippingSettingsDTO = {
             ...DEFAULT_SETTINGS.shipping,
-            ...(customSettings.shipping || {}),
-            carriers: (customSettings.shipping?.carriers || DEFAULT_SETTINGS.shipping.carriers).filter(
+            ...rawShipping,
+            pricingType,
+            useFlatRate: pricingType === 'FLAT_RATE',
+            flatRateFee: Number(rawShipping.flatRateFee ?? 0),
+            zoneRates: {
+                intraProvince: Number(rawShipping.zoneRates?.intraProvince ?? 22000),
+                intraRegion: Number(rawShipping.zoneRates?.intraRegion ?? 30000),
+                interRegion: Number(rawShipping.zoneRates?.interRegion ?? 38000),
+            },
+            carriers: (rawShipping.carriers || DEFAULT_SETTINGS.shipping.carriers).filter(
                 (c: any) => c && c.id !== 'viettelpost' && c.id !== 'vtp' && !c.name?.toLowerCase().includes('viettel')
             )
         };
@@ -221,9 +238,18 @@ export class SellerSettingsService {
             const cleanCarriers = (payload.shipping.carriers || []).filter(
                 (c: any) => c && c.id !== 'viettelpost' && c.id !== 'vtp' && !c.name?.toLowerCase().includes('viettel')
             );
+            const pricingType = payload.shipping.pricingType || (payload.shipping.useFlatRate !== false ? 'FLAT_RATE' : 'ZONE_BASED');
             currentSettings.shipping = {
                 ...(currentSettings.shipping || {}),
                 ...payload.shipping,
+                pricingType,
+                useFlatRate: pricingType === 'FLAT_RATE',
+                flatRateFee: Number(payload.shipping.flatRateFee ?? 0),
+                zoneRates: {
+                    intraProvince: Number(payload.shipping.zoneRates?.intraProvince ?? 22000),
+                    intraRegion: Number(payload.shipping.zoneRates?.intraRegion ?? 30000),
+                    interRegion: Number(payload.shipping.zoneRates?.interRegion ?? 38000),
+                },
                 carriers: cleanCarriers
             };
         }

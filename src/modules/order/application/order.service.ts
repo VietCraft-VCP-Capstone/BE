@@ -153,7 +153,46 @@ export class OrdersService {
         }),
       });
     }
-    const shippingFee = DEFAULT_SHIPPING_FEE;
+    let shippingFee = DEFAULT_SHIPPING_FEE;
+    try {
+      if (shopId) {
+        const shopDoc = await Shop.findById(shopId).select('settings').lean();
+        const shipSettings = shopDoc?.settings?.shipping;
+        if (shipSettings) {
+          const pricingType = shipSettings.pricingType || (shipSettings.useFlatRate ? 'FLAT_RATE' : 'ZONE_BASED');
+          if (pricingType === 'FLAT_RATE') {
+            shippingFee = Math.max(0, Number(shipSettings.flatRateFee ?? 30000));
+          } else if (pricingType === 'ZONE_BASED') {
+            const destProvince = (address.province || address.city || address.address_detail || '').toLowerCase();
+            const shopProvince = (shipSettings.province || '').toLowerCase();
+            const zoneRates = shipSettings.zoneRates || { intraProvince: 22000, intraRegion: 30000, interRegion: 38000 };
+
+            if (shopProvince && destProvince && (destProvince.includes(shopProvince) || shopProvince.includes(destProvince))) {
+              shippingFee = Number(zoneRates.intraProvince ?? 22000);
+            } else {
+              const north = ['hà nội', 'hải phòng', 'quảng ninh', 'bắc ninh', 'hà nam', 'hải dương', 'hưng yên', 'nam định', 'ninh bình', 'thái bình', 'vĩnh phúc', 'hà giang', 'cao bằng', 'bắc kạn', 'lạng sơn', 'tuyên quang', 'thái nguyên', 'phú thọ', 'bắc giang', 'lào cai', 'yên bái', 'điện biên', 'lai châu', 'sơn la', 'hòa bình'];
+              const central = ['thanh hóa', 'nghệ an', 'hà tĩnh', 'quảng bình', 'quảng trị', 'thừa thiên huế', 'huế', 'đà nẵng', 'quảng nam', 'quảng ngãi', 'bình định', 'phú yên', 'khánh hòa', 'ninh thuận', 'bình thuận', 'kon tum', 'gia lai', 'đắk lắk', 'đắk nông', 'lâm đồng'];
+
+              const isShopNorth = north.some(p => shopProvince.includes(p));
+              const isShopCentral = central.some(p => shopProvince.includes(p));
+              const shopRegion = isShopNorth ? 'NORTH' : (isShopCentral ? 'CENTRAL' : 'SOUTH');
+
+              const isDestNorth = north.some(p => destProvince.includes(p));
+              const isDestCentral = central.some(p => destProvince.includes(p));
+              const destRegion = isDestNorth ? 'NORTH' : (isDestCentral ? 'CENTRAL' : 'SOUTH');
+
+              if (shopRegion === destRegion) {
+                shippingFee = Number(zoneRates.intraRegion ?? 30000);
+              } else {
+                shippingFee = Number(zoneRates.interRegion ?? 38000);
+              }
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      logger.warn('Failed to calculate dynamic shop shipping fee: ' + e?.message);
+    }
     let discount = 0;
     const couponCode = payload.couponCode || payload.coupon_code;
     let isPlatformCoupon = true;
