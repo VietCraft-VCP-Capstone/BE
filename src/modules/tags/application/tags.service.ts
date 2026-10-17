@@ -6,16 +6,19 @@ import { generateSlug } from '../../../shared/utils/slug';
 import { PageParams, Paginated, clampPage, paginate } from '../../../shared/utils/pagination';
 import { ITagsService, TagListOptions, TagStats } from '../types';
 import { cacheService } from '../../../shared/services/cache.service';
+import { contentModerationService } from '../../../shared/services/content-moderation.service';
 
 function escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-const APPROVED_ONLY = { status: { $ne: 'pending' } } as const;
+const APPROVED_ONLY = { status: { $ne: 'banned' }, review_status: { $ne: 'banned' } } as const;
 
 class TagsService implements ITagsService {
     private async invalidateCache() {
         await Promise.all([
+            cacheService.del('vietcraft:tags:approved'),
+            cacheService.del('vietcraft:tags:stats'),
             cacheService.delByPattern('vietcraft:tags:*'),
             cacheService.delByPattern('vietcraft:products:*'),
         ]);
@@ -43,7 +46,7 @@ class TagsService implements ITagsService {
 
     async getTagStats(): Promise<TagStats> {
         return cacheService.getOrSet('vietcraft:tags:stats', async () => {
-            const [agg, pending] = await Promise.all([
+            const [agg, pending, rejected] = await Promise.all([
                 Tag.aggregate([
                     { $match: APPROVED_ONLY },
                     {
@@ -55,10 +58,18 @@ class TagsService implements ITagsService {
                         },
                     },
                 ]),
-                Tag.countDocuments({ status: 'pending' }),
+                Tag.countDocuments({
+                    proposed_by: { $exists: true, $ne: null },
+                    $or: [{ review_status: 'pending' }, { status: 'pending' }],
+                    status: { $ne: 'banned' },
+                    review_status: { $ne: 'banned' }
+                }),
+                Tag.countDocuments({
+                    $or: [{ review_status: 'rejected' }, { review_status: 'banned' }, { status: 'banned' }]
+                }),
             ]);
             const row = agg[0] || { total: 0, tagged: 0, unused: 0 };
-            return { total: row.total, pending, tagged: row.tagged, unused: row.unused };
+            return { total: row.total, pending, rejected, tagged: row.tagged, unused: row.unused };
         }, 300);
     }
 
@@ -99,7 +110,15 @@ class TagsService implements ITagsService {
     }
 
     async listPendingTags(params: PageParams): Promise<Paginated<any>> {
-        const query = { status: 'pending' };
+        const query = {
+            proposed_by: { $exists: true, $ne: null },
+            $or: [
+                { review_status: 'pending' },
+                { status: 'pending' }
+            ],
+            status: { $ne: 'banned' },
+            review_status: { $ne: 'banned' }
+        };
         const total = await Tag.countDocuments(query);
         const p = clampPage(params, total);
         const items = await Tag.find(query)
@@ -137,23 +156,87 @@ class TagsService implements ITagsService {
     }
 
     async approveTag(id: string): Promise<any | null> {
-        const result = await Tag.findByIdAndUpdate(id, { status: 'active' }, { new: true }).lean();
+        const result = await Tag.findByIdAndUpdate(id, { status: 'active', review_status: 'approved' }, { new: true }).lean();
         await this.invalidateCache();
         return result;
     }
 
-    async rejectTag(id: string): Promise<boolean> {
+    async rejectTag(id: string, adminId?: string, reason?: string): Promise<boolean> {
         const tag = await Tag.findById(id).lean();
         if (!tag) return false;
         await Product.updateMany(
             { $or: [{ tag_ids: id }, { tags: tag.name }] },
             { $pull: { tag_ids: id, tags: tag.name } }
         );
-        const result = await Tag.findByIdAndDelete(id);
-        if (result) {
+        const updated = await Tag.findByIdAndUpdate(id, {
+            status: 'banned',
+            review_status: 'rejected',
+            rejected_at: new Date(),
+            rejected_by: adminId ? new mongoose.Types.ObjectId(adminId) : undefined,
+            reject_reason: reason || 'Ban quản trị từ chối thẻ'
+        }, { new: true });
+        if (updated) {
             await this.invalidateCache();
+            return true;
         }
-        return !!result;
+        return false;
+    }
+
+    async restoreTag(id: string): Promise<any | null> {
+        const result = await Tag.findByIdAndUpdate(id, {
+            status: 'active',
+            review_status: 'approved',
+            rejected_at: null,
+            rejected_by: null,
+            reject_reason: null
+        }, { new: true }).lean();
+        await this.invalidateCache();
+        return result;
+    }
+
+    async listRejectedTags(params: PageParams): Promise<Paginated<any>> {
+        const query = {
+            $or: [
+                { review_status: 'rejected' },
+                { review_status: 'banned' },
+                { status: 'banned' }
+            ]
+        };
+        const total = await Tag.countDocuments(query);
+        const p = clampPage(params, total);
+        const items = await Tag.find(query)
+            .populate('proposed_by', 'full_name email')
+            .populate('rejected_by', 'full_name email')
+            .sort({ rejected_at: -1, updated_at: -1 })
+            .skip(p.skip)
+            .limit(p.limit)
+            .lean();
+
+        const userIds = items
+            .map((it: any) => it.proposed_by?._id)
+            .filter(Boolean);
+        const shops = await Shop.find({ owner_id: { $in: userIds } }).select('owner_id shop_name slug').lean();
+        const shopMap = new Map<string, any>();
+        for (const s of shops) {
+            shopMap.set(String(s.owner_id), s);
+        }
+
+        const itemsWithShop = items.map((it: any) => {
+            const proposedBy: any = it.proposed_by ? { ...it.proposed_by } : null;
+            if (proposedBy && proposedBy._id) {
+                const shop = shopMap.get(String(proposedBy._id));
+                if (shop) {
+                    proposedBy.shop_name = shop.shop_name;
+                    proposedBy.shop_slug = shop.slug;
+                }
+            }
+            return {
+                ...it,
+                proposed_by: proposedBy,
+            };
+        });
+
+        return paginate(itemsWithShop, total, p);
     }
 
     async attachTagToProduct(tagId: string, productId: string): Promise<void> {
@@ -204,26 +287,41 @@ class TagsService implements ITagsService {
     async proposeTag(sellerId: string, name: string): Promise<any> {
         const trimmed = String(name || '').trim();
         if (!trimmed) throw new Error('Tên thẻ là bắt buộc');
+
+        // Kiểm tra từ cấm
+        const check = await contentModerationService.checkContent(trimmed);
+        if (!check.isClean) {
+            throw new Error(check.reason || `Tên thẻ chứa từ ngữ vi phạm hoặc bị cấm: "${check.violatedWord}"`);
+        }
+
         const slug = generateSlug(trimmed);
         if (!slug) throw new Error('Tên thẻ không hợp lệ');
 
         const existing = await Tag.findOne({ slug });
         if (existing) {
-            if (existing.status === 'active') {
-                return { tag: existing, message: 'Thẻ này đã tồn tại và đã được duyệt' };
+            if (existing.status === 'banned' || existing.review_status === 'banned') {
+                throw new Error('Thẻ này đã bị cấm bởi Ban quản trị sàn');
             }
-            return { tag: existing, message: 'Thẻ này đã được đề xuất và đang chờ duyệt' };
+            return { tag: existing, message: 'Thẻ này đã tồn tại và có thể sử dụng ngay' };
         }
 
         const tag = await Tag.create({
             name: trimmed,
             slug,
             color: '#007700',
-            status: 'pending',
+            status: 'active', // Kích hoạt ngay để có thể sử dụng luôn
+            review_status: 'pending', // Đánh dấu chờ Ban quản trị duyệt/rà soát
             proposed_by: new mongoose.Types.ObjectId(sellerId)
         });
         await this.invalidateCache();
-        return { tag, message: 'Đã gửi đề xuất thẻ mới, chờ Admin duyệt' };
+        return { tag, message: 'Đã tạo thẻ mới thành công và có thể dùng ngay. Ban quản trị sẽ rà soát nội dung.' };
+    }
+
+    async listMyProposals(sellerId: string): Promise<any[]> {
+        return Tag.find({ proposed_by: new mongoose.Types.ObjectId(sellerId) })
+            .select('name slug color product_count status review_status reject_reason rejected_at created_at updated_at')
+            .sort({ created_at: -1 })
+            .lean();
     }
 }
 

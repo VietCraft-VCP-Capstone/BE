@@ -26,6 +26,7 @@ import { cacheService } from '../../../shared/services/cache.service';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
 import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
+import { contentModerationService } from '../../../shared/services/content-moderation.service';
 
 function getColorHex(colorName: string): string {
     const lower = (colorName || '').toLowerCase();
@@ -417,11 +418,29 @@ export class ProductsService {
         const docs: { _id: mongoose.Types.ObjectId; name: string }[] = [];
         let proposed = 0;
         for (const name of names) {
-            const slug = generateSlug(name);
+            const trimmed = String(name || '').trim();
+            if (!trimmed) continue;
+
+            // Kiểm tra từ cấm cho thẻ đề xuất
+            const check = await contentModerationService.checkContent(trimmed);
+            if (!check.isClean) {
+                throw new Error(`Thẻ "${trimmed}" không thể sử dụng: ${check.reason || 'chứa từ ngữ không phù hợp'}`);
+            }
+
+            const slug = generateSlug(trimmed);
             if (!slug) continue;
             let tag: any = await Tag.findOne({ slug }).lean();
+            if (tag && (tag.status === 'banned' || tag.review_status === 'banned')) {
+                throw new Error(`Thẻ "${trimmed}" đã bị cấm bởi Ban quản trị sàn`);
+            }
             if (!tag) {
-                tag = await Tag.create({ name, slug, status: 'pending', proposed_by: sellerId });
+                tag = await Tag.create({
+                    name: trimmed,
+                    slug,
+                    status: 'active', // Cho phép dùng ngay
+                    review_status: 'pending', // Chờ Admin rà soát sau
+                    proposed_by: sellerId
+                });
                 proposed += 1;
             }
             docs.push({ _id: tag._id, name: tag.name });

@@ -13,6 +13,7 @@ export interface CategoryStats {
     hidden: number;
     roots: number;
     pending: number;
+    rejected?: number;
 }
 
 export interface PaginatedCategoryTree extends Paginated<any> {
@@ -30,7 +31,10 @@ export interface ICategoryService {
     deleteCategory(id: string): Promise<boolean>;
     listActive(): Promise<any[]>;
     proposeCategory(sellerId: string, data: any): Promise<any>;
+    listMyProposals(sellerId: string): Promise<any[]>;
     listPending(params: PageParams): Promise<Paginated<any>>;
+    listRejected(params: PageParams): Promise<Paginated<any>>;
     approveCategory(id: string): Promise<any | null>;
-    rejectCategory(id: string): Promise<boolean>;
+    restoreCategory(id: string): Promise<any | null>;
+    rejectCategory(id: string, adminId?: string, reason?: string): Promise<boolean>;
 }

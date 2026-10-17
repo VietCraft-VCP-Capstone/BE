@@ -62,12 +62,30 @@ router.get('/pending', authenticate, requireRole(['admin']), async (req: Authent
     }
 });
 
+router.get('/my-proposals', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const categories = await categoryService.listMyProposals(req.user!.id);
+        res.json({ success: true, data: categories });
+    } catch (err: any) {
+        next(err);
+    }
+});
+
 router.post('/propose', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const category = await categoryService.proposeCategory(req.user!.id, req.body);
-        res.status(201).json({ success: true, data: category, message: 'Đã gửi yêu cầu thêm danh mục, chờ Admin duyệt' });
+        res.status(201).json({ success: true, data: category, message: 'Đã tạo danh mục thành công và có thể dùng ngay. Ban quản trị sẽ rà soát nội dung.' });
     } catch (err: any) {
         res.status(400).json({ success: false, error: err.message || 'Không thể gửi yêu cầu đề xuất danh mục' });
+    }
+});
+
+router.get('/rejected', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const params = parsePageParams(req.query as Record<string, unknown>, { defaultLimit: 10, maxLimit: 50 });
+        res.json({ success: true, data: await categoryService.listRejected(params) });
+    } catch (err: any) {
+        next(err);
     }
 });
 
@@ -81,9 +99,19 @@ router.post('/:id/approve', authenticate, requireRole(['admin']), async (req: Au
     }
 });
 
+router.post('/:id/restore', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const category = await categoryService.restoreCategory(req.params.id);
+        if (!category) return res.status(404).json({ success: false, error: 'Danh mục không tồn tại' });
+        res.json({ success: true, data: category, message: 'Đã khôi phục danh mục thành công' });
+    } catch (err: any) {
+        next(err);
+    }
+});
+
 router.post('/:id/reject', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
-        const ok = await categoryService.rejectCategory(req.params.id);
+        const ok = await categoryService.rejectCategory(req.params.id, req.user!.id, req.body?.reason);
         if (!ok) return res.status(404).json({ success: false, error: 'Danh mục không tồn tại' });
         res.json({ success: true, message: 'Đã từ chối danh mục' });
     } catch (err: any) {
