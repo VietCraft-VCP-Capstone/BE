@@ -42,6 +42,33 @@ router.get('/pending', authenticate, requireRole(['admin']), async (req: Authent
     }
 });
 
+router.get('/rejected', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const params = parsePageParams(req.query as Record<string, unknown>, { defaultLimit: 8, maxLimit: 50 });
+        res.json({ success: true, data: await tagsService.listRejectedTags(params) });
+    } catch (err: any) {
+        next(err);
+    }
+});
+
+router.get('/my-proposals', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const tags = await tagsService.listMyProposals(req.user!.id);
+        res.json({ success: true, data: tags });
+    } catch (err: any) {
+        next(err);
+    }
+});
+
+router.post('/propose', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const result = await tagsService.proposeTag(req.user!.id, req.body?.name);
+        res.status(201).json({ success: true, ...result });
+    } catch (err: any) {
+        res.status(400).json({ success: false, error: err.message || 'Không thể gửi đề xuất thẻ' });
+    }
+});
+
 router.post('/:id/approve', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const tag = await tagsService.approveTag(req.params.id);
@@ -52,9 +79,19 @@ router.post('/:id/approve', authenticate, requireRole(['admin']), async (req: Au
     }
 });
 
+router.post('/:id/restore', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const tag = await tagsService.restoreTag(req.params.id);
+        if (!tag) return res.status(404).json({ success: false, error: 'Thẻ không tồn tại' });
+        res.json({ success: true, data: tag, message: 'Đã khôi phục thẻ thành công' });
+    } catch (err: any) {
+        next(err);
+    }
+});
+
 router.post('/:id/reject', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
-        const ok = await tagsService.rejectTag(req.params.id);
+        const ok = await tagsService.rejectTag(req.params.id, req.user!.id, req.body?.reason);
         if (!ok) return res.status(404).json({ success: false, error: 'Thẻ không tồn tại' });
         res.json({ success: true, message: 'Đã từ chối thẻ' });
     } catch (err: any) {
