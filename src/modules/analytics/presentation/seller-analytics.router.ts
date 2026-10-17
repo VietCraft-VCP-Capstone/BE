@@ -145,10 +145,7 @@ async function viewerOrReply(req: AuthenticatedRequest, res: Response): Promise<
     return viewer;
 }
 
-/**
- * Thêm / bỏ theo dõi của gian hàng THẬT: BE tự ghi vào follow của sàn, không chuyển sang AI.
- * Service AI chỉ đọc danh sách đó khi trả GET /competitor-tracking.
- */
+// Gian hàng thật: BE ghi follow của sàn, AI chỉ đọc lại khi GET /competitor-tracking.
 async function replyLiveTracking(method: Method, userId: string, target: string, viewer: AnalyticsViewer, res: Response) {
     try {
         const data = method === 'post'
@@ -293,8 +290,7 @@ for (const route of ROUTES) {
             const viewer = await viewerOrReply(req, res);
             if (!viewer) return;
 
-            // Gian hàng thật theo dõi đối thủ bằng follow của sàn. Chỉ shop mẫu mới chuyển sang
-            // service AI (danh sách riêng trong dữ liệu mồi).
+            // Gian hàng thật theo dõi bằng follow của sàn; chỉ shop mẫu mới gọi AI.
             if (route.forwardShopIdBody && !viewer.demo) {
                 return await replyLiveTracking(route.method, req.user!.id, String(body!.shop_id), viewer, res);
             }

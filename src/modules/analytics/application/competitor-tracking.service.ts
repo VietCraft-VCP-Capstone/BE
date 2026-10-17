@@ -1,15 +1,6 @@
 import { SELLER_FOLLOW_LIMIT, ShopService } from '../../product/application/shop.service';
 
-/**
- * "Theo dõi đối thủ" (F36) của gian hàng THẬT.
- *
- * Danh sách theo dõi là follow của sàn (`shop_followers`): theo dõi ở khu Phân tích hay bấm
- * "Theo dõi" trên trang gian hàng là MỘT danh sách, tối đa 10 gian hàng (BR-201). Service AI
- * chỉ đọc danh sách này, không ghi. Chế độ shop mẫu (AI_DEMO_SHOP_ID / AI_SHOP_MAP) vẫn đi
- * đường cũ sang service AI.
- *
- * Lỗi trả đúng hình dạng service AI đang trả cho F36, để FE dùng chung một bộ thông báo.
- */
+// F36 gian hàng thật: danh sách theo dõi là follow của sàn (tối đa 10, BR-201), AI chỉ đọc.
 
 export class TrackingError extends Error {
     constructor(readonly status: number, readonly body: Record<string, unknown>) {

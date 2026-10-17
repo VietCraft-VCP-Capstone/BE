@@ -4,10 +4,6 @@ import { authenticate, requireRole, optionalAuthenticate, normalizeRole, Authent
 
 const router = Router();
 
-/**
- * GET /api/shops/following/me
- * Lấy danh sách các gian hàng mà người dùng (Buyer/Seller) đang theo dõi
- */
 router.get('/following/me', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -18,10 +14,7 @@ router.get('/following/me', authenticate, requireRole(['buyer', 'seller']), asyn
     }
 });
 
-/**
- * GET /api/shops/:id
- * Lấy thông tin chi tiết gian hàng (Public hoặc kèm auth để biết isFollowing)
- */
+// Không bắt buộc đăng nhập; có token thì trả thêm isFollowing.
 router.get('/:id', optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const shop = await ShopService.getShopDetail(req.params.id, req.user?.id);
@@ -34,10 +27,6 @@ router.get('/:id', optionalAuthenticate, async (req: AuthenticatedRequest, res: 
     }
 });
 
-/**
- * POST /api/shops/:id/follow
- * Người mua hoặc người bán (competitor benchmarking) theo dõi gian hàng
- */
 router.post('/:id/follow', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
@@ -55,10 +44,6 @@ router.post('/:id/follow', authenticate, requireRole(['buyer', 'seller']), async
     }
 });
 
-/**
- * DELETE /api/shops/:id/follow
- * Người mua hoặc người bán hủy theo dõi gian hàng
- */
 router.delete('/:id/follow', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
