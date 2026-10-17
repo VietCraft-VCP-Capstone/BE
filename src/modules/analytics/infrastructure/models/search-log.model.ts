@@ -2,12 +2,14 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ISearchLog extends Document {
     keyword: string;
+    keyword_norm?: string;
     user_id?: mongoose.Types.ObjectId;
     created_at: Date;
 }
 
 const SearchLogSchema = new Schema<ISearchLog>({
     keyword: { type: String, required: true, index: true },
+    keyword_norm: { type: String, index: true },
     user_id: { type: Schema.Types.ObjectId, ref: 'User' }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: false }
