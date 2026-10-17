@@ -3,6 +3,21 @@ import { Shop } from '../infrastructure/models/shop.model';
 import { ShopFollower } from '../infrastructure/models/shop-follower.model';
 import { logger } from '../../../shared/utils/logger';
 
+/**
+ * BR-201: với người bán, theo dõi một gian hàng chính là theo dõi đối thủ — cùng danh sách
+ * với mục "Theo dõi đối thủ" của khu Phân tích — nên tối đa 10 gian hàng. Người mua không giới hạn.
+ */
+export const SELLER_FOLLOW_LIMIT = 10;
+
+export class FollowLimitError extends Error {
+    readonly code = 'tracking_limit_reached';
+    readonly limit = SELLER_FOLLOW_LIMIT;
+
+    constructor() {
+        super(`Bạn đã theo dõi tối đa ${SELLER_FOLLOW_LIMIT} gian hàng đối thủ. Bỏ theo dõi bớt một gian hàng để theo dõi gian hàng mới.`);
+    }
+}
+
 export interface ShopDetailDTO {
     id: string;
     _id: string;
@@ -105,6 +120,33 @@ export class ShopService {
             createdAt: shop.created_at,
             shippingSettings,
         };
+    }
+
+    /**
+     * Số gian hàng người dùng đang theo dõi.
+     */
+    static async countFollowing(userId: string): Promise<number> {
+        return ShopFollower.countDocuments({ buyer_ids: new mongoose.Types.ObjectId(userId) });
+    }
+
+    /**
+     * Người dùng có đang theo dõi gian hàng này không.
+     */
+    static async isFollowing(shopId: mongoose.Types.ObjectId | string, userId: string): Promise<boolean> {
+        const found = await ShopFollower.exists({ shop_id: shopId, buyer_ids: new mongoose.Types.ObjectId(userId) });
+        return Boolean(found);
+    }
+
+    /**
+     * Chặn người bán theo dõi quá SELLER_FOLLOW_LIMIT gian hàng (BR-201).
+     * Theo dõi lại gian hàng đang theo dõi thì không tốn thêm chỗ.
+     */
+    static async assertSellerFollowSlot(shopIdOrSlug: string, userId: string): Promise<void> {
+        const shop = await ShopService.resolveShop(shopIdOrSlug);
+        if (!shop || await ShopService.isFollowing(shop._id, userId)) return;
+        if (await ShopService.countFollowing(userId) >= SELLER_FOLLOW_LIMIT) {
+            throw new FollowLimitError();
+        }
     }
 
     /**
