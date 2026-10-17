@@ -1,4 +1,5 @@
 import { logger } from '../../../shared/utils/logger';
+import { isMongoReady } from '../../../app/config';
 import { Order } from '../../order/infrastructure/models/order.model';
 import { payosService } from './payos.service';
 import { OrdersService } from '../../order/application/order.service';
@@ -33,7 +34,7 @@ export class PayosPaymentReconcileJob {
 
     /** Trả về số đơn vừa được ghi nhận đã thanh toán hoặc đã hủy. */
     static async runOnce(now = new Date()): Promise<number> {
-        if (this.running) return 0;
+        if (!isMongoReady() || this.running) return 0;
         this.running = true;
         let processedCount = 0;
         try {

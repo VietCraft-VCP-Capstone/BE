@@ -50,15 +50,19 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
     const stockValue = price * totalStock;
     const sku = mainVariant?.sku || `VC-PRD-${product._id.toString().substring(18).toUpperCase()}`;
 
-    const colors: ProductColorVariantDTO[] = variants
-        .filter(v => Boolean(v.color))
-        .map(v => {
+    const seenColors = new Set<string>();
+    const colors: ProductColorVariantDTO[] = [];
+    for (const v of variants) {
+        if (v.color && !seenColors.has(v.color.trim().toLowerCase())) {
+            seenColors.add(v.color.trim().toLowerCase());
             const hex = (v.mockup_image && v.mockup_image.startsWith('#')) ? v.mockup_image : getColorHex(v.color);
-            return {
+            colors.push({
                 name: v.color,
                 hex: hex
-            };
-        });
+            });
+        }
+    }
+    const distinctSizes = [...new Set(variants.map(v => v.size).filter(Boolean))] as string[];
 
     const status: ProductStatus = product.listing_status === 'INACTIVE'
         ? 'INACTIVE'
@@ -125,6 +129,7 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         thumbnail,
         images,
         colors: colors.length > 0 ? colors : [{ name: 'Tự nhiên', hex: '#5C4033' }],
+        sizes: distinctSizes.length > 0 ? distinctSizes : undefined,
         engagementTrend,
         inventoryTrends,
         variants: mappedVariants,
@@ -903,7 +908,10 @@ export class ProductsService {
             basePrice,
             await CommissionSetting.resolvePercent(catalog.category!._id.toString(), 'READY_TO_SHIP'),
         );
-        await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice));
+        await ProductsService.writeVariants(
+            mp._id,
+            ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
+        );
         if (tags.length) {
             await Tag.updateMany({ _id: { $in: tags.map(t => t._id) } }, { $inc: { product_count: 1 } });
         }
@@ -918,35 +926,81 @@ export class ProductsService {
      * `basePrice` là giá người bán nhận (dùng để suy ra giá vốn), `listPrice` là giá niêm yết
      * đã cộng hoa hồng sàn. Hai số khác nhau nên phải truyền riêng — lấy listPrice tính giá vốn
      * thì giá vốn bị thổi theo hoa hồng.
+     * Hỗ trợ tạo biến thể theo bảng size cho sản phẩm áo quần/thời trang.
      */
     private static colorsToVariants(
         colors: ProductColorVariantDTO[] | undefined,
         baseSku: string,
         basePrice: number,
         totalStock: number,
-        listPrice: number
+        listPrice: number,
+        sizes?: string[]
     ): VariantInput[] {
         const baseCost = Math.round(basePrice * 0.7);
+        const validSizes = (sizes || []).map(s => String(s || '').trim()).filter(Boolean);
+        const validColors = (colors || []).filter(c => c && c.name && c.name.trim());
 
-        if (!colors || colors.length === 0) {
-            return [{
-                sku: baseSku,
-                color: 'Tự nhiên',
-                base_cost: baseCost,
-                price: listPrice,
-                stock: totalStock,
-            }];
+        // Trường hợp 1: Có cả danh sách màu và danh sách size -> tổ hợp màu x size
+        if (validColors.length > 0 && validSizes.length > 0) {
+            const totalCombos = validColors.length * validSizes.length;
+            const perVariant = Math.max(0, Math.floor(totalStock / totalCombos));
+            const list: VariantInput[] = [];
+            let count = 0;
+            for (let cIdx = 0; cIdx < validColors.length; cIdx++) {
+                const c = validColors[cIdx];
+                for (let sIdx = 0; sIdx < validSizes.length; sIdx++) {
+                    const s = validSizes[sIdx];
+                    count++;
+                    const isLast = count === totalCombos;
+                    list.push({
+                        sku: `${baseSku}-${cIdx + 1}-${s}`,
+                        color: c.name,
+                        size: s,
+                        mockup_image: c.hex,
+                        base_cost: baseCost,
+                        price: listPrice,
+                        stock: isLast ? totalStock - perVariant * (totalCombos - 1) : perVariant,
+                    });
+                }
+            }
+            return list;
         }
 
-        const perColor = Math.max(0, Math.floor(totalStock / colors.length));
-        return colors.map((c, i) => ({
-            sku: `${baseSku}-${i + 1}`,
-            color: c.name,
-            mockup_image: c.hex,
+        // Trường hợp 2: Chỉ có size (không có màu tùy chỉnh)
+        if (validSizes.length > 0) {
+            const perVariant = Math.max(0, Math.floor(totalStock / validSizes.length));
+            return validSizes.map((s, i) => ({
+                sku: `${baseSku}-${s}`,
+                size: s,
+                color: validColors[0]?.name || 'Tiêu chuẩn',
+                mockup_image: validColors[0]?.hex || '#5C4033',
+                base_cost: baseCost,
+                price: listPrice,
+                stock: i === validSizes.length - 1 ? totalStock - perVariant * (validSizes.length - 1) : perVariant,
+            }));
+        }
+
+        // Trường hợp 3: Chỉ có màu, không chọn size
+        if (validColors.length > 0) {
+            const perColor = Math.max(0, Math.floor(totalStock / validColors.length));
+            return validColors.map((c, i) => ({
+                sku: `${baseSku}-${i + 1}`,
+                color: c.name,
+                mockup_image: c.hex,
+                base_cost: baseCost,
+                price: listPrice,
+                stock: i === validColors.length - 1 ? totalStock - perColor * (validColors.length - 1) : perColor,
+            }));
+        }
+
+        // Trường hợp 4: Không màu, không size
+        return [{
+            sku: baseSku,
+            color: 'Tự nhiên',
             base_cost: baseCost,
             price: listPrice,
-            stock: i === colors.length - 1 ? totalStock - perColor * (colors.length - 1) : perColor,
-        }));
+            stock: totalStock,
+        }];
     }
 
 
@@ -1248,7 +1302,7 @@ export class ProductsService {
         }
         await mp.save();
 
-        if (payload.colors && payload.colors.length > 0) {
+        if ((payload.colors && payload.colors.length > 0) || (payload.sizes && payload.sizes.length > 0)) {
             const existing = await MongoVariant.find({ product_id: mp._id }).lean();
             const baseSku = payload.sku || existing[0]?.sku?.replace(/-\d+$/, '') || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
             const totalStock = payload.stock !== undefined
@@ -1256,7 +1310,7 @@ export class ProductsService {
                 : existing.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
 
             // `payload.price` là giá người bán NHẬN, còn giá trong DB là giá NIÊM YẾT (đã gồm
-            // hoa hồng). Sửa màu mà không nhập giá thì giữ nguyên giá niêm yết từng đồng, đồng
+            // hoa hồng). Sửa màu/size mà không nhập giá thì giữ nguyên giá niêm yết từng đồng, đồng
             // thời bóc hoa hồng ra để giá vốn vẫn tính trên cùng cơ sở như lúc tạo sản phẩm.
             const dbPrice = parseFloat(existing[0]?.retail_price?.toString() || '0');
             const commissionPercent = await ProductsService.resolveProductCommission(mp);
@@ -1266,7 +1320,10 @@ export class ProductsService {
             const listPrice = payload.price !== undefined
                 ? withCommission(basePrice, commissionPercent)
                 : dbPrice;
-            await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice));
+            await ProductsService.writeVariants(
+                mp._id, 
+                ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
+            );
         } else {
             const updates: any = {};
             if (payload.price !== undefined) {

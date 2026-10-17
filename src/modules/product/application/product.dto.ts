@@ -44,6 +44,7 @@ export interface ProductItemResponseDTO {
     thumbnail: string;
     images: string[];
     colors: ProductColorVariantDTO[];
+    sizes?: string[];
     engagementTrend: number[];
     inventoryTrends: InventoryTrendPointDTO[];
     variants?: ProductVariantDTO[];
@@ -75,6 +76,7 @@ export interface ProductFormDataDTO {
     thumbnail?: string;
     images?: string[];
     colors?: ProductColorVariantDTO[];
+    sizes?: string[];
 }
 
 export interface ProductFilterQueryDTO {
