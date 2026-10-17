@@ -54,7 +54,7 @@ export class ShopService {
             followerDoc?.buyer_ids?.some(id => id.toString() === currentUserId)
         );
 
-        const score = typeof shop.reputation_score === 'number' ? shop.reputation_score : 100;
+        const score = typeof shop.reputation_score === 'number' ? shop.reputation_score : 80;
         const tier = shop.reputation_tier || (score >= 90 ? 'TRUSTED' : score >= 70 ? 'NORMAL' : score >= 50 ? 'WARNING' : 'RESTRICTED');
 
         return {

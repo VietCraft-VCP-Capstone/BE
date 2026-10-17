@@ -95,11 +95,11 @@ const ShopSchema = new Schema<IShop>({
     average_rating: { type: Number, default: 0.0 },
     rating_count: { type: Number, default: 0 },
     product_diversity_score: { type: Number, default: 0.0 },
-    reputation_score: { type: Number, default: 100, min: 0, max: 100, index: true },
+    reputation_score: { type: Number, default: 80, min: 0, max: 100, index: true },
     reputation_tier: { 
         type: String, 
         enum: ['TRUSTED', 'NORMAL', 'WARNING', 'RESTRICTED'], 
-        default: 'TRUSTED', 
+        default: 'NORMAL', 
         index: true 
     },
     clean_streak_orders: { type: Number, default: 0 },

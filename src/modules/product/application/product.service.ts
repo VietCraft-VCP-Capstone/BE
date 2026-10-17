@@ -557,7 +557,7 @@ export class ProductsService {
                 },
                 {
                     $addFields: {
-                        _reputationScore: { $ifNull: [{ $arrayElemAt: ['$_shop.reputation_score', 0] }, 100] }
+                        _reputationScore: { $ifNull: [{ $arrayElemAt: ['$_shop.reputation_score', 0] }, 80] }
                     }
                 },
                 { $sort: { _reputationScore: -1, created_at: -1 } },
@@ -873,7 +873,7 @@ export class ProductsService {
                 name: s.shop_name,
                 slug: s.slug,
                 logo: s.logo,
-                reputationScore: s.reputation_score ?? 100,
+                reputationScore: s.reputation_score ?? 80,
                 reputationTier: s.reputation_tier || 'NORMAL'
             })),
             categories: matchingCategories.map((c: any) => ({

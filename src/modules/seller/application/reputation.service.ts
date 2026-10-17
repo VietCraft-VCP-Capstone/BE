@@ -74,7 +74,7 @@ export class ReputationService {
             }
         }
 
-        const currentScore = typeof shop.reputation_score === 'number' ? shop.reputation_score : 100;
+        const currentScore = typeof shop.reputation_score === 'number' ? shop.reputation_score : 80;
         const newScore = Math.max(0, currentScore - Math.abs(amount));
         const delta = -(currentScore - newScore);
 
@@ -130,7 +130,7 @@ export class ReputationService {
 
     /**
      * Ghi nhận đơn hàng hoàn thành sạch (DELIVERED không lỗi)
-     * Đủ 20 đơn sạch liên tiếp -> Cộng +5 điểm hồi phục (trần 100đ)
+     * Đủ 10 đơn sạch liên tiếp -> Cộng +5 điểm hồi phục (trần 100đ)
      */
     static async recordCleanOrder(
         sellerOrShopId: string | mongoose.Types.ObjectId,
@@ -141,9 +141,9 @@ export class ReputationService {
             if (!shop) return null;
 
             const currentStreak = (shop.clean_streak_orders || 0) + 1;
-            const currentScore = typeof shop.reputation_score === 'number' ? shop.reputation_score : 100;
+            const currentScore = typeof shop.reputation_score === 'number' ? shop.reputation_score : 80;
 
-            if (currentStreak >= 20) {
+            if (currentStreak >= 10) {
                 // Đạt mốc thưởng
                 shop.clean_streak_orders = 0; // Reset streak sau khi nhận thưởng
                 if (currentScore < 100) {
@@ -158,13 +158,13 @@ export class ReputationService {
                         shop_id: shop._id,
                         delta,
                         balance_after: newScore,
-                        reason: 'Hoàn thành chuỗi 20 đơn hàng sạch liên tiếp không khiếu nại (+5đ).',
+                        reason: 'Hoàn thành chuỗi 10 đơn hàng sạch liên tiếp không khiếu nại (+5đ).',
                         reference_type: 'STREAK',
                         reference_id: orderId,
                         actor_role: 'SYSTEM'
                     });
 
-                    logger.info(`[REPUTATION] Shop ${shop._id} rewarded +5 pts for 20 clean orders. Balance: ${newScore}`);
+                    logger.info(`[REPUTATION] Shop ${shop._id} rewarded +5 pts for 10 clean orders. Balance: ${newScore}`);
                     return shop;
                 }
             } else {
@@ -186,7 +186,7 @@ export class ReputationService {
         const shop = await this.resolveShop(sellerOrShopId);
         if (!shop) return null;
 
-        const score = typeof shop.reputation_score === 'number' ? shop.reputation_score : 100;
+        const score = typeof shop.reputation_score === 'number' ? shop.reputation_score : 80;
         const tier = shop.reputation_tier || this.calculateTier(score);
 
         const risk_level = score >= 90 ? 'LOW' : score >= 70 ? 'MEDIUM' : score >= 50 ? 'HIGH' : 'CRITICAL';
