@@ -30,9 +30,8 @@ const ProductDailyMetricSchema = new Schema<IProductDailyMetric>({
     timestamps: false
 });
 
-// Unique index for upsert operations
 ProductDailyMetricSchema.index({ product_id: 1, date: 1 }, { unique: true });
 ProductDailyMetricSchema.index({ product_id: 1, date: -1 });
-ProductDailyMetricSchema.index({ updated_at: 1 }, { expireAfterSeconds: 15552000 }); // TTL: 180 days
+ProductDailyMetricSchema.index({ updated_at: 1 }, { expireAfterSeconds: 15552000 });
 
 export const ProductDailyMetric = mongoose.model<IProductDailyMetric>('ProductDailyMetric', ProductDailyMetricSchema, 'product_daily_metrics');

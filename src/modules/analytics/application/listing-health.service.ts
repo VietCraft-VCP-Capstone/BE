@@ -5,7 +5,6 @@ import { ListingHealthScore, IAxis, ITodo, IConversionDetail } from '../../produ
 import { buildMeta, ok, insufficient, Envelope } from './envelope';
 import { EMPTY_SALES, HealthInputs, ListingProductInfo, ListingSales, healthInputs, salesByProduct } from './listing-sales';
 
-// Đọc thẳng điểm do job AI (app/core/f29_scheduler.py) ghi, nên AI tắt thì route vẫn chạy.
 
 const COLLECTION = 'listing_health_scores';
 const MODEL_VERSION_FALLBACK = 'health-1.0';
@@ -21,7 +20,6 @@ export interface HealthDetailData {
     axes_missing: string[];
     todos: ITodo[];
     conversion_detail: IConversionDetail | null;
-    /** Giá trị thật đang dùng để chấm, để FE nói "hiện có 1 ảnh, cần 5". */
     inputs: HealthInputs;
     product: ListingProductInfo;
     sales: ListingSales;
@@ -33,17 +31,13 @@ export interface HealthListItem {
     thumbnail: string | null;
     score: number | null;
     status: HealthStatus | null;
-    /** Điểm từng tiêu chí của lần chấm mới nhất, để FE tính trung bình shop. */
     axes: IAxis;
     axes_missing: string[];
     computed_at: string | null;
-    /** Việc tăng điểm (engine đã sắp theo lợi ích/công sức, tối đa 4 loại) và mọi cảnh báo. */
     todos: ITodo[];
     n_todos: number;
     warnings: ITodo[];
-    /** Tag đang gắn; `pending` = chờ admin duyệt, chưa hiện với người mua. */
     tags: { name: string; pending: boolean }[];
-    /** Lượt xem, đơn, số món, doanh thu 30 ngày trên đơn thật không huỷ. */
     sales: ListingSales;
 }
 
@@ -93,7 +87,6 @@ export class ListingHealthService {
         return typeof value === 'string' && mongoose.Types.ObjectId.isValid(value);
     }
 
-    /** Sản phẩm thuộc shop đang xem, hoặc phản hồi 404/403 dựng sẵn. */
     static async ownedProduct(productId: string, shopId: string): Promise<
         | { product: OwnedProduct }
         | { denied: { httpStatus: number; body: { error: string; resource?: string } } }
@@ -110,13 +103,11 @@ export class ListingHealthService {
         return { product: product as OwnedProduct };
     }
 
-    /** Điểm mới nhất của một sản phẩm, có kiểm quyền theo shop. */
     static async detail(productId: string, shopId: string): Promise<{ httpStatus: number; body: Envelope<HealthDetailData> | { error: string; field?: string; resource?: string } }> {
         if (!this.isValidObjectId(productId)) {
             return { httpStatus: 400, body: { error: 'invalid_param', field: 'id' } };
         }
 
-        // Shop mẫu (mã không phải ObjectId) chưa có điểm: trả insufficient thay vì 403.
         if (!this.isValidObjectId(shopId)) {
             return {
                 httpStatus: 200,
@@ -177,7 +168,6 @@ export class ListingHealthService {
         };
     }
 
-    /** Điểm theo ngày; dưới 2 ngày thì insufficient. */
     static async history(productId: string, shopId: string, days: number): Promise<{ httpStatus: number; body: Envelope<HealthHistoryPoint[]> | { error: string; field?: string; resource?: string } }> {
         if (!this.isValidObjectId(productId)) {
             return { httpStatus: 400, body: { error: 'invalid_param', field: 'id' } };
@@ -236,7 +226,6 @@ export class ListingHealthService {
         return { httpStatus: 200, body: ok(points, meta) };
     }
 
-    /** Sản phẩm thật của shop kèm điểm mới nhất, điểm cao trước, chưa có điểm xếp cuối. */
     static async list(shopId: string, statusFilter?: HealthStatus): Promise<{ httpStatus: number; body: Envelope<HealthListData> | { error: string; field?: string; expected?: string } }> {
         if (!this.isValidObjectId(shopId)) {
             return {
@@ -248,7 +237,7 @@ export class ListingHealthService {
             };
         }
 
-        const products = await Product.find({ shop_id: shopId, seed_ref: { $exists: false } })
+        const products = await Product.find({ shop_id: shopId, seed_ref: { $exists: false }, is_hidden: { $ne: true } })
             .select('_id title images tags tag_ids')
             .lean();
 
@@ -286,14 +275,12 @@ export class ListingHealthService {
             }
         }
 
-        // Tên + trạng thái duyệt của mọi tag mà shop đang dùng, một truy vấn cho cả shop.
         const tagIds = products.flatMap(p => p.tag_ids ?? []);
         const tagDocs = tagIds.length ? await Tag.find({ _id: { $in: tagIds } }).select('_id name status').lean() : [];
         const tagById = new Map(tagDocs.map(t => [String(t._id), { name: t.name, pending: t.status === 'pending' }]));
         const tagsOf = (p: (typeof products)[number]) =>
             p.tag_ids?.length
                 ? p.tag_ids.map(id => tagById.get(String(id))).filter((t): t is { name: string; pending: boolean } => Boolean(t))
-                // Sản phẩm cũ chưa có tag_ids: không biết trạng thái duyệt, coi như đã duyệt.
                 : (p.tags ?? []).filter(Boolean).map(name => ({ name, pending: false }));
 
         const sales = await salesByProduct(productIds);
@@ -317,7 +304,6 @@ export class ListingHealthService {
             };
         });
 
-        // Mọi sản phẩm dùng chung một model_version tại một thời điểm.
         const shopModelVersion = [...latestByProduct.values()]
             .map(v => v.model_version)
             .find((v): v is string => Boolean(v)) || MODEL_VERSION_FALLBACK;

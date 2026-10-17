@@ -17,15 +17,12 @@ interface GatewayRoute {
 }
 
 const ROUTES: GatewayRoute[] = [
-    // Hiệu suất shop (SRS 3.8)
     { method: 'get', path: '/overview', ai: () => '/api/analytics/shop/overview', query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/timeseries', ai: p => `/api/analytics/listings/${p.id}/timeseries`, query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/conversion', ai: p => `/api/analytics/listings/${p.id}/conversion` },
-    // Điểm và danh sách đọc thẳng DB ở route riêng bên dưới; chỉ preview còn đi qua AI.
     { method: 'post', path: '/listings/:id/health/preview', ai: p => `/api/analytics/listings/${p.id}/health/preview`, parseBody: parsePreviewBody },
     { method: 'get', path: '/alerts', ai: () => '/api/notifications/alerts', query: ['period'] },
     { method: 'get', path: '/categories', ai: () => '/api/analytics/shop/categories/revenue', query: ['timeRange'] },
-    // Đối thủ (SRS 3.9)
     { method: 'get', path: '/competitors', ai: () => '/api/analytics/competitors', query: ['categoryId'] },
     { method: 'get', path: '/shop-comparison', ai: () => '/api/analytics/shop-comparison' },
     { method: 'get', path: '/tag-gap', ai: () => '/api/analytics/tag-gap', query: ['categoryId'] },
@@ -33,7 +30,6 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking' },
     { method: 'post', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
     { method: 'delete', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
-    // Dự báo (SRS 3.10)
     { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window'] },
     { method: 'get', path: '/forecast/seasonal', ai: () => '/api/analytics/forecast/seasonal', query: ['categoryId', 'keyword'] },
     { method: 'get', path: '/forecast/niches', ai: () => '/api/analytics/forecast/niches', query: ['categoryId'] },
@@ -66,7 +62,6 @@ async function viewerOrReply(req: AuthenticatedRequest, res: Response): Promise<
 const router = Router();
 router.use(authenticate, requireRole(['seller', 'admin']));
 
-/** Ai đang xem, đang xem shop nào, service AI có sống không. FE gọi một lần khi vào khu phân tích. */
 router.get('/context', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const [viewer, reachable] = await Promise.all([
@@ -81,7 +76,6 @@ router.get('/context', async (req: AuthenticatedRequest, res: Response) => {
 
 const HEALTH_STATUSES: HealthStatus[] = ['good', 'needs_improvement', 'poor'];
 
-/** Điểm một sản phẩm, đọc thẳng listing_health_scores nên AI tắt vẫn chạy. */
 router.get('/listings/:id/health', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const viewer = await viewerOrReply(req, res);
@@ -97,7 +91,6 @@ router.get('/listings/:id/health', async (req: AuthenticatedRequest, res: Respon
 
 const HISTORY_DAYS = [30, 90];
 
-/** F29 · Điểm theo ngày của một sản phẩm, để seller thấy hiệu quả lần sửa và độ mới giảm dần. */
 router.get('/listings/:id/health/history', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const days = req.query.days === undefined ? 30 : Number(req.query.days);
@@ -116,7 +109,6 @@ router.get('/listings/:id/health/history', async (req: AuthenticatedRequest, res
     }
 });
 
-/** Danh sách sản phẩm thật kèm điểm mới nhất, lọc theo ?status. */
 router.get('/listings/health', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const rawStatus = req.query.status;
@@ -139,7 +131,6 @@ router.get('/listings/health', async (req: AuthenticatedRequest, res: Response) 
     }
 });
 
-/** F29 · Điểm trung bình và số sản phẩm theo mức điểm của cả shop, theo ngày. */
 router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const days = req.query.days === undefined ? 30 : Number(req.query.days);
@@ -195,15 +186,10 @@ for (const route of ROUTES) {
                 body,
             });
 
-            // AI trả 401 nghĩa là BE và AI lệch AI_GATEWAY_SECRET — lỗi cấu hình phía máy chủ,
-            // không phải phiên của người bán. Chuyển nguyên 401 về thì interceptor FE sẽ
-            // đăng xuất người bán dù token của họ vẫn hợp lệ.
             if (result.status === 401) {
                 return res.status(502).json({ error: 'ai_gateway_rejected' });
             }
 
-            // Phản hồi thành công giữ nguyên vỏ {data, meta, error} của hợp đồng AI và gắn thêm
-            // `viewer`, để mọi màn hình biết đang xem shop thật hay shop mẫu.
             const payload = result.status < 400 && result.body && typeof result.body === 'object'
                 ? { ...result.body, viewer }
                 : result.body;

@@ -3,7 +3,6 @@ import { Product } from '../../product/infrastructure/models/product.model';
 import { ListingHealthScore } from '../../product/infrastructure/models/listing-health-score.model';
 import { buildMeta, ok, insufficient, Envelope } from './envelope';
 
-// F29 · Điểm cả shop theo ngày, cho biểu đồ đầu trang "Sức khoẻ sản phẩm".
 
 export interface HealthSummaryPoint {
     date: string;
@@ -11,7 +10,6 @@ export interface HealthSummaryPoint {
     good: number;
     needs_improvement: number;
     poor: number;
-    /** Số sản phẩm có điểm trong ngày đó. */
     n: number;
 }
 
@@ -31,7 +29,7 @@ export async function healthSummary(shopId: string, days: number): Promise<{ htt
         return { httpStatus: 200, body: insufficient('Cần thiết lập gian hàng thật trước khi xem điểm sức khoẻ listing.', meta()) };
     }
 
-    const products = await Product.find({ shop_id: shopId, seed_ref: { $exists: false } }).select('_id').lean();
+    const products = await Product.find({ shop_id: shopId, seed_ref: { $exists: false }, is_hidden: { $ne: true } }).select('_id').lean();
     const since = new Date();
     since.setUTCHours(0, 0, 0, 0);
     since.setUTCDate(since.getUTCDate() - (days - 1));

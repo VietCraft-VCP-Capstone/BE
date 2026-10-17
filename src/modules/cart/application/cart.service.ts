@@ -109,10 +109,8 @@ export class CartService {
 
         await cart.save();
 
-        // Record add_to_cart event asynchronously (don't wait for it)
         try {
-            const sessionId = (global as any).sessionMap?.get(userId) ||
-                            (Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15));
+            const sessionId = `user_${userId}`;
             EventService.recordEvent(
                 productId,
                 sessionId,

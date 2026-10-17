@@ -5,7 +5,6 @@ import { ProductVariant } from '../../product/infrastructure/models/product-vari
 import { Tag } from '../../tags/infrastructure/models/tag.model';
 import { ProductEvent } from '../infrastructure/models/product-event.model';
 
-// Số bán và đầu vào điểm của sản phẩm, chỉ đọc dữ liệu thật (cùng bộ lọc LOC_DON_THAT bên AI).
 
 export const SALES_WINDOW_DAYS = 30;
 
@@ -21,7 +20,6 @@ export interface HealthInputs {
     description_length: number;
     n_approved_tags: number;
     n_pending_tags: number;
-    /** null khi không phải hàng có sẵn hoặc không có phân loại đang bán (trục tồn kho không tính). */
     in_stock_ratio_pct: number | null;
     n_variants: number;
     n_variants_in_stock: number;
@@ -47,7 +45,6 @@ const toNumber = (value: unknown): number => {
     return Number.isFinite(n) ? n : 0;
 };
 
-/** Lượt xem, số đơn, số món và doanh thu 30 ngày cho nhiều sản phẩm: một aggregate mỗi collection. */
 export async function salesByProduct(productIds: mongoose.Types.ObjectId[]): Promise<Map<string, ListingSales>> {
     const out = new Map<string, ListingSales>();
     if (productIds.length === 0) return out;
@@ -89,7 +86,6 @@ export async function salesByProduct(productIds: mongoose.Types.ObjectId[]): Pro
     return out;
 }
 
-/** Giá trị thật đang dùng để chấm từng tiêu chí, để trang chi tiết nói rõ "hiện có bao nhiêu". */
 export async function healthInputs(product: {
     _id: mongoose.Types.ObjectId;
     images?: string[];
@@ -105,7 +101,6 @@ export async function healthInputs(product: {
         Review.find({ product_id: product._id }).select('order_id rating').lean(),
     ]);
 
-    // Chỉ đếm đánh giá trên đơn thật, như engine AI.
     const realOrderIds = reviews.length
         ? new Set((await Order.aggregate([
             { $match: { _id: { $in: reviews.map(r => r.order_id) }, ...REAL_ORDER } },

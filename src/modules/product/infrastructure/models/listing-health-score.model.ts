@@ -10,7 +10,6 @@ export interface IAxis {
 
 export interface ITodo {
     type: string;
-    // field, current_value, target để FE dẫn tới đúng ô và hiện "hiện tại · mốc".
     field?: string;
     message: string;
     current_value?: number | string | null;
@@ -41,7 +40,6 @@ export interface IListingHealthScore extends Document {
     model_version: string;
     computed_at: Date;
     inputs_hash?: string;
-    /** Tiến độ và căn cứ của trục tỉ lệ mua: lượt xem/đơn 30 ngày, mặt bằng so sánh, lý do chưa tính. */
     conversion_detail?: IConversionDetail | null;
     created_at: Date;
     updated_at: Date;
@@ -82,10 +80,8 @@ const ListingHealthScoreSchema = new Schema<IListingHealthScore>({
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
-// Composite unique index on product_id and date
 ListingHealthScoreSchema.index({ product_id: 1, date: 1 }, { unique: true });
 
-// TTL index for 180 days
 ListingHealthScoreSchema.index({ created_at: 1 }, { expireAfterSeconds: 15552000 });
 
 export const ListingHealthScore = mongoose.model<IListingHealthScore>(

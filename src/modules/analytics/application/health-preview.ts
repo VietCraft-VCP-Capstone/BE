@@ -1,5 +1,3 @@
-/** Kiểm body "xem điểm nếu sửa": 4 chỉ số, trần khớp HealthPreviewBody bên AI. */
-
 export const PREVIEW_LIMITS = {
     n_images: 50,
     description_length: 20000,

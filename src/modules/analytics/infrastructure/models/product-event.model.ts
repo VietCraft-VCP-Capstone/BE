@@ -24,8 +24,7 @@ const ProductEventSchema = new Schema<IProductEvent>({
     timestamps: false
 });
 
-// Một sự kiện mỗi (phiên, sản phẩm, loại, khung 30 phút); unique để hai request đồng thời không lọt cả hai.
 ProductEventSchema.index({ dedupe_key: 1 }, { unique: true, sparse: true });
-ProductEventSchema.index({ created_at: 1 }, { expireAfterSeconds: 7776000 }); // TTL: 90 days
+ProductEventSchema.index({ created_at: 1 }, { expireAfterSeconds: 7776000 });
 
 export const ProductEvent = mongoose.model<IProductEvent>('ProductEvent', ProductEventSchema, 'product_events');

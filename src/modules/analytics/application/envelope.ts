@@ -1,8 +1,5 @@
-/** Vỏ {data, meta, error} giống AI để FE xử lý chung; thiếu dữ liệu trả insufficient(), không trả 0. */
-
 export type EnvelopeStatus = 'ok' | 'partial' | 'insufficient_data';
 
-/** live: dữ liệu thật · seed_demo: dữ liệu mô phỏng · derived: suy ra từ cả hai. */
 export type SourceMode = 'live' | 'seed_demo' | 'derived';
 
 export interface EnvelopeMeta {
@@ -73,7 +70,6 @@ export function ok<T>(data: T, meta: EnvelopeMeta): Envelope<T> {
     return { data, meta: { ...meta, status: 'ok' }, error: null };
 }
 
-/** Chưa đủ dữ liệu để tính. `data` luôn null — không phải 0, không phải mảng rỗng. */
 export function insufficient(reason: string, meta: EnvelopeMeta): Envelope<null> {
     return { data: null, meta: { ...meta, status: 'insufficient_data', reason }, error: null };
 }

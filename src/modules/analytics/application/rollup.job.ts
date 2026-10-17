@@ -7,7 +7,6 @@ import mongoose from 'mongoose';
 export class RollupJob {
     private static isRunning = false;
 
-    /** Gom view, add_to_cart và đơn 24h vào product_daily_metrics. */
     static async run(): Promise<void> {
         if (this.isRunning) {
             logger.warn('Rollup job is already running, skipping');
@@ -19,24 +18,19 @@ export class RollupJob {
         logger.info('Starting nightly rollup job');
 
         try {
-            // Get today's date (start of day in UTC)
             const today = new Date();
             today.setUTCHours(0, 0, 0, 0);
 
-            // Get start of yesterday for event counting
             const yesterday = new Date(today);
             yesterday.setUTCDate(yesterday.getUTCDate() - 1);
 
-            const tomorrow = new Date(today);
-            tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
 
-            logger.info(`Rollup date: ${today.toISOString()}`);
+            logger.info(`Rollup date: ${yesterday.toISOString()}`);
 
-            // Step 1: Aggregate product_events from last 24 hours
             const eventAggregation = await ProductEvent.aggregate([
                 {
                     $match: {
-                        created_at: { $gte: yesterday, $lt: tomorrow }
+                        created_at: { $gte: yesterday, $lt: today }
                     }
                 },
                 {
@@ -52,13 +46,13 @@ export class RollupJob {
 
             logger.info(`Found ${eventAggregation.length} event records to process`);
 
-            // Step 2: Aggregate orders from last 24 hours (filter: seed_ref not exists, is_simulated not true)
             const orderAggregation = await OrderModel.aggregate([
                 {
                     $match: {
-                        created_at: { $gte: yesterday, $lt: tomorrow },
+                        created_at: { $gte: yesterday, $lt: today },
                         seed_ref: { $exists: false },
-                        is_simulated: { $ne: true }
+                        is_simulated: { $ne: true },
+                        order_status: { $ne: 'CANCELLED' }
                     }
                 },
                 {
@@ -74,16 +68,14 @@ export class RollupJob {
 
             logger.info(`Found ${orderAggregation.length} order records to process`);
 
-            // Step 3: Build a map of products and their metrics
             const metricsMap = new Map<string, any>();
 
-            // Process events
             for (const record of eventAggregation) {
                 const productIdStr = record._id.product_id.toString();
                 if (!metricsMap.has(productIdStr)) {
                     metricsMap.set(productIdStr, {
                         product_id: record._id.product_id,
-                        date: today,
+                        date: yesterday,
                         views: 0,
                         add_to_carts: 0,
                         orders_count: 0,
@@ -100,13 +92,12 @@ export class RollupJob {
                 }
             }
 
-            // Process orders
             for (const record of orderAggregation) {
                 const productIdStr = record._id.toString();
                 if (!metricsMap.has(productIdStr)) {
                     metricsMap.set(productIdStr, {
                         product_id: new mongoose.Types.ObjectId(record._id),
-                        date: today,
+                        date: yesterday,
                         views: 0,
                         add_to_carts: 0,
                         orders_count: 0,
@@ -119,7 +110,6 @@ export class RollupJob {
                 metrics.orders_count = record.order_count;
             }
 
-            // Step 4: Upsert all metrics
             let upsertCount = 0;
             for (const metrics of metricsMap.values()) {
                 await ProductDailyMetric.findOneAndUpdate(
@@ -155,7 +145,6 @@ export class RollupJob {
         }
     }
 
-    /** Chạy mỗi ngày lúc 00:00 UTC. */
     static schedule(): void {
         logger.info('Scheduling nightly rollup job at 00:00 UTC');
 
