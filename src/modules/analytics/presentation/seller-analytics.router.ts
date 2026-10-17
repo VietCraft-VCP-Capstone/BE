@@ -286,7 +286,7 @@ for (const route of ROUTES) {
                 const parsed = route.parseBody(req.body);
                 if ('invalid' in parsed) return res.status(400).json({ error: 'invalid_param', field: parsed.invalid });
                 body = parsed.body;
-            } else if (req.body && typeof req.body === 'object') {
+            } else if (route.method !== 'get' && req.body && typeof req.body === 'object') {
                 body = req.body;
             }
 
