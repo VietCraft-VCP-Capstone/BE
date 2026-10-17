@@ -10,6 +10,7 @@ export const SALES_WINDOW_DAYS = 30;
 
 export interface ListingSales {
     views_30d: number;
+    carts_30d: number;
     orders_30d: number;
     units_30d: number;
     revenue_30d: number;
@@ -34,30 +35,33 @@ export interface ListingProductInfo {
     price_min: number | null;
     price_max: number | null;
     stock_total: number;
+    variants: { label: string; stock: number }[];
 }
 
 const REAL_ORDER = { seed_ref: { $exists: false }, is_simulated: { $ne: true } };
 
-export const EMPTY_SALES: ListingSales = { views_30d: 0, orders_30d: 0, units_30d: 0, revenue_30d: 0 };
+export const EMPTY_SALES: ListingSales = { views_30d: 0, carts_30d: 0, orders_30d: 0, units_30d: 0, revenue_30d: 0 };
 
 const toNumber = (value: unknown): number => {
     const n = Number(value?.toString?.() ?? value);
     return Number.isFinite(n) ? n : 0;
 };
 
-export async function salesByProduct(productIds: mongoose.Types.ObjectId[]): Promise<Map<string, ListingSales>> {
+export async function salesByProduct(productIds: mongoose.Types.ObjectId[], endDaysAgo = 0): Promise<Map<string, ListingSales>> {
     const out = new Map<string, ListingSales>();
     if (productIds.length === 0) return out;
-    const since = new Date(Date.now() - SALES_WINDOW_DAYS * 86_400_000);
+    const until = new Date(Date.now() - endDaysAgo * 86_400_000);
+    const since = new Date(until.getTime() - SALES_WINDOW_DAYS * 86_400_000);
+    const window = { $gte: since, $lt: until };
     const slot = (id: unknown) => {
         const key = String(id);
         if (!out.has(key)) out.set(key, { ...EMPTY_SALES });
         return out.get(key)!;
     };
 
-    const [orderRows, viewRows] = await Promise.all([
+    const [orderRows, eventRows] = await Promise.all([
         Order.aggregate([
-            { $match: { ...REAL_ORDER, 'items.product_id': { $in: productIds }, order_status: { $ne: 'CANCELLED' }, created_at: { $gte: since } } },
+            { $match: { ...REAL_ORDER, 'items.product_id': { $in: productIds }, order_status: { $ne: 'CANCELLED' }, created_at: window } },
             { $unwind: '$items' },
             { $match: { 'items.product_id': { $in: productIds } } },
             {
@@ -71,8 +75,8 @@ export async function salesByProduct(productIds: mongoose.Types.ObjectId[]): Pro
             { $project: { orders: { $size: '$orders' }, units: 1, revenue: 1 } },
         ]),
         ProductEvent.aggregate([
-            { $match: { product_id: { $in: productIds }, event_type: 'view', created_at: { $gte: since } } },
-            { $group: { _id: '$product_id', n: { $sum: 1 } } },
+            { $match: { product_id: { $in: productIds }, event_type: { $in: ['view', 'add_to_cart'] }, created_at: window } },
+            { $group: { _id: { product: '$product_id', type: '$event_type' }, n: { $sum: 1 } } },
         ]),
     ]);
 
@@ -82,7 +86,11 @@ export async function salesByProduct(productIds: mongoose.Types.ObjectId[]): Pro
         s.units_30d = row.units;
         s.revenue_30d = Math.round(toNumber(row.revenue));
     }
-    for (const row of viewRows) slot(row._id).views_30d = row.n;
+    for (const row of eventRows) {
+        const s = slot(row._id.product);
+        if (row._id.type === 'view') s.views_30d = row.n;
+        else s.carts_30d = row.n;
+    }
     return out;
 }
 
@@ -96,7 +104,7 @@ export async function healthInputs(product: {
     updated_at?: Date;
 }, contentChangedAt: Date | null | undefined): Promise<{ inputs: HealthInputs; info: ListingProductInfo }> {
     const [variants, pendingTags, reviews] = await Promise.all([
-        ProductVariant.find({ product_id: product._id }).select('is_active stock_quantity retail_price').lean(),
+        ProductVariant.find({ product_id: product._id }).select('is_active stock_quantity retail_price color size sku').lean(),
         product.tag_ids?.length ? Tag.find({ _id: { $in: product.tag_ids }, status: 'pending' }).select('_id').lean() : [],
         Review.find({ product_id: product._id }).select('order_id rating').lean(),
     ]);
@@ -141,6 +149,7 @@ export async function healthInputs(product: {
             price_min: prices.length ? Math.min(...prices) : null,
             price_max: prices.length ? Math.max(...prices) : null,
             stock_total: active.reduce((s, v) => s + Math.max(0, v.stock_quantity ?? 0), 0),
+            variants: active.map(v => ({ label: [v.color, v.size].filter(Boolean).join(' / ') || v.sku, stock: Math.max(0, v.stock_quantity ?? 0) })),
         },
     };
 }

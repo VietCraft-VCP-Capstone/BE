@@ -3,6 +3,7 @@ import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/mi
 import { AiGatewayService, AnalyticsViewer } from '../application/ai-gateway.service';
 import { ListingHealthService, HealthStatus } from '../application/listing-health.service';
 import { healthSummary } from '../application/listing-health-summary.service';
+import { listingRanking } from '../application/listing-ranking.service';
 import { parsePreviewBody, PreviewBodyResult } from '../application/health-preview';
 
 type Method = 'get' | 'post' | 'delete';
@@ -128,6 +129,17 @@ router.get('/listings/health', async (req: AuthenticatedRequest, res: Response) 
         return res.status(httpStatus).json(payload);
     } catch (error: any) {
         return res.status(500).json({ error: error?.message || 'Lỗi khi đọc danh sách sức khoẻ listing.' });
+    }
+});
+
+router.get('/listings/ranking', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { httpStatus, body } = await listingRanking(viewer.analysed_shop_id!);
+        return res.status(httpStatus).json({ ...body, viewer });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc bảng xếp hạng sản phẩm.' });
     }
 });
 
