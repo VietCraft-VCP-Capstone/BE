@@ -15,7 +15,7 @@ import { CommissionSetting } from "../../../shared/services/commission-setting.s
 import { commissionFromGross } from "../../../shared/utils/commission";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
 import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
-import { executeRefund } from "../../payment/application/refund-runtime";
+import { executeRefund, cancelRefundKey } from "../../payment/application/refund-runtime";
 import { payosService } from "../../payment/application/payos.service";
 import { logger } from "../../../shared/utils/logger";
 
@@ -398,6 +398,8 @@ export class OrdersService {
       note: `Người mua tự hủy đơn hàng. Lý do: ${reason || 'Người mua đổi ý'}`
     });
 
+    // Chưa đánh dấu REFUNDED: chỉ khi cổng xác nhận đã chi thì materializeSuccess mới đặt
+    // payment_status/refund_status = REFUNDED. Trước đó giữ PAID + REQUESTED để job đối soát chạy lại.
     if (wasPaid) {
       order.refund_status = 'REQUESTED';
     }
@@ -420,7 +422,7 @@ export class OrdersService {
         try {
           const refundResult = await executeRefund({
             orderId: String(order._id),
-            businessKey: `CANCEL-${order.order_code}-${Date.now()}`,
+            businessKey: cancelRefundKey(order.order_code),
             amount: Math.round(refundAmount),
             reason: `Người mua tự hủy đơn #${order.order_code}`,
             createdBy: String(buyerId),

@@ -3,6 +3,7 @@ import { Cart } from '../infrastructure/models/cart.model';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
 import { PRODUCT_POPULATE, toUserObjectId, VARIANT_POPULATE } from '../utils';
+import { EventService } from '../../analytics/application/event.service';
 
 export class CartService {
 
@@ -107,6 +108,23 @@ export class CartService {
         }
 
         await cart.save();
+
+        // Record add_to_cart event asynchronously (don't wait for it)
+        try {
+            const sessionId = (global as any).sessionMap?.get(userId) ||
+                            (Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15));
+            EventService.recordEvent(
+                productId,
+                sessionId,
+                'add_to_cart',
+                '', // user-agent will be empty for server-side events
+                '', // ip will be empty for server-side events
+                userId
+            ).catch(err => console.error('Failed to record add_to_cart event:', err));
+        } catch (err) {
+            console.error('Error in add_to_cart event recording:', err);
+        }
+
         return this.getCart(userId);
     }
 
