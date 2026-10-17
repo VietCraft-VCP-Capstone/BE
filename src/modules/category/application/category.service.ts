@@ -148,7 +148,7 @@ class CategoryService implements ICategoryService {
                 .sort({ sort_order: 1, name: 1 })
                 .select('name slug _id')
                 .lean();
-        }, 1800);
+        }, 300);
     }
 }
 export const categoryService: ICategoryService = new CategoryService();

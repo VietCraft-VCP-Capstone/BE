@@ -778,6 +778,7 @@ export class ProductsService {
 
         await Shop.updateOne({ _id: shop._id }, { $inc: { listing_count: 1 } });
         await ProductsService.invalidateProductCache(mp._id.toString());
+        logger.info(`Created new product (structured): ${mp._id} (${mp.title}) | category="${data.category?.name}" (${data.category?._id}) | tags=${allTags.length}`);
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
 
@@ -889,7 +890,7 @@ export class ProductsService {
         }
         await Shop.updateOne({ _id: shop._id }, { $inc: { listing_count: 1 } });
         await ProductsService.invalidateProductCache(mp._id.toString());
-        logger.info(`Created new product: ${mp._id} (${mp.title})`);
+        logger.info(`Created new product: ${mp._id} (${mp.title}) | category="${catalog.category!.name}" (${catalog.category!._id}) | tags=${tags.length}`);
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
 
