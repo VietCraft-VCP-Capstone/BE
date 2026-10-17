@@ -76,7 +76,8 @@ export class AiGatewayService {
             'X-Shop-Id': options.shopId,
             'X-Debug-Shop-Id': options.shopId,
         };
-        if (options.body) headers['Content-Type'] = 'application/json';
+        const hasBody = Boolean(options.body && Object.keys(options.body).length > 0 && options.method !== 'GET');
+        if (hasBody) headers['Content-Type'] = 'application/json';
 
         const timeoutMs = process.env.AI_TIMEOUT_MS
             ? Number(process.env.AI_TIMEOUT_MS)
@@ -86,7 +87,7 @@ export class AiGatewayService {
             const response = await fetch(url, {
                 method: options.method,
                 headers,
-                body: options.body ? JSON.stringify(options.body) : undefined,
+                body: hasBody ? JSON.stringify(options.body) : undefined,
                 signal: AbortSignal.timeout(timeoutMs),
             });
             const text = await response.text();

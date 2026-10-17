@@ -152,7 +152,7 @@ export class ReputationService {
             shop_id: shop._id.toString(),
             shop_name: shop.shop_name,
             reputation_score: score,
-            reputation_tier: shop.reputation_tier || band.tier,
+            reputation_tier: band.tier,
             clean_streak_orders: shop.clean_streak_orders || 0,
             dispute_count_30d: shop.dispute_count_30d || 0,
             penalty_points_30d: shop.penalty_points_30d || 0,
