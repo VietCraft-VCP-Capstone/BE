@@ -8,6 +8,7 @@ import { config } from '../../../app/config';
 import { PayosRefundGateway, payosPayoutReference, payoutDescription } from '../../payment/application/payos-refund.gateway';
 import { logger } from '../../../shared/utils/logger';
 import { toNapasBin } from '../../payment/domain/bank-codes';
+import { decryptField, maskBankAccount } from '../../../shared/utils/crypto.service';
 
 export interface SellerFinanceOverview {
     availableBalance: number;
@@ -135,8 +136,7 @@ export class SellerFinanceService {
         // 3. Lấy thông tin tài khoản ngân hàng mặc định
         let defaultBank = null;
         try {
-            const settings = await SellerSettingsService.getSettings(ownerId);
-            const accounts = settings.payment?.bankAccounts || [];
+            const accounts = await SellerSettingsService.getDecryptedBankAccounts(ownerId);
             const defAccount = accounts.find((b: any) => b.isDefault) || accounts[0];
             if (defAccount) {
                 defaultBank = {
@@ -265,7 +265,7 @@ export class SellerFinanceService {
             amount: w.amount,
             bankName: w.bank_name,
             bankCode: w.bank_code,
-            accountNumber: w.account_number,
+            accountNumber: maskBankAccount(decryptField(w.account_number)),
             accountHolder: w.account_holder,
             status: w.status,
             createdAt: w.created_at,
@@ -302,10 +302,14 @@ export class SellerFinanceService {
             throw new Error(`Số dư khả dụng không đủ (${overview.availableBalance.toLocaleString('vi-VN')} VNĐ) để thực hiện lệnh rút ${amount.toLocaleString('vi-VN')} VNĐ.`);
         }
 
-        // Lấy thông tin ngân hàng thụ hưởng
+        // Lấy thông tin ngân hàng thụ hưởng (bảo đảm có số tài khoản thật đã giải mã để gửi lệnh Napas)
         let bank = customBank;
-        if (!bank || !bank.accountNumber) {
-            bank = overview.defaultBank || undefined;
+        if (!bank || !bank.accountNumber || bank.accountNumber.includes('*')) {
+            const rawAccounts = await SellerSettingsService.getDecryptedBankAccounts(ownerId);
+            const matchedBank = customBank?.bankCode 
+                ? rawAccounts.find((b: any) => b.bankCode === customBank.bankCode)
+                : (rawAccounts.find((b: any) => b.isDefault) || rawAccounts[0]);
+            bank = matchedBank || overview.defaultBank || undefined;
         }
 
         if (!bank || !bank.accountNumber || !bank.bankCode) {

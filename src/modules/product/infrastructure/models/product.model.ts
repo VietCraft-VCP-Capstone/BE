@@ -61,6 +61,8 @@ export interface IProduct extends Document {
     max_price?: number;
     total_stock?: number;
     sold_count?: number;
+    // Do script seed ghi thẳng; khai báo để query lọc seed_ref có kiểu.
+    seed_ref?: string;
     created_at: Date;
     updated_at: Date;
 }

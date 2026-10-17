@@ -10,6 +10,8 @@ export interface IProductDailyMetric extends Document {
     revenue: mongoose.Types.Decimal128;
     anomaly_detected: boolean;
     anomaly_z_score: number;
+    created_at?: Date;
+    updated_at?: Date;
 }
 
 const ProductDailyMetricSchema = new Schema<IProductDailyMetric>({
@@ -21,16 +23,15 @@ const ProductDailyMetricSchema = new Schema<IProductDailyMetric>({
     orders_count: { type: Number, default: 0 },
     revenue: { type: Schema.Types.Decimal128, default: 0.0 },
     anomaly_detected: { type: Boolean, default: false },
-    anomaly_z_score: { type: Number, default: 0.0 }
+    anomaly_z_score: { type: Number, default: 0.0 },
+    created_at: { type: Date, default: Date.now },
+    updated_at: { type: Date, default: Date.now }
 }, {
-    timestamps: false,
-    timeseries: {
-        timeField: 'date',
-        metaField: 'product_id',
-        granularity: 'days'
-    } as any
+    timestamps: false
 });
 
+ProductDailyMetricSchema.index({ product_id: 1, date: 1 }, { unique: true });
 ProductDailyMetricSchema.index({ product_id: 1, date: -1 });
+ProductDailyMetricSchema.index({ updated_at: 1 }, { expireAfterSeconds: 15552000 });
 
 export const ProductDailyMetric = mongoose.model<IProductDailyMetric>('ProductDailyMetric', ProductDailyMetricSchema, 'product_daily_metrics');

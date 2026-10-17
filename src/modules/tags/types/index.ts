@@ -10,6 +10,7 @@ export interface TagListOptions {
 export interface TagStats {
     total: number;
     pending: number;
+    rejected?: number;
     tagged: number;
     unused: number;
 }
@@ -17,15 +18,19 @@ export interface TagStats {
 export interface ITagsService {
     listTags(opts: TagListOptions, params: PageParams): Promise<Paginated<any>>;
     listPendingTags(params: PageParams): Promise<Paginated<any>>;
+    listRejectedTags(params: PageParams): Promise<Paginated<any>>;
     getTagStats(): Promise<TagStats>;
     getTagById(id: string): Promise<any | null>;
     createTag(data: any): Promise<any>;
     updateTag(id: string, data: any): Promise<any | null>;
     deleteTag(id: string): Promise<boolean>;
     approveTag(id: string): Promise<any | null>;
-    rejectTag(id: string): Promise<boolean>;
+    restoreTag(id: string): Promise<any | null>;
+    rejectTag(id: string, adminId?: string, reason?: string): Promise<boolean>;
     attachTagToProduct(tagId: string, productId: string): Promise<void>;
     detachTagFromProduct(tagId: string, productId: string): Promise<void>;
     listApproved(): Promise<any[]>;
+    proposeTag(sellerId: string, name: string): Promise<any>;
+    listMyProposals(sellerId: string): Promise<any[]>;
 }
 
