@@ -29,14 +29,7 @@ import { shouldLogSearch, rankSuggestions, SUGGEST_PROJECTION } from './product-
 import { buildKeywordSuggestions, fetchLoggedKeywords } from './suggest-keywords';
 import { getTrendingKeywords as fetchTrendingKeywords } from './trending-keywords';
 import { buildRelevance, buildSearchPipeline } from './product-search.pipeline';
-import {
-    normalizeVi,
-    nfcLower,
-    hasTone,
-    escapeRegex,
-    extractSearchTerms,
-    buildPrefixes
-} from '../../../shared/utils/vietnamese-search.util';
+import { normalizeVi, nfcLower, hasTone, escapeRegex, extractSearchTerms } from '../../../shared/utils/vietnamese-search.util';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
