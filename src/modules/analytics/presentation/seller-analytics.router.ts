@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { AiGatewayService, AnalyticsViewer } from '../application/ai-gateway.service';
+import { CompetitorTrackingService, TrackingError } from '../application/competitor-tracking.service';
 
 type Method = 'get' | 'post' | 'delete';
 
@@ -58,6 +59,22 @@ async function viewerOrReply(req: AuthenticatedRequest, res: Response): Promise<
     return viewer;
 }
 
+/**
+ * Thêm / bỏ theo dõi của gian hàng THẬT: BE tự ghi vào follow của sàn, không chuyển sang AI.
+ * Service AI chỉ đọc danh sách đó khi trả GET /competitor-tracking.
+ */
+async function replyLiveTracking(method: Method, userId: string, target: string, viewer: AnalyticsViewer, res: Response) {
+    try {
+        const data = method === 'post'
+            ? await CompetitorTrackingService.track(userId, target)
+            : await CompetitorTrackingService.untrack(userId, target);
+        return res.json({ data, meta: CompetitorTrackingService.meta(viewer.live_shop_id, data.slots_used), error: null, viewer });
+    } catch (error) {
+        if (error instanceof TrackingError) return res.status(error.status).json(error.body);
+        throw error;
+    }
+}
+
 const router = Router();
 router.use(authenticate, requireRole(['seller', 'admin']));
 
@@ -99,6 +116,12 @@ for (const route of ROUTES) {
 
             const viewer = await viewerOrReply(req, res);
             if (!viewer) return;
+
+            // Gian hàng thật theo dõi đối thủ bằng follow của sàn. Chỉ shop mẫu mới chuyển sang
+            // service AI (danh sách riêng trong dữ liệu mồi).
+            if (route.forwardShopIdBody && !viewer.demo) {
+                return await replyLiveTracking(route.method, req.user!.id, String(body!.shop_id), viewer, res);
+            }
 
             const result = await AiGatewayService.call({
                 method: route.method.toUpperCase() as 'GET' | 'POST' | 'DELETE',

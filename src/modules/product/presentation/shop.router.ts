@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
-import { ShopService } from '../application/shop.service';
-import { authenticate, requireRole, optionalAuthenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { FollowLimitError, ShopService } from '../application/shop.service';
+import { authenticate, requireRole, optionalAuthenticate, normalizeRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 
 const router = Router();
 
@@ -41,9 +41,16 @@ router.get('/:id', optionalAuthenticate, async (req: AuthenticatedRequest, res: 
 router.post('/:id/follow', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res: Response) => {
     try {
         const userId = req.user!.id;
+        // Người bán theo dõi gian hàng = theo dõi đối thủ, dùng chung danh sách với khu Phân tích (BR-201).
+        if (normalizeRole(req.user!.role) === 'seller') {
+            await ShopService.assertSellerFollowSlot(req.params.id, userId);
+        }
         const result = await ShopService.followShop(req.params.id, userId);
         res.json(result);
     } catch (error: any) {
+        if (error instanceof FollowLimitError) {
+            return res.status(400).json({ error: error.message, code: error.code, limit: error.limit });
+        }
         res.status(400).json({ error: error.message || 'Lỗi khi theo dõi gian hàng.' });
     }
 });
