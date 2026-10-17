@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { Tag } from '../infrastructure/models/tag.model';
 import { Product } from '../../product/infrastructure/models/product.model';
+import { Shop } from '../../product/infrastructure/models/shop.model';
 import { generateSlug } from '../../../shared/utils/slug';
 import { PageParams, Paginated, clampPage, paginate } from '../../../shared/utils/pagination';
 import { ITagsService, TagListOptions, TagStats } from '../types';
@@ -101,8 +102,38 @@ class TagsService implements ITagsService {
         const query = { status: 'pending' };
         const total = await Tag.countDocuments(query);
         const p = clampPage(params, total);
-        const items = await Tag.find(query).sort({ created_at: 1 }).skip(p.skip).limit(p.limit).lean();
-        return paginate(items, total, p);
+        const items = await Tag.find(query)
+            .populate('proposed_by', 'full_name email')
+            .sort({ created_at: -1 })
+            .skip(p.skip)
+            .limit(p.limit)
+            .lean();
+
+        const userIds = items
+            .map((it: any) => it.proposed_by?._id)
+            .filter(Boolean);
+        const shops = await Shop.find({ owner_id: { $in: userIds } }).select('owner_id shop_name slug').lean();
+        const shopMap = new Map<string, any>();
+        for (const s of shops) {
+            shopMap.set(String(s.owner_id), s);
+        }
+
+        const itemsWithShop = items.map((it: any) => {
+            const proposedBy: any = it.proposed_by ? { ...it.proposed_by } : null;
+            if (proposedBy && proposedBy._id) {
+                const shop = shopMap.get(String(proposedBy._id));
+                if (shop) {
+                    proposedBy.shop_name = shop.shop_name;
+                    proposedBy.shop_slug = shop.slug;
+                }
+            }
+            return {
+                ...it,
+                proposed_by: proposedBy,
+            };
+        });
+
+        return paginate(itemsWithShop, total, p);
     }
 
     async approveTag(id: string): Promise<any | null> {

@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { Category } from '../infrastructure/models/category.model';
 import { Product } from '../../product/infrastructure/models/product.model';
+import { Shop } from '../../product/infrastructure/models/shop.model';
 import { generateSlug } from '../../../shared/utils/slug';
 import { PageParams, Paginated, clampPage, paginate, paginateArray } from '../../../shared/utils/pagination';
 import { CategoryNode, buildCategoryTree, countCategoryNodes, filterCategoryTree } from '../utils';
@@ -20,6 +21,7 @@ class CategoryService implements ICategoryService {
 
     private async invalidateCache() {
         await Promise.all([
+            cacheService.del('vietcraft:categories:active'),
             cacheService.delByPattern('vietcraft:categories:*'),
             cacheService.delByPattern('vietcraft:products:*'),
         ]);
@@ -200,7 +202,32 @@ class CategoryService implements ICategoryService {
             .skip(p.skip)
             .limit(p.limit)
             .lean();
-        return paginate(items, total, p);
+
+        const userIds = items
+            .map((it: any) => it.proposed_by?._id)
+            .filter(Boolean);
+        const shops = await Shop.find({ owner_id: { $in: userIds } }).select('owner_id shop_name slug').lean();
+        const shopMap = new Map<string, any>();
+        for (const s of shops) {
+            shopMap.set(String(s.owner_id), s);
+        }
+
+        const itemsWithShop = items.map((it: any) => {
+            const proposedBy: any = it.proposed_by ? { ...it.proposed_by } : null;
+            if (proposedBy && proposedBy._id) {
+                const shop = shopMap.get(String(proposedBy._id));
+                if (shop) {
+                    proposedBy.shop_name = shop.shop_name;
+                    proposedBy.shop_slug = shop.slug;
+                }
+            }
+            return {
+                ...it,
+                proposed_by: proposedBy,
+            };
+        });
+
+        return paginate(itemsWithShop, total, p);
     }
 
     async approveCategory(id: string): Promise<any | null> {
