@@ -8,6 +8,8 @@ import type { ReturnEvidenceItem } from '../application/return-evidence-policy';
 import { validateRefundEvidence } from '../application/refund-evidence-policy';
 import { ReplacementOrderService } from '../application/replacement-order.service';
 import { ReturnRequestV3 } from '../infrastructure/models/return-request-v3.model';
+import { Order } from '../infrastructure/models/order.model';
+import { ReputationService } from '../../seller/application/reputation.service';
 
 export interface ReturnRequestRouteDependencies {
     service: ReturnRequestApplicationService;
@@ -60,6 +62,34 @@ export function createReturnRequestRouter({ service, authenticate, clock }: Retu
         const role=roleMap[String(req.user?.role||'').toLowerCase()]; if(!role) return res.status(req.user?403:401).json({error:'Unsupported role.'});
         const data=await service.getRequestDetail(req.user.id,role,req.params.id); return data?res.json({data}):res.status(404).json({error:'Return request not found.'});
     }));
+    router.get('/requests/:id/audit-profile', asyncRoute(async(req,res)=>{
+        if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(403).json({error:'Admin role required.'});
+        const detail=await service.getRequestDetail(req.user.id,'ADMIN',req.params.id);
+        if(!detail) return res.status(404).json({error:'Return request not found.'});
+        const shopRisk=await ReputationService.getShopRiskProfile(detail.request.seller_id);
+        const [buyerOrdersCount, buyerReturnsCount]=await Promise.all([
+            Order.countDocuments({ buyer_id: detail.request.buyer_id, order_status: 'DELIVERED' }).catch(() => 0),
+            ReturnRequestV3.countDocuments({ buyer_id: detail.request.buyer_id }).catch(() => 0)
+        ]);
+        const disputeRate = buyerOrdersCount > 0 
+            ? Number(((buyerReturnsCount / buyerOrdersCount) * 100).toFixed(1)) 
+            : (buyerReturnsCount > 0 ? 100 : 0);
+        const isFlaggedForAbuse = buyerOrdersCount === 0 
+            ? buyerReturnsCount >= 3 
+            : (disputeRate > 25 && buyerReturnsCount >= 3);
+        return res.json({
+            data: {
+                shop: shopRisk,
+                buyer: {
+                    buyer_id: detail.request.buyer_id,
+                    total_delivered_orders: buyerOrdersCount,
+                    total_return_requests: buyerReturnsCount,
+                    dispute_rate_pct: disputeRate,
+                    is_flagged_for_abuse: isFlaggedForAbuse
+                }
+            }
+        });
+    }));
     router.post('/requests/:id/printer-evidence-request', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='printer') return res.status(req.user?403:401).json({error:'Printer role required.'});
         const data=await service.printerDecision({actorId:req.user.id,requestId:req.params.id,action:'REQUEST_EVIDENCE',reason:req.body?.reason}); return res.json({data});
@@ -101,7 +131,17 @@ export function createReturnRequestRouter({ service, authenticate, clock }: Retu
     }));
     router.post('/requests/:id/admin/decision', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(req.user?403:401).json({error:'Admin role required.'});
-        const data=await service.adminDecide({actorId:req.user.id,requestId:req.params.id,resolution:req.body?.resolution,faultParty:req.body?.faultParty,reason:req.body?.reason,amountMinor:req.body?.amountMinor,currency:req.body?.currency}); return res.json({data});
+        const data=await service.adminDecide({actorId:req.user.id,requestId:req.params.id,resolution:req.body?.resolution,faultParty:req.body?.faultParty,reason:req.body?.reason,amountMinor:req.body?.amountMinor,currency:req.body?.currency});
+        if(req.body?.resolution === 'EXCHANGE' || data.final_resolution === 'EXCHANGE') {
+            try {
+                await ReplacementOrderService.createAndDispatchReplacement(req.params.id);
+                const freshDoc = await ReturnRequestV3.findOne({ $or: [{ id: req.params.id }, { _id: req.params.id }] }).lean();
+                return res.json({ data: freshDoc || data });
+            } catch (err: any) {
+                console.error('[ADMIN EXCHANGE REPLACEMENT CREATION ERROR]', err.message);
+            }
+        }
+        return res.json({data});
     }));
     router.post('/requests/:id/admin/confirm-refund', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(req.user?403:401).json({error:'Admin role required.'});

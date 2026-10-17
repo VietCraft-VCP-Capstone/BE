@@ -46,7 +46,7 @@ export function createOrderReturnSnapshotSource(allowSimulated = false, env: Nod
         }
         const status=String(order.order_status).toUpperCase();
         const sellerId = String(shop?.owner_id || order.shop_id || 'SELLER_DEFAULT');
-        const printerId = String((order as any).printer_info?.printer_id || shop?.printer_partner?.printer_id || env.PRINTER_REFUND_PRINTER_ID || 'PRINTING_SHOP_MOCK');
+        const printerId = String((order as any).printer_info?.printer_id || shop?.printer_partner?.printer_id || env.PRINTER_REFUND_PRINTER_ID || 'PRINTER_SHOP');
         const [usage, snapshot] = await Promise.all([getOrderItemReturnQuantityUsage(order,itemId,Number(item.quantity)||0), Promise.resolve(buildReturnItemSnapshot(order,item))]);
         return { orderId:String(order._id),orderItemId:itemId,buyerId:String(order.buyer_id),sellerId,printerId,cohort:order.is_pod||order.order_type==='POD'?'POD' as const:'NORMAL' as const,itemStatus:status==='DELIVERED'?'DELIVERED' as const:status==='SHIPPING'?'SHIPPING' as const:'OTHER' as const,itemSnapshot:snapshot.snapshot,valid:snapshot.valid,orderedQuantity:Number(item.quantity)||0,...usage,policyVersion:'pod-v1',schemaVersion:'v3',is_simulated:order.is_simulated===true };
     }

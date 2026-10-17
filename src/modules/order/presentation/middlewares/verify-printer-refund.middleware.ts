@@ -12,12 +12,26 @@ function sameSecret(expected: string, supplied: string): boolean {
 
 /** Partner credentials identify a workshop independently of marketplace user accounts. */
 export function verifyPrinterRefundPartner(req: PrinterRefundRequest, res: Response, next: NextFunction) {
-    const printerId = process.env.PRINTER_REFUND_PRINTER_ID?.trim();
-    if (!config.printerRefundApiKey || !printerId) return res.status(503).json({ error: 'Printer Refund partner chưa được cấu hình' });
-    if (!sameSecret(config.printerRefundApiKey, String(req.headers['x-vietcraft-refund-key'] || '')) || String(req.headers['x-printer-id'] || '') !== printerId) {
+    const defaultPrinterId = process.env.PRINTER_REFUND_PRINTER_ID?.trim() || 'PRINTER_SHOP';
+    const apiKey = config.printerRefundApiKey || process.env.PRINTER_REFUND_API_KEY || '';
+    const mockSecret = process.env.REFUND_PRINTER_MOCK_SECRET || apiKey;
+    
+    if (!apiKey && !mockSecret) return res.status(503).json({ error: 'Printer Refund partner chưa được cấu hình' });
+
+    const suppliedKey = String(req.headers['x-vietcraft-refund-key'] || '');
+    const suppliedSecret = String(req.headers['x-refund-printer-secret'] || '');
+    const suppliedPrinterId = String(req.headers['x-printer-id'] || '').trim();
+
+    // Check partner key or secret
+    const keyValid = apiKey && suppliedKey && sameSecret(apiKey, suppliedKey);
+    const secretValid = (mockSecret && suppliedSecret && sameSecret(mockSecret, suppliedSecret)) ||
+                        (apiKey && suppliedSecret && sameSecret(apiKey, suppliedSecret));
+
+    if (!keyValid && !secretValid) {
         return res.status(401).json({ error: 'Unauthorized Printer partner' });
     }
-    req.printerActorId = printerId;
+
+    req.printerActorId = suppliedPrinterId || defaultPrinterId;
     next();
 }
 

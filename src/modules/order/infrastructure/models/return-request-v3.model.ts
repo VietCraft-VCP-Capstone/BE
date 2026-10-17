@@ -82,7 +82,7 @@ const ReturnExchangeQuotaV3Schema = new Schema({
 }, { versionKey: false, strict: 'throw' });
 ReturnExchangeQuotaV3Schema.index({ order_item_id: 1 }, { unique: true, name: 'uniq_return_exchange_quota_v3_per_item' });
 
-export const ReturnRequestV3 = mongoose.models.ReturnRequestV3 || mongoose.model<IReturnRequestV3>('ReturnRequestV3', ReturnRequestV3Schema, 'return_requests_v3');
-export const ReturnEvidenceV3 = mongoose.models.ReturnEvidenceV3 || mongoose.model('ReturnEvidenceV3', ReturnEvidenceV3Schema, 'return_evidence_v3');
-export const ReturnRequestLogV3 = mongoose.models.ReturnRequestLogV3 || mongoose.model('ReturnRequestLogV3', ReturnRequestLogV3Schema, 'return_request_logs_v3');
-export const ReturnExchangeQuotaV3 = mongoose.models.ReturnExchangeQuotaV3 || mongoose.model('ReturnExchangeQuotaV3', ReturnExchangeQuotaV3Schema, 'return_exchange_quotas_v3');
+export const ReturnRequestV3 = mongoose.models.ReturnRequestV3 || mongoose.model<IReturnRequestV3>('ReturnRequestV3', ReturnRequestV3Schema, 'return_requests');
+export const ReturnEvidenceV3 = mongoose.models.ReturnEvidenceV3 || mongoose.model('ReturnEvidenceV3', ReturnEvidenceV3Schema, 'return_evidence');
+export const ReturnRequestLogV3 = mongoose.models.ReturnRequestLogV3 || mongoose.model('ReturnRequestLogV3', ReturnRequestLogV3Schema, 'return_request_logs');
+export const ReturnExchangeQuotaV3 = mongoose.models.ReturnExchangeQuotaV3 || mongoose.model('ReturnExchangeQuotaV3', ReturnExchangeQuotaV3Schema, 'return_exchange_quotas');

@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { normalizeVi } from '../../../../shared/utils/vietnamese-search.util';
 
 export interface IBankInfo {
     bank_code: string;
@@ -18,10 +19,14 @@ export interface IPrinterPartner {
     auto_approve?: boolean;
 }
 
+export type ReputationTier = 'TRUSTED' | 'NORMAL' | 'WARNING' | 'RESTRICTED';
+
 export interface IShop extends Document {
     owner_id: mongoose.Types.ObjectId;
     shop_name: string;
+    shop_name_norm?: string;
     slug: string;
+    status: 'ACTIVE' | 'INACTIVE' | 'CLOSED' | 'PENDING';
     logo?: string;
     banner?: string;
     description?: string;
@@ -36,6 +41,11 @@ export interface IShop extends Document {
     average_rating: number;
     rating_count: number;
     product_diversity_score?: number;
+    reputation_score: number;
+    reputation_tier: ReputationTier;
+    clean_streak_orders: number;
+    dispute_count_30d: number;
+    penalty_points_30d: number;
     settings?: Record<string, any>;
     created_at: Date;
     updated_at: Date;
@@ -62,7 +72,14 @@ const PrinterPartnerSchema = new Schema<IPrinterPartner>({
 const ShopSchema = new Schema<IShop>({
     owner_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true, index: true },
     shop_name: { type: String, required: true },
+    shop_name_norm: { type: String, index: true },
     slug: { type: String, required: true, unique: true, index: true },
+    status: {
+        type: String,
+        enum: ['ACTIVE', 'INACTIVE', 'CLOSED', 'PENDING'],
+        default: 'ACTIVE',
+        index: true
+    },
     logo: { type: String },
     banner: { type: String },
     description: { type: String },
@@ -77,9 +94,28 @@ const ShopSchema = new Schema<IShop>({
     listing_count: { type: Number, default: 0 },
     average_rating: { type: Number, default: 0.0 },
     rating_count: { type: Number, default: 0 },
-    product_diversity_score: { type: Number, default: 0.0 }
+    product_diversity_score: { type: Number, default: 0.0 },
+    reputation_score: { type: Number, default: 80, min: 0, max: 100, index: true },
+    reputation_tier: { 
+        type: String, 
+        enum: ['TRUSTED', 'NORMAL', 'WARNING', 'RESTRICTED'], 
+        default: 'NORMAL', 
+        index: true 
+    },
+    clean_streak_orders: { type: Number, default: 0 },
+    dispute_count_30d: { type: Number, default: 0 },
+    penalty_points_30d: { type: Number, default: 0 }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
+
+ShopSchema.pre('save', function (next) {
+    if (this.isModified('shop_name') || !this.shop_name_norm) {
+        this.shop_name_norm = normalizeVi(this.shop_name || '');
+    }
+    next();
+});
+
+ShopSchema.index({ shop_name_norm: 1 });
 
 export const Shop = mongoose.model<IShop>('Shop', ShopSchema, 'shops');

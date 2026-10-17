@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 import { Order as OrderModel } from "../infrastructure/models/order.model";
 import { WebhookLog } from "../infrastructure/models/webhook-log.model";
 import { Product } from "../../product/infrastructure/models/product.model";
-import { ProductVariant } from "../../product/infrastructure/models/product-variant.model";
+import { ProductVariant, syncProductDenorm } from "../../product/infrastructure/models/product-variant.model";
 import { Shop } from "../../product/infrastructure/models/shop.model";
 import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
@@ -18,7 +18,7 @@ import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
 import { executeRefund, cancelRefundKey } from "../../payment/application/refund-runtime";
 import { payosService } from "../../payment/application/payos.service";
 import { logger } from "../../../shared/utils/logger";
-
+import { ReputationService } from "../../seller/application/reputation.service";
 
 export class OrdersService {
 
@@ -354,6 +354,7 @@ export class OrdersService {
           { _id: it.variant_id },
           { $inc: { stock_quantity: -it.quantity } }
         ).catch(err => console.error('[STOCK] Lỗi trừ tồn kho khi tạo đơn:', err?.message || err));
+        void syncProductDenorm(it.product_id);
       }
     }
 
@@ -409,6 +410,7 @@ export class OrdersService {
             { _id: vId },
             { $inc: { stock_quantity: it.quantity || 1 } }
           ).catch(err => console.error('[STOCK] Lỗi hoàn tồn kho:', err?.message || err));
+          void syncProductDenorm(it.product_id?._id || it.product_id);
         }
       }
     }
@@ -1125,6 +1127,8 @@ export class OrdersService {
 
     await order.save();
 
+    if (order.order_status === 'DELIVERED') void ReputationService.recordCleanOrder(order);
+
     await WebhookLog.create({
       provider: 'PRINTING_SHOP',
       event_type: payload.event || pStatus || (tracking ? 'TRACKING_UPDATE' : 'STATUS_UPDATE'),
@@ -1217,6 +1221,8 @@ export class OrdersService {
       note: 'Khách hàng đã bấm xác nhận nhận được hàng thành công.'
     });
     await order.save();
+
+    void ReputationService.recordCleanOrder(order);
 
     // Thông báo realtime cho Người bán
     const shopOwnerId = (order.shop_id as any)?.owner_id;
