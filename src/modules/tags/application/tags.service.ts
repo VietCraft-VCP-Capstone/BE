@@ -169,6 +169,31 @@ class TagsService implements ITagsService {
                 .lean();
         }, 1800);
     }
+
+    async proposeTag(sellerId: string, name: string): Promise<any> {
+        const trimmed = String(name || '').trim();
+        if (!trimmed) throw new Error('Tên thẻ là bắt buộc');
+        const slug = generateSlug(trimmed);
+        if (!slug) throw new Error('Tên thẻ không hợp lệ');
+
+        const existing = await Tag.findOne({ slug });
+        if (existing) {
+            if (existing.status === 'active') {
+                return { tag: existing, message: 'Thẻ này đã tồn tại và đã được duyệt' };
+            }
+            return { tag: existing, message: 'Thẻ này đã được đề xuất và đang chờ duyệt' };
+        }
+
+        const tag = await Tag.create({
+            name: trimmed,
+            slug,
+            color: '#007700',
+            status: 'pending',
+            proposed_by: new mongoose.Types.ObjectId(sellerId)
+        });
+        await this.invalidateCache();
+        return { tag, message: 'Đã gửi đề xuất thẻ mới, chờ Admin duyệt' };
+    }
 }
 
 export const tagsService: ITagsService = new TagsService();

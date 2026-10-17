@@ -25,6 +25,8 @@ import { uploadRouter } from '../modules/upload';
 const router = Router();
 
 router.use('/auth', authRouter);
+router.use('/categories', categoryRouter);
+router.use('/tags', tagsRouter);
 router.use('/admin/categories', categoryRouter);
 router.use('/admin/tags', tagsRouter);
 router.use('/admin/promotions', adminPromotionsRouter);

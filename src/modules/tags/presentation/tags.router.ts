@@ -42,6 +42,15 @@ router.get('/pending', authenticate, requireRole(['admin']), async (req: Authent
     }
 });
 
+router.post('/propose', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const result = await tagsService.proposeTag(req.user!.id, req.body?.name);
+        res.status(201).json({ success: true, ...result });
+    } catch (err: any) {
+        res.status(400).json({ success: false, error: err.message || 'Không thể gửi đề xuất thẻ' });
+    }
+});
+
 router.post('/:id/approve', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const tag = await tagsService.approveTag(req.params.id);

@@ -8,6 +8,8 @@ export interface ICategory extends Document {
     icon: string;
     sort_order: number;
     is_active: boolean;
+    status: 'active' | 'pending';
+    proposed_by?: mongoose.Types.ObjectId;
     created_at: Date;
     updated_at: Date;
 }
@@ -19,7 +21,9 @@ const CategorySchema = new Schema<ICategory>({
     parent_id: { type: Schema.Types.ObjectId, ref: 'Category', index: true },
     icon: { type: String, default: 'tag' },
     sort_order: { type: Number, default: 0 },
-    is_active: { type: Boolean, default: true }
+    is_active: { type: Boolean, default: true },
+    status: { type: String, enum: ['active', 'pending'], default: 'active', index: true },
+    proposed_by: { type: Schema.Types.ObjectId, ref: 'User' },
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });

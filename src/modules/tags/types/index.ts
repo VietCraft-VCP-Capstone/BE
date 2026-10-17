@@ -27,5 +27,6 @@ export interface ITagsService {
     attachTagToProduct(tagId: string, productId: string): Promise<void>;
     detachTagFromProduct(tagId: string, productId: string): Promise<void>;
     listApproved(): Promise<any[]>;
+    proposeTag(sellerId: string, name: string): Promise<any>;
 }
 

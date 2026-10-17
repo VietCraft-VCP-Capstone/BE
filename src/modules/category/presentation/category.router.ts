@@ -53,6 +53,44 @@ router.get('/options', authenticate, requireRole(['admin']), async (_req: Authen
     }
 });
 
+router.get('/pending', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const params = parsePageParams(req.query as Record<string, unknown>, { defaultLimit: 10, maxLimit: 50 });
+        res.json({ success: true, data: await categoryService.listPending(params) });
+    } catch (err: any) {
+        next(err);
+    }
+});
+
+router.post('/propose', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const category = await categoryService.proposeCategory(req.user!.id, req.body);
+        res.status(201).json({ success: true, data: category, message: 'Đã gửi yêu cầu thêm danh mục, chờ Admin duyệt' });
+    } catch (err: any) {
+        res.status(400).json({ success: false, error: err.message || 'Không thể gửi yêu cầu đề xuất danh mục' });
+    }
+});
+
+router.post('/:id/approve', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const category = await categoryService.approveCategory(req.params.id);
+        if (!category) return res.status(404).json({ success: false, error: 'Danh mục không tồn tại' });
+        res.json({ success: true, data: category, message: 'Đã duyệt danh mục' });
+    } catch (err: any) {
+        next(err);
+    }
+});
+
+router.post('/:id/reject', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+        const ok = await categoryService.rejectCategory(req.params.id);
+        if (!ok) return res.status(404).json({ success: false, error: 'Danh mục không tồn tại' });
+        res.json({ success: true, message: 'Đã từ chối danh mục' });
+    } catch (err: any) {
+        next(err);
+    }
+});
+
 router.get('/:id', authenticate, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
         const category = await categoryService.getCategoryById(req.params.id);

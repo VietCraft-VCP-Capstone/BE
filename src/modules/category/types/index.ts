@@ -12,6 +12,7 @@ export interface CategoryStats {
     active: number;
     hidden: number;
     roots: number;
+    pending: number;
 }
 
 export interface PaginatedCategoryTree extends Paginated<any> {
@@ -28,4 +29,8 @@ export interface ICategoryService {
     updateCategory(id: string, data: any): Promise<any | null>;
     deleteCategory(id: string): Promise<boolean>;
     listActive(): Promise<any[]>;
+    proposeCategory(sellerId: string, data: any): Promise<any>;
+    listPending(params: PageParams): Promise<Paginated<any>>;
+    approveCategory(id: string): Promise<any | null>;
+    rejectCategory(id: string): Promise<boolean>;
 }

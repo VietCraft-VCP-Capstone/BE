@@ -41,7 +41,7 @@ class CategoryService implements ICategoryService {
     async listCategoryTree(opts: CategoryListOptions, params: PageParams): Promise<PaginatedCategoryTree> {
         const cacheKey = `vietcraft:categories:tree:${cacheService.hashKey({ opts, params })}`;
         return cacheService.getOrSet(cacheKey, async () => {
-            const all = await Category.find().sort({ sort_order: 1, name: 1 }).lean();
+            const all = await Category.find({ status: { $ne: 'pending' } }).sort({ sort_order: 1, name: 1 }).lean();
             const matches = this.buildMatcher(opts);
             const tree = buildCategoryTree(all);
             const filtered = matches ? filterCategoryTree(tree, matches) : tree;
@@ -51,24 +51,25 @@ class CategoryService implements ICategoryService {
 
     async getCategoryStats(): Promise<CategoryStats> {
         return cacheService.getOrSet('vietcraft:categories:stats', async () => {
-            const [total, active, roots] = await Promise.all([
-                Category.countDocuments({}),
-                Category.countDocuments({ is_active: true }),
-                Category.countDocuments({ parent_id: null }),
+            const [total, active, roots, pending] = await Promise.all([
+                Category.countDocuments({ status: { $ne: 'pending' } }),
+                Category.countDocuments({ is_active: true, status: { $ne: 'pending' } }),
+                Category.countDocuments({ parent_id: null, status: { $ne: 'pending' } }),
+                Category.countDocuments({ status: 'pending' }),
             ]);
-            return { total, active, hidden: total - active, roots };
+            return { total, active, hidden: total - active, roots, pending };
         }, 300);
     }
 
     async listOptions(): Promise<any[]> {
-        return Category.find()
+        return Category.find({ status: { $ne: 'pending' } })
             .sort({ sort_order: 1, name: 1 })
             .select('name slug parent_id is_active')
             .lean();
     }
 
     private buildQuery(opts: CategoryListOptions): Record<string, any> {
-        const query: Record<string, any> = {};
+        const query: Record<string, any> = { status: { $ne: 'pending' } };
         const search = opts.search?.trim();
         if (search) {
             const rx = new RegExp(escapeRegex(search), 'i');
@@ -108,6 +109,7 @@ class CategoryService implements ICategoryService {
             icon: data.icon || 'tag',
             sort_order: data.sort_order ?? 0,
             is_active: data.is_active ?? true,
+            status: data.status || 'active',
         });
         const saved = await doc.save();
         await this.invalidateCache();
@@ -144,11 +146,84 @@ class CategoryService implements ICategoryService {
 
     async listActive(): Promise<any[]> {
         return cacheService.getOrSet('vietcraft:categories:active', async () => {
-            return Category.find({ is_active: true })
+            return Category.find({ is_active: true, status: { $ne: 'pending' } })
                 .sort({ sort_order: 1, name: 1 })
                 .select('name slug _id')
                 .lean();
         }, 300);
+    }
+
+    async proposeCategory(sellerId: string, data: any): Promise<any> {
+        const name = String(data.name || '').trim();
+        if (!name) throw new Error('Tên danh mục là bắt buộc');
+        const slug = generateSlug(name);
+        if (!slug) throw new Error('Tên danh mục không hợp lệ');
+
+        const existing = await Category.findOne({ slug });
+        if (existing) {
+            if (existing.status === 'active') {
+                throw new Error('Danh mục này đã tồn tại trên hệ thống');
+            }
+            throw new Error('Danh mục này đã được đề xuất và đang chờ duyệt');
+        }
+
+        let parentId = null;
+        if (data.parent_id && mongoose.Types.ObjectId.isValid(data.parent_id)) {
+            const parent = await Category.findById(data.parent_id);
+            if (parent) parentId = parent._id;
+        }
+
+        const doc = new Category({
+            name,
+            slug,
+            description: data.description || '',
+            parent_id: parentId,
+            icon: data.icon || 'tag',
+            sort_order: 99,
+            is_active: false,
+            status: 'pending',
+            proposed_by: new mongoose.Types.ObjectId(sellerId)
+        });
+        const saved = await doc.save();
+        await this.invalidateCache();
+        return saved;
+    }
+
+    async listPending(params: PageParams): Promise<Paginated<any>> {
+        const query = { status: 'pending' };
+        const total = await Category.countDocuments(query);
+        const p = clampPage(params, total);
+        const items = await Category.find(query)
+            .populate('proposed_by', 'full_name email')
+            .populate('parent_id', 'name slug')
+            .sort({ created_at: -1 })
+            .skip(p.skip)
+            .limit(p.limit)
+            .lean();
+        return paginate(items, total, p);
+    }
+
+    async approveCategory(id: string): Promise<any | null> {
+        if (!mongoose.Types.ObjectId.isValid(id)) return null;
+        const updated = await Category.findByIdAndUpdate(
+            id,
+            { status: 'active', is_active: true },
+            { new: true }
+        ).lean();
+        if (updated) {
+            await this.invalidateCache();
+        }
+        return updated;
+    }
+
+    async rejectCategory(id: string): Promise<boolean> {
+        if (!mongoose.Types.ObjectId.isValid(id)) return false;
+        const res = await Category.findByIdAndDelete(id);
+        if (res) {
+            await this.invalidateCache();
+            return true;
+        }
+        return false;
     }
 }
 export const categoryService: ICategoryService = new CategoryService();
