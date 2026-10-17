@@ -39,6 +39,7 @@ export interface OrderResponse {
     shopName?: string;
     shopLogo?: string;
     shippingFee?: number;
+    discount?: number;
     couponCode?: string | null;
     paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
     /** Thời điểm cổng thanh toán xác nhận tiền về; null với đơn chưa trả hoặc dữ liệu cũ. */

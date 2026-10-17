@@ -3,6 +3,7 @@ import { Cart } from '../infrastructure/models/cart.model';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
 import { PRODUCT_POPULATE, toUserObjectId, VARIANT_POPULATE } from '../utils';
+import { EventService } from '../../analytics/application/event.service';
 
 export class CartService {
 
@@ -107,6 +108,21 @@ export class CartService {
         }
 
         await cart.save();
+
+        try {
+            const sessionId = `user_${userId}`;
+            EventService.recordEvent(
+                productId,
+                sessionId,
+                'add_to_cart',
+                '',
+                '', // sự kiện phía server: không có user-agent, ip
+                userId
+            ).catch(err => console.error('Failed to record add_to_cart event:', err));
+        } catch (err) {
+            console.error('Error in add_to_cart event recording:', err);
+        }
+
         return this.getCart(userId);
     }
 

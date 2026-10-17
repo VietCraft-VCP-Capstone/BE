@@ -1,0 +1,25 @@
+# .dockerignore — những thứ KHÔNG được vào image Docker.
+#
+# Phát hiện khi đóng gói Track B2 (§11): Dockerfile hiện tại làm
+#   COPY package*.json ./ -> RUN npm install -> COPY . .  -> RUN npm run build
+# Vì repo chưa có .dockerignore, bước "COPY . ." copy LUÔN node_modules/ của
+# máy host (Linux/glibc) ĐÈ LÊN node_modules vừa `npm install` đúng cho image
+# (node:18-alpine/musl) — sharp (native binding libvips) build sai hệ C library
+# thì sập lúc runtime, không phải lỗi code. Loại node_modules/ ở đây để COPY . .
+# không đụng tới nó, image chỉ dùng đúng bản vừa cài bên trong.
+#
+# Đồng thời loại .env thật — KHÔNG được đóng cứng JWT_SECRET/Mongo URI/API key
+# thật vào layer ảnh. Biến môi trường thật truyền lúc chạy container qua
+# `env_file`/`-e`, không phải lúc build.
+node_modules/
+**/node_modules/
+
+.env
+**/.env
+.env.local
+**/.env.local
+
+dist/
+.git/
+
+npm-debug.log*

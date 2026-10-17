@@ -1,4 +1,5 @@
 import { logger } from '../../../shared/utils/logger';
+import { isMongoReady } from '../../../app/config';
 import { RefundRequestService } from './refund-request.service';
 
 /** In-process fallback scheduler. Multi-instance deployments should run this worker in one dedicated process. */
@@ -8,10 +9,13 @@ export class RefundTimeoutJob {
     static start(intervalMs = 60_000): void {
         if (this.timer) return;
         this.timer = setInterval(() => {
+            if (!isMongoReady()) return;
             void RefundRequestService.timeoutExpired().catch(error => logger.error(`[REFUND TIMEOUT] ${error.message}`));
         }, intervalMs);
         this.timer.unref();
-        void RefundRequestService.timeoutExpired().catch(error => logger.error(`[REFUND TIMEOUT] ${error.message}`));
+        if (isMongoReady()) {
+            void RefundRequestService.timeoutExpired().catch(error => logger.error(`[REFUND TIMEOUT] ${error.message}`));
+        }
     }
 
     static stop(): void {

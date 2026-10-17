@@ -34,6 +34,25 @@ export interface ShopDetailDTO {
     followersCount: number;
     isFollowing: boolean;
     createdAt?: Date;
+    shippingSettings?: {
+        pricingType?: 'FLAT_RATE' | 'ZONE_BASED';
+        useFlatRate?: boolean;
+        flatRateFee?: number;
+        province?: string;
+        district?: string;
+        ward?: string;
+        carriers?: Array<{
+            id: string;
+            name: string;
+            enabled: boolean;
+            estimatedTime?: string;
+        }>;
+        zoneRates?: {
+            intraProvince: number;
+            intraRegion: number;
+            interRegion: number;
+        };
+    } | null;
 }
 
 export class ShopService {
@@ -67,6 +86,22 @@ export class ShopService {
             followerDoc?.buyer_ids?.some(id => id.toString() === currentUserId)
         );
 
+        const rawShipping = shop.settings?.shipping;
+        const shippingSettings = rawShipping ? {
+            pricingType: rawShipping.pricingType || (rawShipping.useFlatRate ? 'FLAT_RATE' : 'ZONE_BASED'),
+            useFlatRate: rawShipping.pricingType === 'FLAT_RATE' || Boolean(rawShipping.useFlatRate),
+            flatRateFee: Number(rawShipping.flatRateFee ?? 0),
+            province: rawShipping.province || '',
+            district: rawShipping.district || '',
+            ward: rawShipping.ward || '',
+            carriers: rawShipping.carriers || [],
+            zoneRates: rawShipping.zoneRates || {
+                intraProvince: 22000,
+                intraRegion: 30000,
+                interRegion: 38000
+            }
+        } : null;
+
         return {
             id: shop._id.toString(),
             _id: shop._id.toString(),
@@ -83,6 +118,7 @@ export class ShopService {
             followersCount,
             isFollowing,
             createdAt: shop.created_at,
+            shippingSettings,
         };
     }
 
