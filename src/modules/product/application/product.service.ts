@@ -24,6 +24,11 @@ import {
     SuggestResultDTO
 } from './product.dto';
 import { SearchLog } from '../../analytics/infrastructure/models/search-log.model';
+import { BannedKeyword } from '../../analytics/infrastructure/models/banned-keyword.model';
+import { shouldLogSearch, rankSuggestions, SUGGEST_PROJECTION } from './product-search.helpers';
+import { buildKeywordSuggestions, fetchLoggedKeywords } from './suggest-keywords';
+import { getTrendingKeywords as fetchTrendingKeywords } from './trending-keywords';
+import { buildRelevance, buildSearchPipeline } from './product-search.pipeline';
 import {
     normalizeVi,
     nfcLower,
@@ -652,14 +657,8 @@ export class ProductsService {
         const limit = Math.min(48, Math.max(1, Number(params.limit || params.pageSize) || 12));
         const useText = terms.length > 0;
 
-        // Ghi nhận lịch sử tìm kiếm: CHỈ ghi khi trang đầu tiên (page === 1) và tìm kiếm gốc
-        // Tránh bị thổi phồng khi chuyển trang hoặc thay đổi bộ lọc giá/sắp xếp
-        if (q && q.length >= 2 && page === 1 && !params.sort && !params.category && !params.minPrice && !params.maxPrice) {
-            SearchLog.create({
-                keyword: q,
-                user_id: params.userId && mongoose.Types.ObjectId.isValid(params.userId) ? new mongoose.Types.ObjectId(params.userId) : undefined
-            }).catch(() => {});
-        }
+        // Chỉ ghi lịch sử ở trang 1 với sort mặc định, tránh thổi phồng khi lọc/phân trang
+        const logId = shouldLogSearch(q, page, params) ? new mongoose.Types.ObjectId() : undefined;
 
         const match: any = {
             status: 'PUBLISHED',
@@ -705,6 +704,7 @@ export class ProductsService {
 
         if (params.rating) {
             match.average_rating = { $gte: Number(params.rating) };
+            match.rating_count = { $gt: 0 };
         }
 
         if (params.minPrice != null && params.minPrice !== '') {
@@ -732,65 +732,23 @@ export class ProductsService {
         const queryHasTone = hasTone(q);
         const qLower = nfcLower(q);
 
-        const relevance = {
-            $add: [
-                useText ? { $meta: 'textScore' } : 0,
-                useText ? { $cond: [{ $regexMatch: { input: '$title_norm', regex: escapeRegex(norm) } }, 3, 0] } : 0,
-                useText && queryHasTone ? { $cond: [{ $regexMatch: { input: '$title_lc', regex: escapeRegex(qLower) } }, 4, 0] } : 0,
-                { $multiply: ['$_reputationScore', 0.02] }, // SRS 0-100 -> tối đa +2 điểm
-                { $multiply: [{ $ifNull: ['$average_rating', 0] }, 0.3] },
-                { $multiply: [{ $ln: { $add: [{ $ifNull: ['$sold_count', 0] }, 1] } }, 0.2] },
-            ]
-        };
+        const relevance = buildRelevance({ norm, qLower, queryHasTone, withTextScore: useText });
 
         const SORTS: Record<string, any> = {
             relevance:   { _relevance: -1, created_at: -1 },
             newest:      { created_at: -1 },
             price_asc:   { min_price: 1, created_at: -1 },
             price_desc:  { max_price: -1, created_at: -1 },
-            rating_desc: { average_rating: -1, created_at: -1 },
+            rating_desc: { _rating: -1, rating_count: -1, created_at: -1 },
             best_seller: { sold_count: -1, created_at: -1 },
         };
 
         const sortStage = SORTS[params.sort as string] ?? SORTS.relevance;
 
-        let [res] = await MongoProduct.aggregate([
-            { $match: match },
-            {
-                $lookup: {
-                    from: 'shops',
-                    localField: 'shop_id',
-                    foreignField: '_id',
-                    as: '_shop',
-                    pipeline: [{ $project: { reputation_score: 1 } }]
-                }
-            },
-            {
-                $addFields: {
-                    _reputationScore: { $ifNull: [{ $arrayElemAt: ['$_shop.reputation_score', 0] }, 100] },
-                }
-            },
-            { $addFields: { _relevance: relevance } },
-            {
-                $project: {
-                    title_prefixes: 0,
-                    description: 0,
-                    description_norm: 0,
-                    design_placements: 0,
-                    _shop: 0
-                }
-            },
-            { $sort: sortStage },
-            {
-                $facet: {
-                    items: [
-                        { $skip: (page - 1) * limit },
-                        { $limit: limit },
-                    ],
-                    total: [{ $count: 'n' }],
-                }
-            },
-        ], { allowDiskUse: true });
+        let [res] = await MongoProduct.aggregate(
+            buildSearchPipeline(match, relevance, sortStage, page, limit),
+            { allowDiskUse: true }
+        );
 
         // Fallback khi 0 kết quả: nếu total === 0 và có terms, chạy lại với title_prefixes
         if ((res?.total?.[0]?.n ?? 0) === 0 && useText) {
@@ -798,53 +756,11 @@ export class ProductsService {
             delete fallbackMatch.$text;
             fallbackMatch.title_prefixes = { $all: terms.map(t => t.slice(0, 10)) };
 
-            const fallbackRelevance = {
-                $add: [
-                    { $cond: [{ $regexMatch: { input: '$title_norm', regex: escapeRegex(norm) } }, 3, 0] },
-                    queryHasTone ? { $cond: [{ $regexMatch: { input: '$title_lc', regex: escapeRegex(qLower) } }, 4, 0] } : 0,
-                    { $multiply: ['$_reputationScore', 0.02] },
-                    { $multiply: [{ $ifNull: ['$average_rating', 0] }, 0.3] },
-                    { $multiply: [{ $ln: { $add: [{ $ifNull: ['$sold_count', 0] }, 1] } }, 0.2] },
-                ]
-            };
-
-            const [fallbackRes] = await MongoProduct.aggregate([
-                { $match: fallbackMatch },
-                {
-                    $lookup: {
-                        from: 'shops',
-                        localField: 'shop_id',
-                        foreignField: '_id',
-                        as: '_shop',
-                        pipeline: [{ $project: { reputation_score: 1 } }]
-                    }
-                },
-                {
-                    $addFields: {
-                        _reputationScore: { $ifNull: [{ $arrayElemAt: ['$_shop.reputation_score', 0] }, 100] },
-                    }
-                },
-                { $addFields: { _relevance: fallbackRelevance } },
-                {
-                    $project: {
-                        title_prefixes: 0,
-                        description: 0,
-                        description_norm: 0,
-                        design_placements: 0,
-                        _shop: 0
-                    }
-                },
-                { $sort: sortStage },
-                {
-                    $facet: {
-                        items: [
-                            { $skip: (page - 1) * limit },
-                            { $limit: limit },
-                        ],
-                        total: [{ $count: 'n' }],
-                    }
-                },
-            ], { allowDiskUse: true });
+            const fallbackRelevance = buildRelevance({ norm, qLower, queryHasTone, withTextScore: false });
+            const [fallbackRes] = await MongoProduct.aggregate(
+                buildSearchPipeline(fallbackMatch, fallbackRelevance, sortStage, page, limit),
+                { allowDiskUse: true }
+            );
 
             if ((fallbackRes?.total?.[0]?.n ?? 0) > 0) {
                 res = fallbackRes;
@@ -854,50 +770,61 @@ export class ProductsService {
         const rawDocs = res?.items || [];
         const total = res?.total?.[0]?.n ?? 0;
         const totalPages = Math.max(1, Math.ceil(total / limit));
-        const items = await ProductsService.mapMany(rawDocs);
 
-        return { items, total, page, limit, totalPages };
+        if (logId) {
+            SearchLog.create({
+                _id: logId,
+                keyword: q,
+                keyword_norm: norm,
+                result_count: total,
+                user_id: params.userId && mongoose.Types.ObjectId.isValid(params.userId) ? new mongoose.Types.ObjectId(params.userId) : undefined
+            }).catch(() => {});
+        }
+
+        const items = await ProductsService.mapMany(rawDocs);
+        return { items, total, page, limit, totalPages, ...(logId && { searchLogId: logId.toString() }) };
     }
 
     /**
      * Gợi ý nhanh (Search-as-you-type) phục vụ Dropdown Popover tại Header.
-     * Trả về kết quả tức thì (< 30ms): Top 4 sản phẩm, Top 2 gian hàng, Top 3 danh mục.
+     * Trả về: Top 6 từ khoá gợi ý, Top 2 gian hàng, Top 3 danh mục.
      */
-    static async suggest(queryStr?: string): Promise<SuggestResultDTO> {
+    static async suggest(queryStr?: string, userId?: string): Promise<SuggestResultDTO> {
         const q = (typeof queryStr === 'string' ? queryStr : '').slice(0, 60).trim();
-        if (!q) {
-            return { products: [], shops: [], categories: [] };
-        }
-
         const norm = normalizeVi(q);
+        if (!norm) {
+            return { keywords: [], shops: [], categories: [] };
+        }
         const terms = extractSearchTerms(q, 4).map(t => t.slice(0, 12));
         const safeRegex = escapeRegex(norm);
         const slugQ = norm.replace(/\s+/g, '-');
         const safeSlugQ = escapeRegex(slugQ);
 
-        const prodMatch: any = {
+        const restrictedShopIds = await Shop.find({ reputation_tier: 'RESTRICTED' }).distinct('_id');
+        const prodBase: any = {
             status: 'PUBLISHED',
             is_hidden: { $ne: true },
             listing_status: 'ACTIVE',
             moderation_status: 'APPROVED',
+            shop_id: { $nin: restrictedShopIds },
         };
+        // Tận dụng chỉ mục trên title_prefixes, tags_norm, categories_norm và title_norm
+        const prefixOr = [
+            { title_prefixes: norm },
+            { title_prefixes: { $all: terms } },
+            { tags_norm: { $all: terms } },
+            { categories_norm: { $all: terms } },
+            { title_norm: { $regex: '^' + safeRegex } }
+        ];
 
-        if (terms.length > 0) {
-            // Tận dụng chỉ mục IXSCAN trên title_prefixes, tags_norm, categories_norm và title_norm (không dùng 'i' để giữ bounded index scan)
-            prodMatch.$or = [
-                { title_prefixes: norm },
-                { title_prefixes: { $all: terms } },
-                { tags_norm: { $all: terms } },
-                { categories_norm: { $all: terms } },
-                { title_norm: { $regex: '^' + safeRegex } }
-            ];
-        }
-
-        const [matchingProducts, matchingShops, matchingCategories] = await Promise.all([
-            MongoProduct.find(prodMatch)
-                .select('_id title slug images min_price original_price average_rating rating_count')
-                .sort({ average_rating: -1, created_at: -1 })
-                .limit(4)
+        const [textHits, matchingShops, matchingCategories, loggedKeywords, banned] = await Promise.all([
+            // Pha 1: khớp nguyên từ bằng $text, ưu tiên điểm textScore
+            MongoProduct.find(
+                { ...prodBase, $text: { $search: terms.map(t => `"${t}"`).join(' ') } },
+                { ...SUGGEST_PROJECTION, score: { $meta: 'textScore' } }
+            )
+                .sort({ score: { $meta: 'textScore' } })
+                .limit(20)
                 .lean(),
 
             Shop.find({
@@ -922,18 +849,25 @@ export class ProductsService {
             })
                 .select('_id name slug')
                 .limit(3)
-                .lean()
+                .lean(),
+
+            userId && mongoose.Types.ObjectId.isValid(userId) ? fetchLoggedKeywords(norm, userId) : [],
+            BannedKeyword.distinct('keyword')
         ]);
 
+        // Pha 2: bù bằng tiền tố (gõ dở từ cuối, từ khớp một phần), bỏ các sản phẩm đã có ở pha 1
+        const need = 20 - textHits.length;
+        const prefixHits = need > 0
+            ? await MongoProduct.find({ ...prodBase, $or: prefixOr, _id: { $nin: textHits.map((p: any) => p._id) } }, SUGGEST_PROJECTION)
+                .sort({ sold_count: -1 })
+                .limit(need)
+                .lean()
+            : [];
+
+        const ranked = rankSuggestions([...textHits, ...prefixHits], norm, terms, 20);
+
         return {
-            products: matchingProducts.map((p: any) => ({
-                id: p._id.toString(),
-                title: p.title,
-                thumbnail: Array.isArray(p.images) && p.images[0] ? p.images[0] : '',
-                price: (p.min_price && p.min_price > 0) ? p.min_price : (p.original_price ?? 0),
-                average_rating: (p.rating_count ?? 0) > 0 ? (p.average_rating ?? 0) : 0,
-                slug: p.slug
-            })),
+            keywords: buildKeywordSuggestions(q, loggedKeywords, ranked.map((p: any) => p.title), banned),
             shops: matchingShops.map((s: any) => ({
                 id: s._id.toString(),
                 name: s.shop_name,
@@ -950,7 +884,10 @@ export class ProductsService {
         };
     }
 
-
+    /** Từ khóa thịnh hành: AI Analyst → collection trend → danh sách dự phòng (xem trending-keywords.ts). */
+    static async getTrendingKeywords(limit = 8): Promise<string[]> {
+        return fetchTrendingKeywords(limit);
+    }
 
     static async getMine(actor: ProductActor, filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
         const limit = Number(filter?.limit || filter?.pageSize) || 6;

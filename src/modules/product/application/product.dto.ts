@@ -97,6 +97,7 @@ export interface PaginatedProductsResponseDTO {
     page: number;
     limit: number;
     totalPages: number;
+    searchLogId?: string;
 }
 
 export interface SearchProductsParams {
@@ -116,15 +117,6 @@ export interface SearchProductsParams {
     userId?: string;
 }
 
-export interface SuggestProductItem {
-    id: string;
-    title: string;
-    thumbnail: string;
-    price: number;
-    average_rating: number;
-    slug?: string;
-}
-
 export interface SuggestShopItem {
     id: string;
     name: string;
@@ -141,7 +133,7 @@ export interface SuggestCategoryItem {
 }
 
 export interface SuggestResultDTO {
-    products: SuggestProductItem[];
+    keywords: string[];
     shops: SuggestShopItem[];
     categories: SuggestCategoryItem[];
 }

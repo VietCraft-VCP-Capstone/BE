@@ -2,7 +2,8 @@ import { Router, Response } from 'express';
 import { ProductsService, ValidationError, ForbiddenError, ProductActor } from '../application/product.service';
 import { SearchProductsParams } from '../application/product.dto';
 import { BlankClient } from '../application/blank-client.service';
-import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { parseSearchClick, recordSearchClick } from '../application/search-click';
+import { authenticate, requireRole, optionalAuthenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { ReviewService } from '../../order';
 
 const router = Router();
@@ -50,7 +51,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
     }
 });
 
-router.get('/search', async (req: AuthenticatedRequest, res) => {
+router.get('/search', optionalAuthenticate, async (req: AuthenticatedRequest, res) => {
     try {
         const {
             q, search, category, productType, craftType, location,
@@ -84,10 +85,21 @@ router.get('/search', async (req: AuthenticatedRequest, res) => {
     }
 });
 
-router.get('/suggest', async (req, res) => {
+router.post('/search/click', async (req, res) => {
+    const click = parseSearchClick(req.body);
+    if (!click) return res.status(400).json({ error: 'Dữ liệu click không hợp lệ' });
+    try {
+        await recordSearchClick(click);
+        res.status(204).end();
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi ghi nhận click.' });
+    }
+});
+
+router.get('/suggest', optionalAuthenticate, async (req: AuthenticatedRequest, res) => {
     try {
         const q = typeof req.query.q === 'string' ? req.query.q : (typeof req.query.search === 'string' ? req.query.search : '');
-        res.json(await ProductsService.suggest(q));
+        res.json(await ProductsService.suggest(q, req.user?.id));
     } catch (error: any) {
         res.status(500).json({ error: error.message || 'Lỗi khi lấy gợi ý tìm kiếm.' });
     }
@@ -106,6 +118,24 @@ router.get('/meta/categories', async (req, res) => {
         res.json(await ProductsService.listActiveCategories());
     } catch (error: any) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+router.get('/meta/trending-keywords', async (req, res) => {
+    try {
+        const limit = Number(req.query.limit) || 8;
+        res.json(await ProductsService.getTrendingKeywords(limit));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi lấy từ khóa thịnh hành.' });
+    }
+});
+
+router.get('/trending-keywords', async (req, res) => {
+    try {
+        const limit = Number(req.query.limit) || 8;
+        res.json(await ProductsService.getTrendingKeywords(limit));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi lấy từ khóa thịnh hành.' });
     }
 });
 

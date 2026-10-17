@@ -18,8 +18,7 @@ export interface SuggestCandidate {
 }
 
 export const SUGGEST_PROJECTION = {
-    title: 1, slug: 1, images: 1, min_price: 1, original_price: 1,
-    average_rating: 1, rating_count: 1, title_norm: 1, tags_norm: 1, created_at: 1,
+    title: 1, average_rating: 1, rating_count: 1, title_norm: 1, tags_norm: 1, created_at: 1,
 };
 
 export function effectiveRating(p: SuggestCandidate): number {
