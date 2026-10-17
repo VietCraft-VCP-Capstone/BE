@@ -58,15 +58,39 @@ export function maskCardNumber(cardNumber: string): string {
 }
 
 /**
- * Che số tài khoản ngân hàng (chỉ hiển thị 4 số cuối)
- * Ví dụ: 1903456789012 -> *******89012
+ * Kiểm tra xem chuỗi có phải đã được mã hóa bằng AES-256-CBC (dạng IV_HEX:CIPHER_HEX) hay không
+ */
+export function isEncryptedField(text: string): boolean {
+    if (!text || typeof text !== 'string') return false;
+    return /^[0-9a-f]{32}:[0-9a-f]+$/i.test(text.trim());
+}
+
+/**
+ * Che số tài khoản ngân hàng (chỉ hiển thị 4 số cuối chuẩn **** **** 1234)
+ * Ví dụ: 1903456789012 -> **** **** 9012
  */
 export function maskBankAccount(accountNumber: string): string {
     const raw = String(accountNumber || '').trim();
-    if (raw.length <= 4) return raw;
+    if (!raw) return '';
+    if (raw.startsWith('*')) return raw;
+    if (raw.length <= 4) return `**** ${raw}`;
     const end = raw.slice(-4);
-    const mask = '*'.repeat(Math.max(raw.length - 4, 4));
-    return `${mask}${end}`;
+    return `**** **** ${end}`;
+}
+
+/**
+ * Che khóa bí mật API Key của đối tác (xưởng in POD, gateway)
+ * Giữ tiền tố nhận diện (ví dụ psk_live_...) và đuôi xác minh, ẩn phần bí mật ở giữa
+ * Ví dụ: psk_live_3df21038ba98c8bff8b -> psk_live_3df...8bff8b
+ */
+export function maskApiKey(apiKey: string): string {
+    const raw = String(apiKey || '').trim();
+    if (!raw) return '';
+    if (raw.includes('...')) return raw;
+    if (raw.length <= 10) return `${raw.slice(0, 2)}***${raw.slice(-2)}`;
+    const prefix = raw.slice(0, Math.min(12, Math.floor(raw.length / 3)));
+    const suffix = raw.slice(-Math.min(6, Math.floor(raw.length / 4)));
+    return `${prefix}...${suffix}`;
 }
 
 /**

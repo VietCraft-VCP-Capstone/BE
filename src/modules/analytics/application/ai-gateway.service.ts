@@ -31,13 +31,26 @@ export class AiGatewayService {
         }
         const liveShopId = shop ? String(shop._id) : null;
         const mapped = config.aiShopMap[(user.email || '').toLowerCase()];
-        const demoShopId = mapped || config.aiDemoShopId.trim();
+        const globalDemoShopId = (process.env.AI_DEMO_SHOP_ID ?? config.aiDemoShopId).trim();
+
+        // Ưu tiên shop thật nếu seller đã mở gian hàng trên sàn.
+        // Chỉ dùng demo nếu email cố tình được map hoặc seller chưa có shop thật.
+        let targetShopId = liveShopId;
+        let isDemo = false;
+
+        if (mapped) {
+            targetShopId = mapped;
+            isDemo = true;
+        } else if (!liveShopId && globalDemoShopId) {
+            targetShopId = globalDemoShopId;
+            isDemo = true;
+        }
 
         return {
             live_shop_id: liveShopId,
             shop_name: shop?.shop_name ?? null,
-            analysed_shop_id: demoShopId || liveShopId,
-            demo: Boolean(demoShopId),
+            analysed_shop_id: targetShopId,
+            demo: isDemo,
         };
     }
 
@@ -65,12 +78,16 @@ export class AiGatewayService {
         };
         if (options.body) headers['Content-Type'] = 'application/json';
 
+        const timeoutMs = process.env.AI_TIMEOUT_MS
+            ? Number(process.env.AI_TIMEOUT_MS)
+            : Math.max(config.aiTimeoutMs || 5000, 20000);
+
         try {
             const response = await fetch(url, {
                 method: options.method,
                 headers,
                 body: options.body ? JSON.stringify(options.body) : undefined,
-                signal: AbortSignal.timeout(config.aiTimeoutMs),
+                signal: AbortSignal.timeout(timeoutMs),
             });
             const text = await response.text();
             try {
@@ -82,7 +99,7 @@ export class AiGatewayService {
         } catch (error: any) {
             const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
             logger.error(
-                `AI ${options.method} ${options.path} lỗi: ${timedOut ? `quá ${config.aiTimeoutMs}ms` : error?.message}`,
+                `AI ${options.method} ${options.path} lỗi: ${timedOut ? `quá ${timeoutMs}ms` : error?.message}`,
             );
             return timedOut
                 ? { status: 504, body: { error: 'ai_timeout' } }

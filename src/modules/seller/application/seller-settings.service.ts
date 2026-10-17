@@ -11,6 +11,7 @@ import {
 import { logger } from '../../../shared/utils/logger';
 import { generateSlug } from '../../../shared/utils/slug';
 import { isCloudinaryEnabled, uploadImage } from '../../../infrastructure/storage/cloudinary.service';
+import { encryptField, decryptField, maskBankAccount, isEncryptedField } from '../../../shared/utils/crypto.service';
 
 const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
     brand: {
@@ -151,6 +152,26 @@ export class SellerSettingsService {
             )
         };
 
+        // Tự động mã hóa lại dữ liệu cũ nếu trong DB đang lưu số tài khoản dạng plaintext
+        let needMigration = false;
+        if (shop.bank_info?.account_number && !isEncryptedField(shop.bank_info.account_number)) {
+            shop.bank_info.account_number = encryptField(shop.bank_info.account_number);
+            needMigration = true;
+        }
+        if (customSettings.payment?.bankAccounts) {
+            for (const b of customSettings.payment.bankAccounts) {
+                if (b.accountNumber && !isEncryptedField(b.accountNumber)) {
+                    b.accountNumber = encryptField(b.accountNumber);
+                    needMigration = true;
+                }
+            }
+        }
+        if (needMigration) {
+            shop.markModified('bank_info');
+            shop.markModified('settings');
+            await shop.save();
+        }
+
         const payment: SellerPaymentSettingsDTO = {
             ...DEFAULT_SETTINGS.payment,
             ...(customSettings.payment || {})
@@ -158,15 +179,22 @@ export class SellerSettingsService {
 
         // Fallback: If bankAccounts is empty but shop.bank_info exists, migrate it
         if ((!payment.bankAccounts || payment.bankAccounts.length === 0) && shop.bank_info?.account_number) {
+            const rawNumber = decryptField(shop.bank_info.account_number);
             payment.bankAccounts = [{
                 id: 'bank_default_0',
                 bankName: shop.bank_info.bank_code || 'Ngân hàng thụ hưởng',
                 bankCode: shop.bank_info.bank_code || 'BANK',
-                accountNumber: shop.bank_info.account_number,
+                accountNumber: maskBankAccount(rawNumber),
                 accountHolder: shop.bank_info.account_holder,
                 branch: 'Chi nhánh mặc định',
                 isDefault: true
             }];
+        } else if (payment.bankAccounts && payment.bankAccounts.length > 0) {
+            // Luôn che mờ (mask) số tài khoản trước khi trả về Frontend DTO
+            payment.bankAccounts = payment.bankAccounts.map((b: any) => ({
+                ...b,
+                accountNumber: maskBankAccount(decryptField(b.accountNumber))
+            }));
         }
 
         const notifications: SellerNotificationSettingsDTO = {
@@ -261,19 +289,40 @@ export class SellerSettingsService {
             }
 
             const validMinPayout = !isNaN(minPayout) && minPayout >= 500 ? minPayout : 500;
+            const existingAccounts = currentSettings.payment?.bankAccounts || [];
+
+            const sanitizedAccounts = (payload.payment.bankAccounts || []).map((acc: any) => {
+                const existing = existingAccounts.find((e: any) => e.id === acc.id);
+                let accNum = String(acc.accountNumber || '').trim();
+
+                // Nếu số gửi lên chứa dấu * (đã được mask), giữ nguyên chuỗi đã mã hóa trong DB
+                if (accNum.includes('*') && existing?.accountNumber) {
+                    accNum = existing.accountNumber;
+                } else if (accNum && !isEncryptedField(accNum)) {
+                    // Số tài khoản mới nhập thô -> Mã hóa bằng AES-256-CBC
+                    accNum = encryptField(accNum);
+                }
+
+                return {
+                    ...acc,
+                    accountNumber: accNum
+                };
+            });
 
             currentSettings.payment = {
                 ...(currentSettings.payment || {}),
                 ...payload.payment,
+                bankAccounts: sanitizedAccounts,
                 minPayoutAmount: validMinPayout
             };
-            const defaultBank = payload.payment.bankAccounts?.find(b => b.isDefault) || payload.payment.bankAccounts?.[0];
+            const defaultBank = sanitizedAccounts.find((b: any) => b.isDefault) || sanitizedAccounts[0];
             if (defaultBank) {
                 shop.bank_info = {
                     bank_code: defaultBank.bankCode,
                     account_number: defaultBank.accountNumber,
                     account_holder: defaultBank.accountHolder
                 };
+                shop.markModified('bank_info');
             }
         }
 
@@ -290,6 +339,21 @@ export class SellerSettingsService {
 
         logger.info(`Updated seller settings for shop: ${shop._id} (Owner: ${sellerId})`);
         return this.getSettings(sellerId);
+    }
+
+    /**
+     * Lấy danh sách tài khoản ngân hàng đã giải mã (chỉ dùng nội bộ Backend cho đối soát/rút tiền)
+     */
+    static async getDecryptedBankAccounts(sellerId: string): Promise<any[]> {
+        if (!mongoose.Types.ObjectId.isValid(sellerId)) return [];
+        const ownerId = new mongoose.Types.ObjectId(sellerId);
+        const shop = await Shop.findOne({ owner_id: ownerId });
+        if (!shop) return [];
+        const accounts = shop.settings?.payment?.bankAccounts || [];
+        return accounts.map((b: any) => ({
+            ...b,
+            accountNumber: decryptField(b.accountNumber || '')
+        }));
     }
 }
 

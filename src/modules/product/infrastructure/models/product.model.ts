@@ -49,6 +49,8 @@ export interface IProduct extends Document {
     }[];
     average_rating?: number;
     rating_count?: number;
+    // Do script seed ghi thẳng; khai báo để query lọc seed_ref có kiểu.
+    seed_ref?: string;
     created_at: Date;
     updated_at: Date;
 }

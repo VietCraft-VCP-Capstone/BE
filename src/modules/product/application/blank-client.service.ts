@@ -1,4 +1,5 @@
 import { config } from '../../../app/config';
+import { decryptField } from '../../../shared/utils/crypto.service';
 
 export interface BlankVariation {
     sku: string;
@@ -204,7 +205,7 @@ export class BlankClient {
                 try {
                     const blanks = await fetchBlanksFromUrl(
                         printer.api_url,
-                        printer.api_key,
+                        decryptField(printer.api_key || ''),
                         printer.printer_id,
                         printer.printer_name
                     );
