@@ -110,18 +110,13 @@ export class ListingHealthService {
         return { product: product as OwnedProduct };
     }
 
-    /**
-     * Điểm sức khoẻ mới nhất của MỘT sản phẩm, kiểm quyền theo shop_id của seller
-     * đang đăng nhập. Trả envelope sẵn sàng để route chỉ việc `res.status(...).json(...)`.
-     */
+    /** Điểm mới nhất của một sản phẩm, có kiểm quyền theo shop. */
     static async detail(productId: string, shopId: string): Promise<{ httpStatus: number; body: Envelope<HealthDetailData> | { error: string; field?: string; resource?: string } }> {
         if (!this.isValidObjectId(productId)) {
             return { httpStatus: 400, body: { error: 'invalid_param', field: 'id' } };
         }
 
-        // shop_id không ở dạng ObjectId (ví dụ shop mẫu đời cũ dạng `shp_00017`): F29 chỉ
-        // chấm trên dữ liệu thật nên chưa có điểm nào gắn với dạng mã này — báo "chưa đủ
-        // dữ liệu" thay vì 403, cùng cách `f29_health.py` xử (`la_shop_live`).
+        // Shop mẫu (mã không phải ObjectId) chưa có điểm: trả insufficient thay vì 403.
         if (!this.isValidObjectId(shopId)) {
             return {
                 httpStatus: 200,
@@ -182,10 +177,7 @@ export class ListingHealthService {
         };
     }
 
-    /**
-     * Điểm theo ngày trong `days` ngày gần nhất, tăng dần theo ngày. Dưới 2 điểm thì
-     * chưa vẽ được xu hướng → insufficient_data, `sample_size` cho biết đã có mấy ngày.
-     */
+    /** Điểm theo ngày; dưới 2 ngày thì insufficient. */
     static async history(productId: string, shopId: string, days: number): Promise<{ httpStatus: number; body: Envelope<HealthHistoryPoint[]> | { error: string; field?: string; resource?: string } }> {
         if (!this.isValidObjectId(productId)) {
             return { httpStatus: 400, body: { error: 'invalid_param', field: 'id' } };
@@ -244,10 +236,7 @@ export class ListingHealthService {
         return { httpStatus: 200, body: ok(points, meta) };
     }
 
-    /**
-     * Danh sách sản phẩm THẬT của shop (loại `seed_ref`), kèm điểm mới nhất nếu có.
-     * Sắp theo điểm giảm dần, sản phẩm chưa có điểm xếp cuối.
-     */
+    /** Sản phẩm thật của shop kèm điểm mới nhất, điểm cao trước, chưa có điểm xếp cuối. */
     static async list(shopId: string, statusFilter?: HealthStatus): Promise<{ httpStatus: number; body: Envelope<HealthListData> | { error: string; field?: string; expected?: string } }> {
         if (!this.isValidObjectId(shopId)) {
             return {
@@ -328,9 +317,7 @@ export class ListingHealthService {
             };
         });
 
-        // model_version chung cho cả shop: lấy bản ghi nào có, vì mọi sản phẩm
-        // đang chấm bằng cùng một version tại một thời điểm (không có đa version
-        // song song trong thiết kế hiện tại).
+        // Mọi sản phẩm dùng chung một model_version tại một thời điểm.
         const shopModelVersion = [...latestByProduct.values()]
             .map(v => v.model_version)
             .find((v): v is string => Boolean(v)) || MODEL_VERSION_FALLBACK;

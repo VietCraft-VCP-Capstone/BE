@@ -29,12 +29,7 @@ const isBot = (userAgent: string): boolean => {
 
 export class EventService {
 
-    /**
-     * Record a product event (view or add_to_cart)
-     * Filters: bot, owner, admin
-     * Deduplication: 30-min window per (session_id, product_id, event_type)
-     * Rate limiting: max 10 views per IP per minute
-     */
+    /** Ghi view/add_to_cart: lọc bot và chủ shop, chống trùng 30 phút, tối đa 10 view/IP/phút. */
     static async recordEvent(
         productId: string,
         sessionId: string,
@@ -72,8 +67,7 @@ export class EventService {
                     return false;
                 }
 
-                // Check if user is admin (assuming admin check via role)
-                // This would need to be adjusted based on actual admin role structure
+                // Chưa lọc admin.
             }
 
             // Rate limiting: max 10 views per IP per minute (only for client-side events)

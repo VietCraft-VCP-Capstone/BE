@@ -7,12 +7,7 @@ import mongoose from 'mongoose';
 export class RollupJob {
     private static isRunning = false;
 
-    /**
-     * Run the nightly rollup job
-     * - Count product_events from last 24 hours and aggregate to product_daily_metrics
-     * - Count orders from last 24 hours (via filter) and aggregate to product_daily_metrics
-     * - Use upsert to update metrics
-     */
+    /** Gom view, add_to_cart và đơn 24h vào product_daily_metrics. */
     static async run(): Promise<void> {
         if (this.isRunning) {
             logger.warn('Rollup job is already running, skipping');
@@ -160,9 +155,7 @@ export class RollupJob {
         }
     }
 
-    /**
-     * Schedule the rollup job to run every night at 00:00 UTC
-     */
+    /** Chạy mỗi ngày lúc 00:00 UTC. */
     static schedule(): void {
         logger.info('Scheduling nightly rollup job at 00:00 UTC');
 

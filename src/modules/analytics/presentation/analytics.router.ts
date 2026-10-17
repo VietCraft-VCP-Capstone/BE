@@ -4,11 +4,7 @@ import { optionalAuthenticate, AuthenticatedRequest } from '../../../app/middlew
 
 const router = Router();
 
-/**
- * POST /api/events/view
- * Record a product view event
- * Body: { product_id: string, session_id: string }
- */
+/** Ghi lượt xem sản phẩm. Body: { product_id, session_id } */
 router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { product_id, session_id } = req.body;
@@ -36,11 +32,7 @@ router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedReque
     }
 });
 
-/**
- * POST /api/events/add-to-cart
- * Record a product add-to-cart event (optional client-side endpoint)
- * Body: { product_id: string, session_id: string }
- */
+/** Ghi lượt thêm giỏ. Body: { product_id, session_id } */
 router.post('/events/add-to-cart', optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { product_id, session_id } = req.body;

@@ -117,8 +117,8 @@ export class CartService {
                 productId,
                 sessionId,
                 'add_to_cart',
-                '', // user-agent will be empty for server-side events
-                '', // ip will be empty for server-side events
+                '',
+                '', // sự kiện phía server: không có user-agent, ip
                 userId
             ).catch(err => console.error('Failed to record add_to_cart event:', err));
         } catch (err) {

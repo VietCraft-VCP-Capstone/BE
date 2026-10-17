@@ -1,7 +1,4 @@
-/**
- * Body của "xem điểm nếu sửa" (F29, plan §4.3) trước khi chuyển sang AI. Chỉ nhận
- * 4 đòn bẩy seller sửa được; trần khớp `HealthPreviewBody` bên `f29_health.py`.
- */
+/** Kiểm body "xem điểm nếu sửa": 4 chỉ số, trần khớp HealthPreviewBody bên AI. */
 
 export const PREVIEW_LIMITS = {
     n_images: 50,

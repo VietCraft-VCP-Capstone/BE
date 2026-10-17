@@ -1,13 +1,4 @@
-/**
- * Vỏ phản hồi {data, meta, error} dùng cho các route BE đọc trực tiếp Mongo (không
- * qua AI gateway). Cố tình mô phỏng đúng hình dạng mà `vc-ai/AI-Analysic/app/api/v1/
- * _template.py` dựng cho 16 endpoint AI, để FE (`useInsight`, `SourceFooter`) dùng
- * chung một nhánh xử lý cho mọi nguồn — không cần biết route nào gọi AI, route nào
- * đọc thẳng collection.
- *
- * Nguyên tắc số một (giống _template.py): THIẾU ≠ 0. Không đủ dữ liệu thì trả
- * `insufficient()`, không trả điểm 0 hay mảng rỗng giả.
- */
+/** Vỏ {data, meta, error} giống AI để FE xử lý chung; thiếu dữ liệu trả insufficient(), không trả 0. */
 
 export type EnvelopeStatus = 'ok' | 'partial' | 'insufficient_data';
 

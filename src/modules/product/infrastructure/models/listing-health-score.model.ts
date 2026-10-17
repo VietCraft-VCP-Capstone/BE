@@ -10,8 +10,7 @@ export interface IAxis {
 
 export interface ITodo {
     type: string;
-    // Thiếu so với §4.3: FE cần `field` để dẫn tới đúng ô trong trình soạn, và
-    // `current_value`/`target` để hiện "giá trị hiện tại · mốc" cạnh `message`.
+    // field, current_value, target để FE dẫn tới đúng ô và hiện "hiện tại · mốc".
     field?: string;
     message: string;
     current_value?: number | string | null;

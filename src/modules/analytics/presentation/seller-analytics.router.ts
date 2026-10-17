@@ -21,9 +21,7 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/overview', ai: () => '/api/analytics/shop/overview', query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/timeseries', ai: p => `/api/analytics/listings/${p.id}/timeseries`, query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/conversion', ai: p => `/api/analytics/listings/${p.id}/conversion` },
-    // '/listings/:id/health' và '/listings/health' KHÔNG còn trong bảng này — BE đọc
-    // thẳng `listing_health_scores` (plan §5), xem các route riêng bên dưới.
-    // Xem điểm nếu sửa phải chấm lại bằng engine nên vẫn đi qua AI.
+    // Điểm và danh sách đọc thẳng DB ở route riêng bên dưới; chỉ preview còn đi qua AI.
     { method: 'post', path: '/listings/:id/health/preview', ai: p => `/api/analytics/listings/${p.id}/health/preview`, parseBody: parsePreviewBody },
     { method: 'get', path: '/alerts', ai: () => '/api/notifications/alerts', query: ['period'] },
     { method: 'get', path: '/categories', ai: () => '/api/analytics/shop/categories/revenue', query: ['timeRange'] },
@@ -83,11 +81,7 @@ router.get('/context', async (req: AuthenticatedRequest, res: Response) => {
 
 const HEALTH_STATUSES: HealthStatus[] = ['good', 'needs_improvement', 'poor'];
 
-/**
- * F29 · Điểm sức khoẻ MỘT sản phẩm. Đọc thẳng `listing_health_scores`, KHÔNG gọi AI
- * (plan §5: "BE đọc thẳng collection"). Nhờ vậy AI tắt không làm route này lỗi — seller
- * vẫn thấy điểm gần nhất kèm `computed_at` của lần job chạy trước.
- */
+/** Điểm một sản phẩm, đọc thẳng listing_health_scores nên AI tắt vẫn chạy. */
 router.get('/listings/:id/health', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const viewer = await viewerOrReply(req, res);
@@ -122,10 +116,7 @@ router.get('/listings/:id/health/history', async (req: AuthenticatedRequest, res
     }
 });
 
-/**
- * F29 · Danh sách sản phẩm thật của shop (loại `seed_ref`) kèm điểm mới nhất. Dùng
- * điền `ListingsPage` ở FE. `?status=good|needs_improvement|poor` để lọc.
- */
+/** Danh sách sản phẩm thật kèm điểm mới nhất, lọc theo ?status. */
 router.get('/listings/health', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const rawStatus = req.query.status;
