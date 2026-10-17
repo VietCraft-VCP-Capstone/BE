@@ -50,7 +50,6 @@ export interface IProduct extends Document {
     }[];
     average_rating?: number;
     rating_count?: number;
-    // Vietnamese Full-Text & Fast Search fields
     title_norm?: string;
     title_lc?: string;
     title_prefixes?: string[];
@@ -165,7 +164,6 @@ const ProductSchema = new Schema<IProduct>({
     design_placements: { type: [DesignPlacementSchema], default: [] },
     average_rating: { type: Number, default: 5.0, min: 0, max: 5, index: true },
     rating_count: { type: Number, default: 0 },
-    // Search & Ranking Optimization
     title_norm: { type: String },
     title_lc: { type: String },
     title_prefixes: { type: [String], default: [] },

@@ -115,12 +115,10 @@ export class CartService {
 
         const cart = await CartService.ensureCart(ownerId);
 
-        // Chuẩn hóa và gộp các mặt hàng trùng lặp nếu có từ trước
         CartService.mergeDuplicateItems(cart);
 
         const targetVariantId = variant ? variant._id.toString() : (variantId || undefined);
 
-        // Tìm kiếm xem đã có trong giỏ chưa
         const existingIndex = cart.items.findIndex(
             (item: any) => {
                 const itemProdId = (item.product_id?._id || item.product_id)?.toString();
@@ -140,7 +138,6 @@ export class CartService {
         }
 
         if (existingIndex > -1) {
-            // Đã có -> Chỉ tăng số lượng
             cart.items[existingIndex].quantity = currentQty + quantity;
             if (targetVariantId && !cart.items[existingIndex].variant_id) {
                 cart.items[existingIndex].variant_id = variant ? variant._id : new mongoose.Types.ObjectId(targetVariantId);
@@ -148,7 +145,6 @@ export class CartService {
             if (customNotes) cart.items[existingIndex].custom_notes = customNotes;
             cart.items[existingIndex].updated_at = new Date();
         } else {
-            // Chưa có -> Mới thêm dòng mới
             cart.items.push({
                 product_id: new mongoose.Types.ObjectId(productId),
                 variant_id: variant ? variant._id : (variantId && mongoose.Types.ObjectId.isValid(variantId) ? new mongoose.Types.ObjectId(variantId) : undefined),

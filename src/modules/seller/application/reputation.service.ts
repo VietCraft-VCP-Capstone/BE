@@ -18,41 +18,33 @@ export interface ShopRiskProfile {
     recommendation: string;
 }
 
+const BANDS: { min: number; tier: ReputationTier; risk: ShopRiskProfile['risk_level']; recommendation: string }[] = [
+    { min: 90, tier: 'TRUSTED', risk: 'LOW', recommendation: 'Shop có chỉ số uy tín xuất sắc (SRS ≥ 90). Tiền sử tuân thủ rất tốt. Ưu tiên xem xét bằng chứng bảo vệ quyền lợi Shop.' },
+    { min: 70, tier: 'NORMAL', risk: 'MEDIUM', recommendation: 'Shop ở mức tiêu chuẩn. Đối chiếu khách quan bằng chứng video khui hàng của Buyer và ảnh xuất xưởng.' },
+    { min: 50, tier: 'WARNING', risk: 'HIGH', recommendation: 'CẢNH BÁO: Shop có điểm uy tín thấp và tỷ lệ khiếu nại tăng cao gần đây. Khuyến nghị phán quyết bảo vệ Buyer nếu bằng chứng hợp lệ.' },
+    { min: -Infinity, tier: 'RESTRICTED', risk: 'CRITICAL', recommendation: 'NGUY CƠ CAO (SRS < 50): Shop bị hạn chế hoạt động do vi phạm nghiêm trọng. Khuyến nghị duyệt hoàn tiền ngay cho Buyer và cấn trừ ví Shop.' },
+];
+
+const bandOf = (score: number) => BANDS.find(b => score >= b.min)!;
+const scoreOf = (shop: IShop) => typeof shop.reputation_score === 'number' ? shop.reputation_score : 80;
+
 export class ReputationService {
-    /**
-     * Xác định phân tầng của Shop dựa trên điểm số (0 - 100)
-     */
     static calculateTier(score: number): ReputationTier {
-        if (score >= 90) return 'TRUSTED';
-        if (score >= 70) return 'NORMAL';
-        if (score >= 50) return 'WARNING';
-        return 'RESTRICTED';
+        return bandOf(score).tier;
     }
 
-    /**
-     * Tìm Shop theo Shop ID hoặc User Owner ID (hỗ trợ cả mock ID và Mongo ID)
-     */
+    /** Nhận Shop _id, owner_id, slug hoặc tên shop. */
     static async resolveShop(sellerOrShopId: string | mongoose.Types.ObjectId): Promise<IShop | null> {
-        if (!sellerOrShopId) return null;
-        const idStr = String(sellerOrShopId).trim();
+        const idStr = String(sellerOrShopId ?? '').trim();
         if (!idStr) return null;
 
-        // Thử tìm theo Shop _id
         if (mongoose.Types.ObjectId.isValid(idStr)) {
-            const byId = await Shop.findById(idStr);
-            if (byId) return byId;
-
-            const byOwner = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(idStr) });
-            if (byOwner) return byOwner;
+            const shop = await Shop.findById(idStr) || await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(idStr) });
+            if (shop) return shop;
         }
-
-        // Tìm fallback theo slug hoặc owner_id dạng string nếu có
         return Shop.findOne({ $or: [{ slug: idStr }, { shop_name: idStr }] });
     }
 
-    /**
-     * Trừ điểm vi phạm và lưu log kiểm toán bất biến
-     */
     static async deductPoints(
         shop: IShop,
         amount: number,
@@ -61,37 +53,27 @@ export class ReputationService {
         refId?: string,
         actor?: { id?: string; role?: string }
     ): Promise<{ shop: IShop; log: IReputationLog }> {
-        // Chống trừ điểm trùng lặp cho cùng 1 vụ việc (Idempotency Guard)
         if (refId) {
-            const existed = await ReputationLog.findOne({
-                shop_id: shop._id,
-                reference_id: refId,
-                reference_type: refType
-            });
+            const existed = await ReputationLog.findOne({ shop_id: shop._id, reference_id: refId, reference_type: refType });
             if (existed) {
                 logger.warn(`[REPUTATION] Đã trừ điểm trước đó cho Shop ${shop._id}, refId: ${refId}, refType: ${refType}. Bỏ qua để tránh phạt trùng lặp.`);
                 return { shop, log: existed };
             }
         }
 
-        const currentScore = typeof shop.reputation_score === 'number' ? shop.reputation_score : 80;
+        const currentScore = scoreOf(shop);
         const newScore = Math.max(0, currentScore - Math.abs(amount));
-        const delta = -(currentScore - newScore);
 
         shop.reputation_score = newScore;
         shop.reputation_tier = this.calculateTier(newScore);
-        shop.clean_streak_orders = 0; // Vi phạm làm gãy chuỗi đơn sạch
+        shop.clean_streak_orders = 0;
         shop.penalty_points_30d = (shop.penalty_points_30d || 0) + Math.abs(amount);
-
-        if (refType === 'DISPUTE') {
-            shop.dispute_count_30d = (shop.dispute_count_30d || 0) + 1;
-        }
-
+        if (refType === 'DISPUTE') shop.dispute_count_30d = (shop.dispute_count_30d || 0) + 1;
         await shop.save();
 
         const log = await ReputationLog.create({
             shop_id: shop._id,
-            delta,
+            delta: newScore - currentScore,
             balance_after: newScore,
             reason,
             reference_type: refType,
@@ -104,9 +86,6 @@ export class ReputationService {
         return { shop, log };
     }
 
-    /**
-     * Helper trừ điểm tự động theo seller_id hoặc shop_id
-     */
     static async deductBySellerOrShop(
         sellerOrShopId: string | mongoose.Types.ObjectId,
         amount: number,
@@ -128,50 +107,34 @@ export class ReputationService {
         }
     }
 
-    /**
-     * Ghi nhận đơn hàng hoàn thành sạch (DELIVERED không lỗi)
-     * Đủ 10 đơn sạch liên tiếp -> Cộng +5 điểm hồi phục (trần 100đ)
-     */
-    static async recordCleanOrder(
-        sellerOrShopId: string | mongoose.Types.ObjectId,
-        orderId?: string
-    ): Promise<IShop | null> {
+    /** Đơn DELIVERED sạch: đủ 10 đơn liên tiếp thì +5 điểm (trần 100). */
+    static async recordCleanOrder(order: any): Promise<IShop | null> {
         try {
-            const shop = await this.resolveShop(sellerOrShopId);
+            const shop = await this.resolveShop(order.seller_id || order.shop_id?._id || order.shop_id);
             if (!shop) return null;
 
-            const currentStreak = (shop.clean_streak_orders || 0) + 1;
-            const currentScore = typeof shop.reputation_score === 'number' ? shop.reputation_score : 80;
-
-            if (currentStreak >= 10) {
-                // Đạt mốc thưởng
-                shop.clean_streak_orders = 0; // Reset streak sau khi nhận thưởng
-                if (currentScore < 100) {
-                    const newScore = Math.min(100, currentScore + 5);
-                    const delta = newScore - currentScore;
-                    shop.reputation_score = newScore;
-                    shop.reputation_tier = this.calculateTier(newScore);
-
-                    await shop.save();
-
-                    await ReputationLog.create({
-                        shop_id: shop._id,
-                        delta,
-                        balance_after: newScore,
-                        reason: 'Hoàn thành chuỗi 10 đơn hàng sạch liên tiếp không khiếu nại (+5đ).',
-                        reference_type: 'STREAK',
-                        reference_id: orderId,
-                        actor_role: 'SYSTEM'
-                    });
-
-                    logger.info(`[REPUTATION] Shop ${shop._id} rewarded +5 pts for 10 clean orders. Balance: ${newScore}`);
-                    return shop;
-                }
-            } else {
-                shop.clean_streak_orders = currentStreak;
+            const streak = (shop.clean_streak_orders || 0) + 1;
+            const currentScore = scoreOf(shop);
+            const reward = streak >= 10 && currentScore < 100;
+            shop.clean_streak_orders = streak >= 10 ? 0 : streak;
+            if (reward) {
+                shop.reputation_score = Math.min(100, currentScore + 5);
+                shop.reputation_tier = this.calculateTier(shop.reputation_score);
             }
-
             await shop.save();
+
+            if (reward) {
+                await ReputationLog.create({
+                    shop_id: shop._id,
+                    delta: shop.reputation_score - currentScore,
+                    balance_after: shop.reputation_score,
+                    reason: 'Hoàn thành chuỗi 10 đơn hàng sạch liên tiếp không khiếu nại (+5đ).',
+                    reference_type: 'STREAK',
+                    reference_id: order._id?.toString() || order.order_code,
+                    actor_role: 'SYSTEM'
+                });
+                logger.info(`[REPUTATION] Shop ${shop._id} rewarded +5 pts for 10 clean orders. Balance: ${shop.reputation_score}`);
+            }
             return shop;
         } catch (err: any) {
             logger.error(`[REPUTATION] recordCleanOrder failed: ${err.message}`);
@@ -179,48 +142,28 @@ export class ReputationService {
         }
     }
 
-    /**
-     * Lấy hồ sơ rủi ro của Shop phục vụ màn hình Admin Dispute
-     */
     static async getShopRiskProfile(sellerOrShopId: string | mongoose.Types.ObjectId): Promise<ShopRiskProfile | null> {
         const shop = await this.resolveShop(sellerOrShopId);
         if (!shop) return null;
 
-        const score = typeof shop.reputation_score === 'number' ? shop.reputation_score : 80;
-        const tier = shop.reputation_tier || this.calculateTier(score);
-
-        const risk_level = score >= 90 ? 'LOW' : score >= 70 ? 'MEDIUM' : score >= 50 ? 'HIGH' : 'CRITICAL';
-
-        let recommendation = '';
-        if (score >= 90) {
-            recommendation = 'Shop có chỉ số uy tín xuất sắc (SRS ≥ 90). Tiền sử tuân thủ rất tốt. Ưu tiên xem xét bằng chứng bảo vệ quyền lợi Shop.';
-        } else if (score >= 70) {
-            recommendation = 'Shop ở mức tiêu chuẩn. Đối chiếu khách quan bằng chứng video khui hàng của Buyer và ảnh xuất xưởng.';
-        } else if (score >= 50) {
-            recommendation = 'CẢNH BÁO: Shop có điểm uy tín thấp và tỷ lệ khiếu nại tăng cao gần đây. Khuyến nghị phán quyết bảo vệ Buyer nếu bằng chứng hợp lệ.';
-        } else {
-            recommendation = 'NGUY CƠ CAO (SRS < 50): Shop bị hạn chế hoạt động do vi phạm nghiêm trọng. Khuyến nghị duyệt hoàn tiền ngay cho Buyer và cấn trừ ví Shop.';
-        }
-
+        const score = scoreOf(shop);
+        const band = bandOf(score);
         return {
             shop_id: shop._id.toString(),
             shop_name: shop.shop_name,
             reputation_score: score,
-            reputation_tier: tier,
+            reputation_tier: shop.reputation_tier || band.tier,
             clean_streak_orders: shop.clean_streak_orders || 0,
             dispute_count_30d: shop.dispute_count_30d || 0,
             penalty_points_30d: shop.penalty_points_30d || 0,
             average_rating: shop.average_rating || 5.0,
             rating_count: shop.rating_count || 0,
             listing_count: shop.listing_count || 0,
-            risk_level,
-            recommendation
+            risk_level: band.risk,
+            recommendation: band.recommendation
         };
     }
 
-    /**
-     * Lấy lịch sử biến động điểm của Shop
-     */
     static async getLogs(shopId: string | mongoose.Types.ObjectId, limit = 20): Promise<IReputationLog[]> {
         const shop = await this.resolveShop(shopId);
         if (!shop) return [];

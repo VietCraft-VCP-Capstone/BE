@@ -508,13 +508,11 @@ export class ProductsService {
 
         if (filter?.category && filter.category.trim() !== ''
             && filter.category !== 'Tất cả danh mục' && filter.category !== 'ALL') {
-            const safeCat = filter.category.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            query.categories = { $regex: safeCat, $options: 'i' };
+            query.categories = { $regex: escapeRegex(filter.category.trim()), $options: 'i' };
         }
 
         if (filter?.search && filter.search.trim() !== '') {
-            const s = filter.search.trim();
-            const safeRegex = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const safeRegex = escapeRegex(filter.search.trim());
             query.$or = [
                 { title: { $regex: safeRegex, $options: 'i' } },
                 { description: { $regex: safeRegex, $options: 'i' } },
@@ -657,10 +655,6 @@ export class ProductsService {
         }, 120);
     }
 
-    /**
-     * Tìm kiếm sản phẩm thông minh kết hợp tiếng Việt (có dấu + không dấu),
-     * Điểm liên quan (Relevance Text Score + Exact Match Bonus) và Điểm uy tín Gian hàng (SRS Boost).
-     */
     static async search(params: SearchProductsParams): Promise<PaginatedProductsResponseDTO> {
         const q = (typeof params.q === 'string' ? params.q : '').slice(0, 100).trim();
         const norm = normalizeVi(q);
@@ -797,10 +791,6 @@ export class ProductsService {
         return { items, total, page, limit, totalPages, ...(logId && { searchLogId: logId.toString() }) };
     }
 
-    /**
-     * Gợi ý nhanh (Search-as-you-type) phục vụ Dropdown Popover tại Header.
-     * Trả về: Top 6 từ khoá gợi ý, Top 2 gian hàng, Top 3 danh mục.
-     */
     static async suggest(queryStr?: string, userId?: string): Promise<SuggestResultDTO> {
         const q = (typeof queryStr === 'string' ? queryStr : '').slice(0, 60).trim();
         const norm = normalizeVi(q);
@@ -820,7 +810,6 @@ export class ProductsService {
             moderation_status: 'APPROVED',
             shop_id: { $nin: restrictedShopIds },
         };
-        // Tận dụng chỉ mục trên title_prefixes, tags_norm, categories_norm và title_norm
         const prefixOr = [
             { title_prefixes: norm },
             { title_prefixes: { $all: terms } },
@@ -830,7 +819,6 @@ export class ProductsService {
         ];
 
         const [textHits, matchingShops, matchingCategories, loggedKeywords, banned] = await Promise.all([
-            // Pha 1: khớp nguyên từ bằng $text, ưu tiên điểm textScore
             MongoProduct.find(
                 { ...prodBase, $text: { $search: terms.map(t => `"${t}"`).join(' ') } },
                 { ...SUGGEST_PROJECTION, score: { $meta: 'textScore' } }
@@ -896,7 +884,6 @@ export class ProductsService {
         };
     }
 
-    /** Từ khóa thịnh hành: AI Analyst → collection trend → danh sách dự phòng (xem trending-keywords.ts). */
     static async getTrendingKeywords(limit = 8): Promise<string[]> {
         return fetchTrendingKeywords(limit);
     }

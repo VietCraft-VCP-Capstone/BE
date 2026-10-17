@@ -12,10 +12,6 @@ const FALLBACK_KEYWORDS = [
 
 let cache: { keywords: string[]; expiresAt: number } | null = null;
 
-export function resetTrendingCache(): void {
-    cache = null;
-}
-
 /** Cache cả nhóm POOL từ khóa rồi cắt theo limit, nên các limit khác nhau dùng chung một lần lấy dữ liệu. */
 export async function getTrendingKeywords(limit = 8): Promise<string[]> {
     const now = Date.now();

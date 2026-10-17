@@ -56,22 +56,8 @@ export async function syncProductDenorm(productId: mongoose.Types.ObjectId | str
     }
 }
 
-ProductVariantSchema.post('save', function () {
-    if (this.product_id) {
-        syncProductDenorm(this.product_id);
-    }
-});
-
-ProductVariantSchema.post('findOneAndUpdate', function (doc) {
-    if (doc && doc.product_id) {
-        syncProductDenorm(doc.product_id);
-    }
-});
-
-ProductVariantSchema.post('findOneAndDelete', function (doc) {
-    if (doc && doc.product_id) {
-        syncProductDenorm(doc.product_id);
-    }
-});
+ProductVariantSchema.post('save', function () { void syncProductDenorm(this.product_id); });
+ProductVariantSchema.post('findOneAndUpdate', (doc) => { void syncProductDenorm(doc?.product_id); });
+ProductVariantSchema.post('findOneAndDelete', (doc) => { void syncProductDenorm(doc?.product_id); });
 
 export const ProductVariant = mongoose.model<IProductVariant>('ProductVariant', ProductVariantSchema, 'product_variants');

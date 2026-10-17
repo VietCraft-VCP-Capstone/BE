@@ -268,17 +268,14 @@ export class OrdersService {
       order_hour_of_week: now.getDay() * 24 + now.getHours(),
     });
 
-    // Trừ tồn kho biến thể tương ứng và đồng bộ tồn kho sản phẩm cha
+    // Trừ tồn kho biến thể tương ứng
     for (const it of orderItems) {
       if (it.variant_id) {
         await ProductVariant.updateOne(
           { _id: it.variant_id },
           { $inc: { stock_quantity: -it.quantity } }
         ).catch(err => console.error('[STOCK] Lỗi trừ tồn kho khi tạo đơn:', err?.message || err));
-
-        if (it.product_id) {
-          syncProductDenorm(it.product_id).catch(() => {});
-        }
+        void syncProductDenorm(it.product_id);
       }
     }
 
@@ -334,11 +331,7 @@ export class OrdersService {
             { _id: vId },
             { $inc: { stock_quantity: it.quantity || 1 } }
           ).catch(err => console.error('[STOCK] Lỗi hoàn tồn kho:', err?.message || err));
-
-          const pId = it.product_id?._id || it.product_id;
-          if (pId) {
-            syncProductDenorm(pId).catch(() => {});
-          }
+          void syncProductDenorm(it.product_id?._id || it.product_id);
         }
       }
     }
@@ -1054,12 +1047,7 @@ export class OrdersService {
 
     await order.save();
 
-    if (order.order_status === 'DELIVERED') {
-      const sellerOrShopId = (order as any).seller_id || (order.shop_id as any)?._id || order.shop_id;
-      if (sellerOrShopId) {
-        void ReputationService.recordCleanOrder(sellerOrShopId, order._id?.toString() || order.order_code);
-      }
-    }
+    if (order.order_status === 'DELIVERED') void ReputationService.recordCleanOrder(order);
 
     await WebhookLog.create({
       provider: 'PRINTING_SHOP',
@@ -1154,11 +1142,7 @@ export class OrdersService {
     });
     await order.save();
 
-    // Hồi phục uy tín: Ghi nhận đơn hàng sạch khi giao thành công
-    const sellerOrShopId = (order as any).seller_id || (order.shop_id as any)?._id || order.shop_id;
-    if (sellerOrShopId) {
-      void ReputationService.recordCleanOrder(sellerOrShopId, order._id?.toString() || order.order_code);
-    }
+    void ReputationService.recordCleanOrder(order);
 
     // Thông báo realtime cho Người bán
     const shopOwnerId = (order.shop_id as any)?.owner_id;

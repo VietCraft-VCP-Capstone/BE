@@ -130,15 +130,6 @@ router.get('/meta/trending-keywords', async (req, res) => {
     }
 });
 
-router.get('/trending-keywords', async (req, res) => {
-    try {
-        const limit = Number(req.query.limit) || 8;
-        res.json(await ProductsService.getTrendingKeywords(limit));
-    } catch (error: any) {
-        res.status(500).json({ error: error.message || 'Lỗi khi lấy từ khóa thịnh hành.' });
-    }
-});
-
 router.get('/meta/tags', async (req, res) => {
     try {
         res.json(await ProductsService.listTags());

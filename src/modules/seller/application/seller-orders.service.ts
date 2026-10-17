@@ -263,12 +263,7 @@ export class SellerOrdersService {
         });
         await order.save();
 
-        if (next === 'DELIVERED') {
-            const sellerOrShopId = (order as any).seller_id || (order.shop_id as any)?._id || order.shop_id;
-            if (sellerOrShopId) {
-                void ReputationService.recordCleanOrder(sellerOrShopId, order._id?.toString() || order.order_code);
-            }
-        }
+        if (next === 'DELIVERED') void ReputationService.recordCleanOrder(order);
 
         // Gửi thông báo thời gian thực cho người mua về cập nhật trạng thái đơn hàng
         try {
