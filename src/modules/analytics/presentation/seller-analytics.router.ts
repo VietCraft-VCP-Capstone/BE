@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { Router, Response } from 'express';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { AiGatewayService, AnalyticsViewer } from '../application/ai-gateway.service';
+import { CompetitorTrackingService, TrackingError } from '../application/competitor-tracking.service';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { BlankClient, Blank } from '../../product/application/blank-client.service';
 import { ListingHealthService, HealthStatus } from '../application/listing-health.service';
@@ -40,6 +41,9 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/forecast/niches', ai: () => '/api/analytics/forecast/niches', query: ['categoryId'] },
     { method: 'get', path: '/forecast/radar', ai: () => '/api/analytics/forecast/radar' },
     { method: 'get', path: '/forecast/recommendations', ai: () => '/api/analytics/forecast/recommendations' },
+    // Gợi ý sản phẩm thông minh (F42)
+    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'productType', 'keywords', 'blankCost'] },
+    { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion' },
 ];
 
 const MAX_QUERY_LENGTH = 120;
@@ -139,6 +143,22 @@ async function viewerOrReply(req: AuthenticatedRequest, res: Response): Promise<
         return null;
     }
     return viewer;
+}
+
+/**
+ * Thêm / bỏ theo dõi của gian hàng THẬT: BE tự ghi vào follow của sàn, không chuyển sang AI.
+ * Service AI chỉ đọc danh sách đó khi trả GET /competitor-tracking.
+ */
+async function replyLiveTracking(method: Method, userId: string, target: string, viewer: AnalyticsViewer, res: Response) {
+    try {
+        const data = method === 'post'
+            ? await CompetitorTrackingService.track(userId, target)
+            : await CompetitorTrackingService.untrack(userId, target);
+        return res.json({ data, meta: CompetitorTrackingService.meta(viewer.live_shop_id, data.slots_used), error: null, viewer });
+    } catch (error) {
+        if (error instanceof TrackingError) return res.status(error.status).json(error.body);
+        throw error;
+    }
 }
 
 const router = Router();
@@ -266,10 +286,18 @@ for (const route of ROUTES) {
                 const parsed = route.parseBody(req.body);
                 if ('invalid' in parsed) return res.status(400).json({ error: 'invalid_param', field: parsed.invalid });
                 body = parsed.body;
+            } else if (req.body && typeof req.body === 'object') {
+                body = req.body;
             }
 
             const viewer = await viewerOrReply(req, res);
             if (!viewer) return;
+
+            // Gian hàng thật theo dõi đối thủ bằng follow của sàn. Chỉ shop mẫu mới chuyển sang
+            // service AI (danh sách riêng trong dữ liệu mồi).
+            if (route.forwardShopIdBody && !viewer.demo) {
+                return await replyLiveTracking(route.method, req.user!.id, String(body!.shop_id), viewer, res);
+            }
 
             const result = await AiGatewayService.call({
                 method: route.method.toUpperCase() as 'GET' | 'POST' | 'DELETE',

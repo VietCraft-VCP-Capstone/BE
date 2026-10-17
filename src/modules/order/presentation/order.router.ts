@@ -29,6 +29,20 @@ function verifyPaymentCallback(req: Request, res: Response, next: NextFunction) 
     next();
 }
 
+/**
+ * POST /api/orders/calculate-shipping
+ * Tính toán phí vận chuyển linh hoạt theo gian hàng và địa chỉ nhận hàng
+ */
+router.post('/calculate-shipping', async (req: Request, res: Response) => {
+    try {
+        const { shopId, address } = req.body;
+        const result = await OrdersService.resolveShippingFee(shopId, address);
+        res.json(result);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Lỗi khi tính phí vận chuyển.' });
+    }
+});
+
 router.post('/', authenticate, async (req: AuthenticatedRequest, res) => {
     try {
         const buyerId = req.user!.id;

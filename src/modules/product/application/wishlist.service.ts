@@ -4,7 +4,7 @@ import { ProductVariant } from '../infrastructure/models/product-variant.model';
 
 const PRODUCT_POPULATE = {
     path: 'product_ids',
-    select: 'title images product_type shop_id listing_status',
+    select: 'title images product_type shop_id listing_status average_rating rating_count',
     populate: {
         path: 'shop_id',
         select: 'shop_name logo'

@@ -22,6 +22,84 @@ import { ReputationService } from "../../seller/application/reputation.service";
 
 export class OrdersService {
 
+  /**
+   * Tính toán phí vận chuyển linh hoạt dựa theo cấu hình của Shop và địa chỉ người nhận.
+   * - Flat Rate: Phí cố định (hoặc 0đ nếu Freeship)
+   * - Zone-based: Phân vùng Nội tỉnh / Nội vùng / Liên vùng
+   */
+  static async resolveShippingFee(shopId?: string | mongoose.Types.ObjectId | null, address?: any): Promise<{
+    shippingFee: number;
+    pricingType: 'FLAT_RATE' | 'ZONE_BASED';
+    zoneType: 'intraProvince' | 'intraRegion' | 'interRegion' | 'flatRate';
+    zoneLabel: string;
+    shopProvince: string;
+    destProvince: string;
+  }> {
+    let shippingFee = DEFAULT_SHIPPING_FEE;
+    let pricingType: 'FLAT_RATE' | 'ZONE_BASED' = 'ZONE_BASED';
+    let zoneType: 'intraProvince' | 'intraRegion' | 'interRegion' | 'flatRate' = 'intraRegion';
+    let zoneLabel = 'Tiêu chuẩn';
+    let shopProvince = '';
+    let destProvince = '';
+
+    try {
+      if (shopId) {
+        const shopDoc = await Shop.findById(shopId).select('settings').lean();
+        const shipSettings = shopDoc?.settings?.shipping;
+        if (shipSettings) {
+          pricingType = shipSettings.pricingType || (shipSettings.useFlatRate ? 'FLAT_RATE' : 'ZONE_BASED');
+          shopProvince = shipSettings.province || '';
+
+          if (pricingType === 'FLAT_RATE') {
+            shippingFee = Math.max(0, Number(shipSettings.flatRateFee ?? 0));
+            zoneType = 'flatRate';
+            zoneLabel = shippingFee === 0 ? 'Miễn phí vận chuyển' : 'Đồng giá toàn quốc';
+            return { shippingFee, pricingType, zoneType, zoneLabel, shopProvince, destProvince };
+          }
+
+          if (pricingType === 'ZONE_BASED') {
+            const rawDest = (address?.province || address?.city || address?.address_detail || '').toLowerCase();
+            destProvince = rawDest;
+            const normShop = shopProvince.toLowerCase().replace(/^(thành phố|tỉnh|tp\.|tp)\s+/i, '').trim();
+            const normDest = rawDest.replace(/^(thành phố|tỉnh|tp\.|tp)\s+/i, '').trim();
+            const zoneRates = shipSettings.zoneRates || { intraProvince: 22000, intraRegion: 30000, interRegion: 38000 };
+
+            if (normShop && normDest && (normDest.includes(normShop) || normShop.includes(normDest))) {
+              shippingFee = Number(zoneRates.intraProvince ?? 22000);
+              zoneType = 'intraProvince';
+              zoneLabel = 'Nội tỉnh';
+            } else {
+              const north = ['hà nội', 'hải phòng', 'quảng ninh', 'bắc ninh', 'hà nam', 'hải dương', 'hưng yên', 'nam định', 'ninh bình', 'thái bình', 'vĩnh phúc', 'hà giang', 'cao bằng', 'bắc kạn', 'lạng sơn', 'tuyên quang', 'thái nguyên', 'phú thọ', 'bắc giang', 'lào cai', 'yên bái', 'điện biên', 'lai châu', 'sơn la', 'hòa bình'];
+              const central = ['thanh hóa', 'nghệ an', 'hà tĩnh', 'quảng bình', 'quảng trị', 'thừa thiên huế', 'huế', 'đà nẵng', 'quảng nam', 'quảng ngãi', 'bình định', 'phú yên', 'khánh hòa', 'ninh thuận', 'bình thuận', 'kon tum', 'gia lai', 'đắk lắk', 'đắk nông', 'lâm đồng'];
+
+              const isShopNorth = north.some(p => normShop.includes(p));
+              const isShopCentral = central.some(p => normShop.includes(p));
+              const shopRegion = isShopNorth ? 'NORTH' : (isShopCentral ? 'CENTRAL' : 'SOUTH');
+
+              const isDestNorth = north.some(p => normDest.includes(p));
+              const isDestCentral = central.some(p => normDest.includes(p));
+              const destRegion = isDestNorth ? 'NORTH' : (isDestCentral ? 'CENTRAL' : 'SOUTH');
+
+              if (shopRegion === destRegion) {
+                shippingFee = Number(zoneRates.intraRegion ?? 30000);
+                zoneType = 'intraRegion';
+                zoneLabel = 'Nội vùng';
+              } else {
+                shippingFee = Number(zoneRates.interRegion ?? 38000);
+                zoneType = 'interRegion';
+                zoneLabel = 'Liên vùng';
+              }
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      logger.warn('Failed to calculate dynamic shop shipping fee: ' + e?.message);
+    }
+
+    return { shippingFee, pricingType, zoneType, zoneLabel, shopProvince, destProvince };
+  }
+
   static async createOrder(
     buyerId: string,
     payload: any,
@@ -153,7 +231,8 @@ export class OrdersService {
         }),
       });
     }
-    const shippingFee = DEFAULT_SHIPPING_FEE;
+    const shippingCalc = await OrdersService.resolveShippingFee(shopId, address);
+    let shippingFee = shippingCalc.shippingFee;
     let discount = 0;
     const couponCode = payload.couponCode || payload.coupon_code;
     let isPlatformCoupon = true;
@@ -406,7 +485,8 @@ export class OrdersService {
       order.refund_status = 'REQUESTED';
     }
 
-    await order.save();
+    // Chỉ validate các trường vừa thay đổi: đơn cũ có thể thiếu trường bắt buộc (ward_code, base_cost...) khiến save() báo 400
+    await order.save({ validateModifiedOnly: true });
 
     // Hoàn lại kho và voucher
     await OrdersService.restoreOrderStockAndCoupon(order);
@@ -438,7 +518,7 @@ export class OrdersService {
               changed_at: new Date(),
               note: `Cổng thanh toán đã hoàn trả thành công ${refundAmount.toLocaleString('vi-VN')}đ về tài khoản ngân hàng.`
             });
-            await order.save();
+            await order.save({ validateModifiedOnly: true });
             refundMessageSuffix = ' Số tiền thanh toán đã được hoàn về tài khoản ngân hàng của bạn.';
             logger.info(`[AUTO-REFUND SUCCESS] #${order.order_code}: amount=${refundResult.amount}`);
           } else if (refundResult.status === 'PENDING') {
@@ -448,7 +528,7 @@ export class OrdersService {
               changed_at: new Date(),
               note: `Lệnh hoàn tiền ${refundAmount.toLocaleString('vi-VN')}đ đang được cổng thanh toán xử lý.`
             });
-            await order.save();
+            await order.save({ validateModifiedOnly: true });
             refundMessageSuffix = ' Lệnh hoàn tiền đang được xử lý về tài khoản ngân hàng của bạn.';
             logger.info(`[AUTO-REFUND PENDING] #${order.order_code}: ${refundResult.error || 'Đang xử lý'}`);
           } else {
@@ -459,7 +539,7 @@ export class OrdersService {
               changed_at: new Date(),
               note: `Hoàn tiền tự động không thành công: ${failReason}. Đang chờ đối soát hoàn thủ công.`
             });
-            await order.save();
+            await order.save({ validateModifiedOnly: true });
             refundMessageSuffix = ` Lưu ý: Lệnh hoàn tiền tự động chưa hoàn tất (${failReason}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
             logger.error(`[AUTO-REFUND FAILED] #${order.order_code}: ${failReason}`);
           }
@@ -471,7 +551,7 @@ export class OrdersService {
             changed_at: new Date(),
             note: `Lỗi xử lý hoàn tiền: ${errMsg}. Đang chờ đối soát hoàn thủ công.`
           });
-          await order.save();
+          await order.save({ validateModifiedOnly: true });
           refundMessageSuffix = ` Lưu ý: Lỗi xử lý hoàn tiền (${errMsg}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
           logger.error(`[AUTO-REFUND ERROR] #${order.order_code}: ${errMsg}`);
         }
