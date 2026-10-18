@@ -29,6 +29,7 @@ export const config = {
     nodeEnv: process.env.NODE_ENV || 'development',
     databaseUrl: process.env.DATABASE_URL || '',
     mongoUri: process.env.MONGO_URI || '',
+    mongoDbData: process.env.MONGO_DB_DATA || 'data-collection',
     redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
     jwtSecret: process.env.JWT_SECRET || '',
     aiAnalyticsUrl: process.env.AI_ANALYTICS_URL || 'http://localhost:8000',
