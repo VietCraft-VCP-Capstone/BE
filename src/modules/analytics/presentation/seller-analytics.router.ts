@@ -29,6 +29,7 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/alerts', ai: () => '/api/notifications/alerts', query: ['period'] },
     { method: 'get', path: '/categories', ai: () => '/api/analytics/shop/categories/revenue', query: ['timeRange'] },
     { method: 'get', path: '/competitors', ai: () => '/api/analytics/competitors', query: ['categoryId'] },
+    { method: 'get', path: '/competitor-brief', ai: () => '/api/analytics/competitor-brief' },
     { method: 'get', path: '/shop-comparison', ai: () => '/api/analytics/shop-comparison' },
     { method: 'get', path: '/tag-gap', ai: () => '/api/analytics/tag-gap', query: ['categoryId'] },
     { method: 'get', path: '/pricing', ai: () => '/api/analytics/pricing', query: ['productType', 'price', 'productId'] },
