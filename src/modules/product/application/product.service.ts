@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { Product as MongoProduct } from '../infrastructure/models/product.model';
-import { ProductVariant as MongoVariant, syncProductDenorm } from '../infrastructure/models/product-variant.model';
+import { ProductVariant as MongoVariant } from '../infrastructure/models/product-variant.model';
 import { Shop } from '../infrastructure/models/shop.model';
 import { User } from '../../user/infrastructure/models/user.model';
 import { Category } from '../../category';
@@ -26,10 +26,12 @@ import {
 import { SearchLog } from '../../analytics/infrastructure/models/search-log.model';
 import { BannedKeyword } from '../../analytics/infrastructure/models/banned-keyword.model';
 import { shouldLogSearch, rankSuggestions, SUGGEST_PROJECTION } from './product-search.helpers';
-import { buildKeywordSuggestions, fetchLoggedKeywords } from './suggest-keywords';
+import { buildKeywordSuggestions, fetchLoggedKeywords, fetchPopularKeywords } from './suggest-keywords';
 import { getTrendingKeywords as fetchTrendingKeywords } from './trending-keywords';
-import { buildRelevance, buildSearchPipeline } from './product-search.pipeline';
-import { normalizeVi, nfcLower, hasTone, escapeRegex, extractSearchTerms } from '../../../shared/utils/vietnamese-search.util';
+import { buildTermsMatch, buildSearchPipeline } from './product-search.pipeline';
+import { findSearchHits } from './atlas-search';
+import { getSoldCounts } from './product-sold';
+import { normalizeVi, nfcLower, escapeRegex, accentInsensitive, extractSearchTerms } from '../../../shared/utils/vietnamese-search.util';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
@@ -52,7 +54,7 @@ function getColorHex(colorName: string): string {
     return '#8B5CF6';
 }
 
-function mapToProductItemResponse(product: any, variants: any[], shop?: any): ProductItemResponseDTO {
+function mapToProductItemResponse(product: any, variants: any[], shop?: any, soldCount = 0): ProductItemResponseDTO {
     const mainVariant = variants[0];
     const price = mainVariant ? parseFloat(mainVariant.retail_price?.toString() || '0') : 0;
     const totalStock = variants.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
@@ -157,7 +159,7 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         allowCustomization: Boolean(product.allow_customization),
         customizationType: product.customization_type || 'NONE',
         productType: product.product_type || 'READY_TO_SHIP',
-        soldCount: typeof product.sold_count === 'number' ? product.sold_count : 0,
+        soldCount,
         createdAt: product.created_at ? new Date(product.created_at).toISOString() : new Date().toISOString(),
         updatedAt: product.updated_at ? new Date(product.updated_at).toISOString() : new Date().toISOString(),
     };
@@ -430,7 +432,6 @@ export class ProductsService {
             is_active: true,
         }));
         await MongoVariant.insertMany(docs);
-        await syncProductDenorm(productId);
     }
 
     static async resolveProposedTags(names: string[], sellerId: string): Promise<{ docs: { _id: mongoose.Types.ObjectId; name: string }[]; proposed: number }> {
@@ -601,9 +602,10 @@ export class ProductsService {
         const productIds = docs.map(p => p._id);
         const shopIds = [...new Set(docs.map(p => p.shop_id).filter(Boolean).map((s: any) => s.toString()))];
 
-        const [allVariants, allShops] = await Promise.all([
+        const [allVariants, allShops, sold] = await Promise.all([
             MongoVariant.find({ product_id: { $in: productIds } }).lean(),
-            Shop.find({ _id: { $in: shopIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+            Shop.find({ _id: { $in: shopIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean(),
+            getSoldCounts(productIds)
         ]);
 
         const variantsByProductId = new Map<string, any[]>();
@@ -619,7 +621,8 @@ export class ProductsService {
         return docs.map(mp => mapToProductItemResponse(
             mp,
             variantsByProductId.get(mp._id.toString()) || [],
-            shopsById.get(mp.shop_id?.toString())
+            shopsById.get(mp.shop_id?.toString()),
+            sold.get(mp._id.toString()) ?? 0
         ));
     }
 
@@ -661,12 +664,11 @@ export class ProductsService {
     }
 
     static async search(params: SearchProductsParams): Promise<PaginatedProductsResponseDTO> {
-        const q = (typeof params.q === 'string' ? params.q : '').slice(0, 100).trim();
-        const norm = normalizeVi(q);
-        const terms = extractSearchTerms(q, 8);
+        const q = nfcLower(typeof params.q === 'string' ? params.q : '').slice(0, 100);
+        const terms = [...new Set(q.split(/\s+/).filter(Boolean))].slice(0, 8);
         const page = Math.max(1, Number(params.page) || 1);
-        const limit = Math.min(48, Math.max(1, Number(params.limit || params.pageSize) || 12));
-        const useText = terms.length > 0;
+        const n = Math.floor(Number(params.limit || params.pageSize));
+        const limit = n > 0 ? Math.min(48, n) : 12;
 
         // Chỉ ghi lịch sử ở trang 1 với sort mặc định, tránh thổi phồng khi lọc/phân trang
         const logId = shouldLogSearch(q, page, params) ? new mongoose.Types.ObjectId() : undefined;
@@ -678,30 +680,14 @@ export class ProductsService {
             moderation_status: 'APPROVED',
         };
 
-        if (useText) {
-            match.$text = { $search: terms.map(t => `"${t}"`).join(' ') };
-        }
-
-        const andConditions: any[] = [];
+        const hits = q ? await findSearchHits(q) : null;
+        const andConditions: any[] = hits ? [{ _id: { $in: hits.ids } }] : buildTermsMatch(terms);
 
         if (params.category && params.category !== 'ALL' && params.category !== 'Tất cả danh mục') {
             const rawCat = params.category.trim();
-            if (/^[0-9a-fA-F]{24}$/.test(rawCat)) {
-                andConditions.push({
-                    $or: [
-                        { category_ids: new mongoose.Types.ObjectId(rawCat) },
-                        { categories_norm: normalizeVi(rawCat) }
-                    ]
-                });
-            } else {
-                const normCat = normalizeVi(rawCat);
-                andConditions.push({
-                    $or: [
-                        { categories_norm: normCat },
-                        { categories: { $regex: escapeRegex(rawCat), $options: 'i' } }
-                    ]
-                });
-            }
+            andConditions.push(/^[0-9a-fA-F]{24}$/.test(rawCat)
+                ? { category_ids: new mongoose.Types.ObjectId(rawCat) }
+                : { categories: { $regex: escapeRegex(rawCat), $options: 'i' } });
         }
 
         const pType = params.productType || params.craftType;
@@ -718,65 +704,36 @@ export class ProductsService {
             match.rating_count = { $gt: 0 };
         }
 
+        const priceStock: any = {};
         if (params.minPrice != null && params.minPrice !== '') {
-            match.max_price = { $gte: Number(params.minPrice) };
+            priceStock._maxPrice = { $gte: Number(params.minPrice) };
         }
-
         if (params.maxPrice != null && params.maxPrice !== '') {
-            match.min_price = { $lte: Number(params.maxPrice) };
+            priceStock._minPrice = { $lte: Number(params.maxPrice) };
         }
-
         if (params.inStockOnly === true || params.inStockOnly === 'true') {
-            andConditions.push({
-                $or: [
-                    { product_type: 'POD_TEMPLATE' }, // POD là in theo yêu cầu, luôn sẵn sàng phục vụ
-                    { total_stock: { $gt: 0 } },
-                    { listing_status: 'ACTIVE', product_type: { $ne: 'READY_TO_SHIP' } }
-                ]
-            });
+            // POD in theo yêu cầu, luôn sẵn sàng phục vụ
+            priceStock.$or = [{ product_type: { $ne: 'READY_TO_SHIP' } }, { _totalStock: { $gt: 0 } }];
         }
 
         if (andConditions.length > 0) {
             match.$and = andConditions;
         }
 
-        const queryHasTone = hasTone(q);
-        const qLower = nfcLower(q);
-
-        const relevance = buildRelevance({ norm, qLower, queryHasTone, withTextScore: useText });
-
         const SORTS: Record<string, any> = {
             relevance:   { _relevance: -1, created_at: -1 },
             newest:      { created_at: -1 },
-            price_asc:   { min_price: 1, created_at: -1 },
-            price_desc:  { max_price: -1, created_at: -1 },
+            price_asc:   { _minPrice: 1, created_at: -1 },
+            price_desc:  { _maxPrice: -1, created_at: -1 },
             rating_desc: { _rating: -1, rating_count: -1, created_at: -1 },
-            best_seller: { sold_count: -1, created_at: -1 },
+            best_seller: { _sold: -1, created_at: -1 },
         };
 
-        const sortStage = SORTS[params.sort as string] ?? SORTS.relevance;
-
-        let [res] = await MongoProduct.aggregate(
-            buildSearchPipeline(match, relevance, sortStage, page, limit),
+        const sortKey = SORTS[params.sort as string] ? String(params.sort) : 'relevance';
+        const [res] = await MongoProduct.aggregate(
+            buildSearchPipeline({ match, q, priceStock, sort: SORTS[sortKey], withSold: sortKey === 'best_seller', page, limit, searchHits: hits ?? undefined }),
             { allowDiskUse: true }
         );
-
-        // Fallback khi 0 kết quả: nếu total === 0 và có terms, chạy lại với title_prefixes
-        if ((res?.total?.[0]?.n ?? 0) === 0 && useText) {
-            const fallbackMatch = { ...match };
-            delete fallbackMatch.$text;
-            fallbackMatch.title_prefixes = { $all: terms.map(t => t.slice(0, 10)) };
-
-            const fallbackRelevance = buildRelevance({ norm, qLower, queryHasTone, withTextScore: false });
-            const [fallbackRes] = await MongoProduct.aggregate(
-                buildSearchPipeline(fallbackMatch, fallbackRelevance, sortStage, page, limit),
-                { allowDiskUse: true }
-            );
-
-            if ((fallbackRes?.total?.[0]?.n ?? 0) > 0) {
-                res = fallbackRes;
-            }
-        }
 
         const rawDocs = res?.items || [];
         const total = res?.total?.[0]?.n ?? 0;
@@ -786,7 +743,6 @@ export class ProductsService {
             SearchLog.create({
                 _id: logId,
                 keyword: q,
-                keyword_norm: norm,
                 result_count: total,
                 user_id: params.userId && mongoose.Types.ObjectId.isValid(params.userId) ? new mongoose.Types.ObjectId(params.userId) : undefined
             }).catch(() => {});
@@ -797,15 +753,14 @@ export class ProductsService {
     }
 
     static async suggest(queryStr?: string, userId?: string): Promise<SuggestResultDTO> {
-        const q = (typeof queryStr === 'string' ? queryStr : '').slice(0, 60).trim();
+        const q = nfcLower(typeof queryStr === 'string' ? queryStr : '').slice(0, 60);
         const norm = normalizeVi(q);
         if (!norm) {
             return { keywords: [], shops: [], categories: [] };
         }
-        const terms = extractSearchTerms(q, 4).map(t => t.slice(0, 12));
-        const safeRegex = escapeRegex(norm);
-        const slugQ = norm.replace(/\s+/g, '-');
-        const safeSlugQ = escapeRegex(slugQ);
+        const terms = extractSearchTerms(q, 4);
+        const qRegex = { $regex: accentInsensitive(q), $options: 'i' };
+        const safeSlugQ = escapeRegex(norm.replace(/\s+/g, '-'));
 
         const restrictedShopIds = await Shop.find({ reputation_tier: 'RESTRICTED' }).distinct('_id');
         const prodBase: any = {
@@ -815,28 +770,21 @@ export class ProductsService {
             moderation_status: 'APPROVED',
             shop_id: { $nin: restrictedShopIds },
         };
-        const prefixOr = [
-            { title_prefixes: norm },
-            { title_prefixes: { $all: terms } },
-            { tags_norm: { $all: terms } },
-            { categories_norm: { $all: terms } },
-            { title_norm: { $regex: '^' + safeRegex } }
-        ];
-
-        const [textHits, matchingShops, matchingCategories, loggedKeywords, banned] = await Promise.all([
+        const atlas = await findSearchHits(q);
+        const [hits, matchingShops, matchingCategories, loggedKeywords, popularKeywords, banned] = await Promise.all([
             MongoProduct.find(
-                { ...prodBase, $text: { $search: terms.map(t => `"${t}"`).join(' ') } },
-                { ...SUGGEST_PROJECTION, score: { $meta: 'textScore' } }
+                atlas ? { ...prodBase, _id: { $in: atlas.ids.slice(0, 50) } } : { ...prodBase, $or: [{ title: qRegex }, { tags: qRegex }, { categories: qRegex }] },
+                SUGGEST_PROJECTION
             )
-                .sort({ score: { $meta: 'textScore' } })
+                .sort({ rating_count: -1, created_at: -1 })
                 .limit(20)
                 .lean(),
 
             Shop.find({
                 reputation_tier: { $ne: 'RESTRICTED' },
-                status: 'ACTIVE',
+                status: { $nin: ['CLOSED', 'INACTIVE'] },
                 $or: [
-                    { shop_name_norm: { $regex: '^' + safeRegex } },
+                    { shop_name: qRegex },
                     { slug: { $regex: '^' + safeSlugQ } }
                 ]
             })
@@ -848,7 +796,7 @@ export class ProductsService {
             Category.find({
                 is_active: true,
                 $or: [
-                    { name_norm: { $regex: '^' + safeRegex } },
+                    { name: qRegex },
                     { slug: { $regex: '^' + safeSlugQ } }
                 ]
             })
@@ -856,23 +804,15 @@ export class ProductsService {
                 .limit(3)
                 .lean(),
 
-            userId && mongoose.Types.ObjectId.isValid(userId) ? fetchLoggedKeywords(norm, userId) : [],
+            userId && mongoose.Types.ObjectId.isValid(userId) ? fetchLoggedKeywords(q, userId) : [],
+            fetchPopularKeywords(q),
             BannedKeyword.distinct('keyword')
         ]);
 
-        // Pha 2: bù bằng tiền tố (gõ dở từ cuối, từ khớp một phần), bỏ các sản phẩm đã có ở pha 1
-        const need = 20 - textHits.length;
-        const prefixHits = need > 0
-            ? await MongoProduct.find({ ...prodBase, $or: prefixOr, _id: { $nin: textHits.map((p: any) => p._id) } }, SUGGEST_PROJECTION)
-                .sort({ sold_count: -1 })
-                .limit(need)
-                .lean()
-            : [];
-
-        const ranked = rankSuggestions([...textHits, ...prefixHits], norm, terms, 20);
+        const ranked = rankSuggestions(hits, norm, terms, 20);
 
         return {
-            keywords: buildKeywordSuggestions(q, loggedKeywords, ranked.map((p: any) => p.title), banned),
+            keywords: buildKeywordSuggestions(q, [...loggedKeywords, ...popularKeywords], ranked.map((p: any) => p.title), banned),
             shops: matchingShops.map((s: any) => ({
                 id: s._id.toString(),
                 name: s.shop_name,
@@ -917,11 +857,12 @@ export class ProductsService {
             const mp = await MongoProduct.findOne(query).lean();
             if (!mp) throw new Error('Không tìm thấy sản phẩm.');
 
-            const [variants, shop] = await Promise.all([
+            const [variants, shop, sold] = await Promise.all([
                 MongoVariant.find({ product_id: mp._id }).lean(),
-                Shop.findById(mp.shop_id).lean()
+                Shop.findById(mp.shop_id).lean(),
+                getSoldCounts([mp._id])
             ]);
-            return mapToProductItemResponse(mp, variants, shop);
+            return mapToProductItemResponse(mp, variants, shop, sold.get(mp._id.toString()) ?? 0);
         };
 
         if (opts.includeHidden) {
@@ -1603,7 +1544,6 @@ export class ProductsService {
             if (payload.sku !== undefined) updates.sku = payload.sku;
             if (Object.keys(updates).length > 0) {
                 await MongoVariant.updateMany({ product_id: mp._id }, updates);
-                await syncProductDenorm(mp._id);
             }
         }
 
@@ -1640,7 +1580,6 @@ export class ProductsService {
         mp.listing_status = 'INACTIVE';
         await mp.save();
         await MongoVariant.updateMany({ product_id: mp._id }, { $set: { is_active: false } });
-        await syncProductDenorm(mp._id);
         await Shop.updateOne({ _id: mp.shop_id }, { $inc: { listing_count: -1 } });
 
         await ProductsService.invalidateProductCache(id);
@@ -1657,7 +1596,6 @@ export class ProductsService {
             { $set: { is_hidden: true, status: 'UNPUBLISHED', listing_status: 'INACTIVE' } }
         );
         await MongoVariant.updateMany({ product_id: { $in: scoped } }, { $set: { is_active: false } });
-        await Promise.all(scoped.map(id => syncProductDenorm(id)));
 
         await ProductsService.invalidateProductCache();
         logger.info(`Batch soft deleted ${result.modifiedCount} products by ${actor.id}`);

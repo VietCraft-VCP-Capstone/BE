@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 import { Order as OrderModel } from "../infrastructure/models/order.model";
 import { WebhookLog } from "../infrastructure/models/webhook-log.model";
 import { Product } from "../../product/infrastructure/models/product.model";
-import { ProductVariant, syncProductDenorm } from "../../product/infrastructure/models/product-variant.model";
+import { ProductVariant } from "../../product/infrastructure/models/product-variant.model";
 import { Shop } from "../../product/infrastructure/models/shop.model";
 import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
@@ -354,7 +354,6 @@ export class OrdersService {
           { _id: it.variant_id },
           { $inc: { stock_quantity: -it.quantity } }
         ).catch(err => console.error('[STOCK] Lỗi trừ tồn kho khi tạo đơn:', err?.message || err));
-        void syncProductDenorm(it.product_id);
       }
     }
 
@@ -410,7 +409,6 @@ export class OrdersService {
             { _id: vId },
             { $inc: { stock_quantity: it.quantity || 1 } }
           ).catch(err => console.error('[STOCK] Lỗi hoàn tồn kho:', err?.message || err));
-          void syncProductDenorm(it.product_id?._id || it.product_id);
         }
       }
     }
