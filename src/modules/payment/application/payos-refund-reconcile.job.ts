@@ -7,7 +7,7 @@ import { PROCESSING_STALE_MS } from './refund-execution.service';
 
 /**
  * payout payOS chốt kết quả bất đồng bộ nên hoàn tiền thường dừng ở PENDING. Job này chạy lại
- * đúng luồng nghiệp vụ đã tạo execution (yêu cầu hoàn tiền hoặc trả hàng v3): luồng đó sẽ tra
+ * đúng luồng nghiệp vụ đã tạo execution (yêu cầu hoàn tiền hoặc trả hàng): luồng đó sẽ tra
  * payOS (read-only), ghi Transaction REFUND và cập nhật trạng thái yêu cầu khi payout thành công.
  * In-process; nhiều instance nên chạy job ở một process riêng.
  */
@@ -102,8 +102,8 @@ export class PayosRefundReconcileJob {
                 return;
             }
         }
-        const { MongoReturnRequestV3Repository } = await import('../../order/infrastructure/repositories/return-request-v3.repository');
-        const request = await new MongoReturnRequestV3Repository().findById(businessKey);
+        const { MongoReturnRequestRepository } = await import('../../order/infrastructure/repositories/return-request.repository');
+        const request = await new MongoReturnRequestRepository().findById(businessKey);
         if (request) {
             const { executeReturnRefund } = await import('../../order/application/return-refund-executor');
             await executeReturnRefund(request);
