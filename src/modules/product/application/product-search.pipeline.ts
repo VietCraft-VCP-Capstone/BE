@@ -12,7 +12,7 @@ export interface SearchPipelineOptions {
     searchHits?: { ids: Types.ObjectId[]; scores: number[] };
 }
 
-const TIER_BOOST = {
+export const TIER_BOOST = {
     $switch: {
         branches: [
             { case: { $eq: ['$_reputationTier', 'TRUSTED'] }, then: 2.0 },
@@ -56,7 +56,7 @@ export function buildRelevance(q: string, searchHits?: SearchPipelineOptions['se
     return { $add: parts };
 }
 
-const VARIANT_LOOKUP: PipelineStage = {
+export const VARIANT_LOOKUP: PipelineStage = {
     $lookup: {
         from: 'product_variants',
         let: { pid: '$_id' },

@@ -31,6 +31,7 @@ import { getTrendingKeywords as fetchTrendingKeywords } from './trending-keyword
 import { buildTermsMatch, buildSearchPipeline } from './product-search.pipeline';
 import { findSearchHits } from './atlas-search';
 import { getSoldCounts } from './product-sold';
+import { RecommendService } from './recommend/recommend.service';
 import { normalizeVi, nfcLower, escapeRegex, accentInsensitive, extractSearchTerms } from '../../../shared/utils/vietnamese-search.util';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
@@ -213,7 +214,7 @@ export interface ProductActor {
     role: string;
 }
 
-const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
+export const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
 
 export class ProductsService {
 
@@ -596,7 +597,7 @@ export class ProductsService {
         const items = await ProductsService.mapMany(docs);
         return { items, total, page, limit, totalPages };
     }
-    private static async mapMany(docs: any[]): Promise<ProductItemResponseDTO[]> {
+    static async mapMany(docs: any[], soldMap?: Map<string, number>): Promise<ProductItemResponseDTO[]> {
         if (docs.length === 0) return [];
 
         const productIds = docs.map(p => p._id);
@@ -605,7 +606,7 @@ export class ProductsService {
         const [allVariants, allShops, sold] = await Promise.all([
             MongoVariant.find({ product_id: { $in: productIds } }).lean(),
             Shop.find({ _id: { $in: shopIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean(),
-            getSoldCounts(productIds)
+            soldMap ?? getSoldCounts(productIds)
         ]);
 
         const variantsByProductId = new Map<string, any[]>();
@@ -906,29 +907,7 @@ export class ProductsService {
     static async getRelated(id: string, category?: string, limit = 4): Promise<ProductItemResponseDTO[]> {
         if (!mongoose.Types.ObjectId.isValid(id)) return [];
         const cacheKey = `vietcraft:products:related:${id}:${category || 'auto'}:${limit}`;
-        return cacheService.getOrSet(cacheKey, async () => {
-            const self = new mongoose.Types.ObjectId(id);
-
-            let cat = category;
-            if (!cat) {
-                const p = await MongoProduct.findById(self).select('categories').lean();
-                cat = p?.categories?.[0];
-            }
-
-            const base: any = { ...PUBLIC_QUERY, listing_status: 'ACTIVE', _id: { $ne: self } };
-            let docs = await MongoProduct.find(cat ? { ...base, categories: cat } : base)
-                .limit(limit).lean();
-
-            if (docs.length < limit) {
-                const extra = await MongoProduct.find({
-                    ...base,
-                    _id: { $nin: [self, ...docs.map(p => p._id)] }
-                }).limit(limit - docs.length).lean();
-                docs = [...docs, ...extra];
-            }
-
-            return ProductsService.mapMany(docs);
-        }, 600);
+        return cacheService.getOrSet(cacheKey, () => RecommendService.related(id, category, limit), 600);
     }
 
     static async getFeaturedShops(): Promise<any[]> {
