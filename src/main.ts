@@ -45,6 +45,9 @@ async function bootstrap() {
     const { RollupJob } = await import('./modules/analytics/application/rollup.job');
     RollupJob.schedule();
 
+    const { AnomalyAlertJob } = await import('./modules/analytics/application/anomaly-alert.job');
+    AnomalyAlertJob.schedule();
+
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);
         logger.info(` VietCraft Backend Monolith Running...`);

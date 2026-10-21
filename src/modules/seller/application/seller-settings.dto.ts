@@ -79,6 +79,7 @@ export interface SellerNotificationSettingsDTO {
     analytics: {
         weeklyReport: NotificationChannelSettingDTO;
         promotions: NotificationChannelSettingDTO;
+        performanceAlert: NotificationChannelSettingDTO;
     };
 }
 
