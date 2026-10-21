@@ -201,7 +201,7 @@ export class SellerFinanceService {
         const items: SellerSettlementItem[] = orders.map(ord => {
             const subtotal = Number(ord.financial_breakdown?.subtotal?.toString() || 0);
             const platformFee = Number(ord.financial_breakdown?.platform_fee?.toString() || 0);
-            const commissionRate = Number(ord.financial_breakdown?.commission_rate?.toString() || 0.10);
+            const commissionRate = subtotal > 0 ? platformFee / subtotal : 0;
             const netPayout = Number(ord.financial_breakdown?.seller_payout_amount?.toString() || (subtotal - platformFee));
 
             let settlementStatus: 'SETTLED' | 'PENDING' | 'CANCELLED' = 'PENDING';

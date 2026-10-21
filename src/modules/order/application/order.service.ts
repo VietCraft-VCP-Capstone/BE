@@ -10,7 +10,6 @@ import { dispatchToPrinter } from "./printer-dispatch.service";
 import { PromotionService } from "../../promotion/application/promotion.service";
 import { Review } from "../infrastructure/models/review.model";
 import { OrderResponse, DEFAULT_SHIPPING_FEE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
-import { platformFinanceService } from "../../admin/application/platform-finance.service";
 import { CommissionSetting } from "../../../shared/services/commission-setting.service";
 import { commissionFromGross } from "../../../shared/utils/commission";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
@@ -263,18 +262,8 @@ export class OrdersService {
       await PromotionService.claimUsage(cleanCouponCode, buyerId);
     }
 
-    let commissionRate = 0.10;
-    let minOrderFee = 10000;
-    try {
-      const financeConfig = await platformFinanceService.getConfig();
-      if (financeConfig?.policies) {
-        commissionRate = financeConfig.policies.default_commission_rate ?? 0.10;
-        minOrderFee = financeConfig.policies.min_order_fee ?? 10000;
-      }
-    } catch {
-    }
-
-    platformFee = Math.max(platformFee, minOrderFee);
+    // Tỷ lệ thật trên tiền hàng; mỗi dòng có thể theo một luật hoa hồng khác nhau.
+    const commissionRate = subtotal > 0 ? Math.round((platformFee / subtotal) * 10_000) / 10_000 : 0;
 
     const totalPrintingCost = orderItems.reduce((acc, it) => acc + (num(it.base_cost) * it.quantity), 0);
 
