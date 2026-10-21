@@ -9,6 +9,8 @@ import { ListingHealthService, HealthStatus } from '../application/listing-healt
 import { healthSummary } from '../application/listing-health-summary.service';
 import { listingRanking } from '../application/listing-ranking.service';
 import { parsePreviewBody, PreviewBodyResult } from '../application/health-preview';
+import { parseIntelPreview } from '../application/intel-preview';
+import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 
 type Method = 'get' | 'post' | 'delete';
 
@@ -18,14 +20,19 @@ interface GatewayRoute {
     ai: (params: Record<string, string>) => string;
     query?: string[];
     forwardShopIdBody?: boolean;
-    parseBody?: (raw: unknown) => PreviewBodyResult;
+    parseBody?: (raw: unknown) => PreviewBodyResult<Record<string, unknown>>;
 }
 
 const ROUTES: GatewayRoute[] = [
+    { method: 'get', path: '/listings/intel', ai: () => '/api/analytics/listings/intel' },
+    { method: 'get', path: '/listings/:id/intel', ai: p => `/api/analytics/listings/${p.id}/intel`, query: ['date'] },
+    { method: 'post', path: '/listings/intel/preview', ai: () => '/api/analytics/listings/intel/preview', parseBody: parseIntelPreview },
+    { method: 'get', path: '/trends/calendar', ai: () => '/api/analytics/trends/calendar', query: ['category'] },
     { method: 'get', path: '/overview', ai: () => '/api/analytics/shop/overview', query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/timeseries', ai: p => `/api/analytics/listings/${p.id}/timeseries`, query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/conversion', ai: p => `/api/analytics/listings/${p.id}/conversion` },
     { method: 'post', path: '/listings/:id/health/preview', ai: p => `/api/analytics/listings/${p.id}/health/preview`, parseBody: parsePreviewBody },
+    { method: 'get', path: '/listings/:id/health/ml', ai: p => `/api/analytics/listings/${p.id}/health/ml` },
     { method: 'get', path: '/alerts', ai: () => '/api/notifications/alerts', query: ['period'] },
     { method: 'get', path: '/categories', ai: () => '/api/analytics/shop/categories/revenue', query: ['timeRange'] },
     { method: 'get', path: '/competitors', ai: () => '/api/analytics/competitors', query: ['categoryId'] },
@@ -260,6 +267,8 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
         return res.status(500).json({ error: error?.message || 'Lỗi khi đọc điểm sức khoẻ của shop.' });
     }
 });
+
+router.post('/listings/intel/preview', userRateLimit(20, 60_000, 'Bạn thử quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 
 for (const route of ROUTES) {
     router[route.method](route.path, async (req: AuthenticatedRequest, res: Response) => {

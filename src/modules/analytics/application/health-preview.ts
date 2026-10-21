@@ -7,8 +7,8 @@ export const PREVIEW_LIMITS = {
 
 export type PreviewLever = keyof typeof PREVIEW_LIMITS;
 
-export type PreviewBodyResult =
-    | { body: Partial<Record<PreviewLever, number>> }
+export type PreviewBodyResult<B = Partial<Record<PreviewLever, number>>> =
+    | { body: B }
     | { invalid: string };
 
 export function parsePreviewBody(raw: unknown): PreviewBodyResult {

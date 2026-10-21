@@ -21,6 +21,7 @@ export interface IProduct extends Document {
     unpublish_reason?: string;
     images: string[];
     tags: string[];
+    materials: string[];
     categories: string[];
     tag_ids: mongoose.Types.ObjectId[];
     category_ids: mongoose.Types.ObjectId[];
@@ -141,6 +142,7 @@ const ProductSchema = new Schema<IProduct>({
     unpublish_reason: { type: String },
     images: { type: [String], default: [] },
     tags: { type: [String], index: true, default: [] },
+    materials: { type: [String], default: [] },
     categories: { type: [String], default: [] },
     tag_ids: { type: [{ type: Schema.Types.ObjectId, ref: 'Tag' }], index: true, default: [] },
     category_ids: { type: [{ type: Schema.Types.ObjectId, ref: 'Category' }], index: true, default: [] },
