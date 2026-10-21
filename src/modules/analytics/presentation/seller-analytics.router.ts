@@ -22,7 +22,7 @@ interface GatewayRoute {
 }
 
 const ROUTES: GatewayRoute[] = [
-    { method: 'get', path: '/overview', ai: () => '/api/analytics/shop/overview', query: ['timeRange'] },
+    { method: 'get', path: '/overview', ai: () => '/api/analytics/shop/overview', query: ['timeRange', 'to'] },
     { method: 'get', path: '/listings/:id/timeseries', ai: p => `/api/analytics/listings/${p.id}/timeseries`, query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/conversion', ai: p => `/api/analytics/listings/${p.id}/conversion` },
     { method: 'post', path: '/listings/:id/health/preview', ai: p => `/api/analytics/listings/${p.id}/health/preview`, parseBody: parsePreviewBody },
