@@ -2,7 +2,7 @@ export const PREVIEW_LIMITS = {
     n_images: 50,
     description_length: 20000,
     n_tags: 50,
-    in_stock_ratio_pct: 100,
+    price: 1e10,
 } as const;
 
 export type PreviewLever = keyof typeof PREVIEW_LIMITS;

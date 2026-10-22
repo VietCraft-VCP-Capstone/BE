@@ -26,6 +26,7 @@ interface GatewayRoute {
 const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/listings/intel', ai: () => '/api/analytics/listings/intel' },
     { method: 'get', path: '/listings/:id/intel', ai: p => `/api/analytics/listings/${p.id}/intel`, query: ['date'] },
+    { method: 'get', path: '/listings/:id/health', ai: p => `/api/analytics/listings/${p.id}/health` },
     { method: 'post', path: '/listings/intel/preview', ai: () => '/api/analytics/listings/intel/preview', parseBody: parseIntelPreview },
     { method: 'get', path: '/trends/calendar', ai: () => '/api/analytics/trends/calendar', query: ['category'] },
     { method: 'get', path: '/overview', ai: () => '/api/analytics/shop/overview', query: ['timeRange'] },
@@ -184,19 +185,6 @@ router.get('/context', async (req: AuthenticatedRequest, res: Response) => {
 });
 
 const HEALTH_STATUSES: HealthStatus[] = ['good', 'needs_improvement', 'poor'];
-
-router.get('/listings/:id/health', async (req: AuthenticatedRequest, res: Response) => {
-    try {
-        const viewer = await viewerOrReply(req, res);
-        if (!viewer) return;
-
-        const { httpStatus, body } = await ListingHealthService.detail(req.params.id, viewer.analysed_shop_id!);
-        const payload = httpStatus < 400 ? { ...body, viewer } : body;
-        return res.status(httpStatus).json(payload);
-    } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc điểm sức khoẻ listing.' });
-    }
-});
 
 const HISTORY_DAYS = [30, 90];
 

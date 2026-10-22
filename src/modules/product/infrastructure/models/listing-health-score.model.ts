@@ -1,11 +1,11 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IAxis {
-    conversion?: number | null;
-    rating?: number | null;
-    content?: number | null;
-    inventory?: number | null;
-    freshness?: number | null;
+    image?: number | null;
+    description?: number | null;
+    tags?: number | null;
+    review?: number | null;
+    price?: number | null;
 }
 
 export interface ITodo {
@@ -46,11 +46,11 @@ export interface IListingHealthScore extends Document {
 }
 
 const AxisSchema = new Schema<IAxis>({
-    conversion: { type: Number, default: null },
-    rating: { type: Number, default: null },
-    content: { type: Number, default: null },
-    inventory: { type: Number, default: null },
-    freshness: { type: Number, default: null }
+    image: { type: Number, default: null },
+    description: { type: Number, default: null },
+    tags: { type: Number, default: null },
+    review: { type: Number, default: null },
+    price: { type: Number, default: null }
 }, { _id: false });
 
 const TodoSchema = new Schema<ITodo>({
@@ -72,7 +72,7 @@ const ListingHealthScoreSchema = new Schema<IListingHealthScore>({
     todos: { type: [TodoSchema], default: [] },
     content_hash: { type: String, required: true },
     content_changed_at: { type: Date, default: null },
-    model_version: { type: String, required: true, default: 'health-1.0' },
+    model_version: { type: String, required: true, default: 'health-2.0' },
     computed_at: { type: Date, required: true },
     inputs_hash: { type: String, default: null },
     conversion_detail: { type: Schema.Types.Mixed, default: null }
