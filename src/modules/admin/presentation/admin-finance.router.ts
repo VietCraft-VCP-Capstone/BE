@@ -1,6 +1,6 @@
 import { Router, Response, NextFunction } from 'express';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
-import { platformFinanceService, parseConfigInput } from '../application/platform-finance.service';
+import { platformFinanceService, parseConfigInput, parseRange } from '../application/platform-finance.service';
 
 const router = Router();
 
@@ -30,10 +30,19 @@ router.put('/config', async (req: AuthenticatedRequest, res: Response, next: Nex
     }
 });
 
-/** GET /api/admin/finance/overview?days=30 — báo cáo lãi lỗ của sàn trong kỳ. */
-router.get('/overview', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+/**
+ * GET /api/admin/finance/pnl?days=30 hoặc ?from=YYYY-MM-DD&to=YYYY-MM-DD — báo cáo lãi lỗ của sàn trong kỳ.
+ * Không đặt là /overview: router này mount trước adminRouter nên sẽ chiếm mất API của trang Thống kê thu nhập.
+ */
+router.get('/pnl', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    let range;
     try {
-        res.json({ success: true, data: await platformFinanceService.getOverview(Number(req.query.days)) });
+        range = parseRange(req.query);
+    } catch (err: any) {
+        return res.status(400).json({ success: false, error: err.message });
+    }
+    try {
+        res.json({ success: true, data: await platformFinanceService.getOverview(range) });
     } catch (err) {
         next(err);
     }

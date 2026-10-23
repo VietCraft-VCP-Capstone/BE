@@ -19,6 +19,8 @@ export interface IPlatformCostConfig extends Document {
     monthly_costs: IMonthlyCost[];
     payment_fees: IPaymentFee[];
     notification_per_order: number;
+    /** Vốn dự phòng hiện có, dùng để tính sàn còn trụ được bao nhiêu tháng khi đang lỗ. */
+    cash_reserve: number;
     updated_at: Date;
     created_at: Date;
 }
@@ -40,6 +42,7 @@ const PlatformCostConfigSchema = new Schema<IPlatformCostConfig>({
     monthly_costs: { type: [MonthlyCostSchema], default: undefined },
     payment_fees: { type: [PaymentFeeSchema], default: undefined },
     notification_per_order: { type: Number, min: 0 },
+    cash_reserve: { type: Number, min: 0 },
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
