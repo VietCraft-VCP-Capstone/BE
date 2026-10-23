@@ -36,7 +36,8 @@ export async function healthSummary(shopId: string, days: number): Promise<{ htt
     since.setUTCDate(since.getUTCDate() - (days - 1));
 
     const rows = products.length === 0 ? [] : await ListingHealthScore.aggregate([
-        { $match: { product_id: { $in: products.map(p => p._id) }, model_version: HEALTH_VERSION, date: { $gte: since }, score: { $ne: null } } },
+        { $match: { product_id: { $in: products.map(p => p._id) }, date: { $gte: since }, score: { $ne: null } } },
+        { $sort: { date: -1, computed_at: -1 } },
         {
             $group: {
                 _id: '$date',

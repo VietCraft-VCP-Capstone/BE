@@ -4,6 +4,7 @@ export interface IAxis {
     image?: number | null;
     description?: number | null;
     tags?: number | null;
+    material?: number | null;
     review?: number | null;
     price?: number | null;
 }
@@ -49,6 +50,7 @@ const AxisSchema = new Schema<IAxis>({
     image: { type: Number, default: null },
     description: { type: Number, default: null },
     tags: { type: Number, default: null },
+    material: { type: Number, default: null },
     review: { type: Number, default: null },
     price: { type: Number, default: null }
 }, { _id: false });
@@ -72,7 +74,7 @@ const ListingHealthScoreSchema = new Schema<IListingHealthScore>({
     todos: { type: [TodoSchema], default: [] },
     content_hash: { type: String, required: true },
     content_changed_at: { type: Date, default: null },
-    model_version: { type: String, required: true, default: 'health-2.0' },
+    model_version: { type: String, required: true, default: 'health-2.1' },
     computed_at: { type: Date, required: true },
     inputs_hash: { type: String, default: null },
     conversion_detail: { type: Schema.Types.Mixed, default: null }

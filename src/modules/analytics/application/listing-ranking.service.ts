@@ -73,8 +73,8 @@ export async function listingRanking(shopId: string): Promise<{ httpStatus: numb
             } },
         ])),
         byId<{ score: number | null }>(ListingHealthScore.aggregate([
-            { $match: { product_id: { $in: mineIds }, model_version: HEALTH_VERSION } },
-            { $sort: { date: -1 } },
+            { $match: { product_id: { $in: mineIds } } },
+            { $sort: { date: -1, computed_at: -1 } },
             { $group: { _id: '$product_id', score: { $first: '$score' } } },
         ])),
     ]);
