@@ -5,6 +5,7 @@ import { ProductVariant } from '../../product/infrastructure/models/product-vari
 import { Wishlist } from '../../product/infrastructure/models/wishlist.model';
 import { buildMeta, insufficient, ok, Envelope } from './envelope';
 import { EMPTY_SALES, SALES_WINDOW_DAYS, salesByProduct } from './listing-sales';
+import { HEALTH_VERSION } from './listing-health.service';
 import {
     CategoryBench, RANK_METRICS, Rank, RankInsight, RankMetric, RankMetrics, median, rankOf, rankingInsights, rate,
 } from './ranking-insights';
@@ -73,7 +74,7 @@ export async function listingRanking(shopId: string): Promise<{ httpStatus: numb
         ])),
         byId<{ score: number | null }>(ListingHealthScore.aggregate([
             { $match: { product_id: { $in: mineIds } } },
-            { $sort: { date: -1 } },
+            { $sort: { date: -1, computed_at: -1 } },
             { $group: { _id: '$product_id', score: { $first: '$score' } } },
         ])),
     ]);

@@ -36,6 +36,7 @@ import { CommissionSetting } from '../../../shared/services/commission-setting.s
 import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
 import { contentModerationService } from '../../../shared/services/content-moderation.service';
+import { normalizeMaterials } from '../../../shared/utils/materials';
 
 function getColorHex(colorName: string): string {
     const lower = (colorName || '').toLowerCase();
@@ -150,6 +151,7 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         } : undefined,
         sellerId: product.shop_id ? product.shop_id.toString() : undefined,
         tags: product.tags || [],
+        materials: product.materials || [],
         rating: (typeof product.rating_count === 'number' && product.rating_count > 0)
             ? (typeof product.average_rating === 'number' ? product.average_rating : 0)
             : 0,
@@ -1053,6 +1055,7 @@ export class ProductsService {
             categories: [data.category.name],
             category_ids: [data.category._id],
             tags: allTags.map(t => t.name),
+            materials: normalizeMaterials(payload.materials),
             tag_ids: allTags.map(t => t._id),
             weight_g: payload.weight_g ?? 500,
             dimensions_cm: payload.dimensions_cm ?? { length: 10, width: 10, height: 10 },
@@ -1157,6 +1160,7 @@ export class ProductsService {
             categories: [catalog.category!.name],
             category_ids: [catalog.category!._id],
             tags: tags.map(t => t.name),
+            materials: normalizeMaterials(payload.materials),
             tag_ids: tags.map(t => t._id),
             weight_g: 500,
             dimensions_cm: { length: 10, width: 10, height: 10 },
@@ -1486,6 +1490,7 @@ export class ProductsService {
         } else if (payload.thumbnail && Array.isArray(mp.images) && mp.images.includes(payload.thumbnail)) {
             mp.images = [payload.thumbnail, ...mp.images.filter((img: string) => img !== payload.thumbnail)];
         }
+        if (payload.materials !== undefined) mp.materials = normalizeMaterials(payload.materials);
         if (payload.categoryId !== undefined && data.category) {
             mp.categories = [data.category.name];
             mp.category_ids = [data.category._id];
@@ -1546,6 +1551,7 @@ export class ProductsService {
             mp.slug = await ProductsService.uniqueSlug(payload.title, mp._id.toString());
         }
         if (payload.description !== undefined) mp.description = payload.description;
+        if (payload.materials !== undefined) mp.materials = normalizeMaterials(payload.materials);
         if (!catalog.category && payload.category !== undefined) mp.categories = [payload.category];
         if (payload.location !== undefined) mp.location = payload.location;
         if (payload.rank !== undefined) mp.display_rank = payload.rank;
