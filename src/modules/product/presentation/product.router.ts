@@ -3,6 +3,7 @@ import { ProductsService, ValidationError, ForbiddenError, ProductActor } from '
 import { SearchProductsParams } from '../application/product.dto';
 import { BlankClient } from '../application/blank-client.service';
 import { parseSearchClick, recordSearchClick } from '../application/search-click';
+import { VideoAdService, VideoAdError, toPublicJob } from '../application/video-ad.service';
 import { authenticate, requireRole, optionalAuthenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { ReviewService } from '../../order';
 
@@ -173,6 +174,38 @@ router.post('/preview-mockup', authenticate, requireRole(['seller', 'admin']), a
         handleError(res, error);
     }
 });
+
+// ==================== VIDEO QUẢNG CÁO AI (TỐN TIỀN) ====================
+
+function handleVideoError(res: Response, error: any) {
+    if (error instanceof VideoAdError) return res.status(error.status).json({ error: error.message });
+    return res.status(500).json({ error: error.message || 'Lỗi khi tạo video.' });
+}
+
+router.get('/video-ad/quota', authenticate, requireRole(['seller', 'admin']), (req: AuthenticatedRequest, res) => {
+    res.json(VideoAdService.quota(req.user!.id));
+});
+
+router.post('/video-ad', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
+    try {
+        const job = await VideoAdService.create(req.user!.id, {
+            imageUrl: req.body?.imageUrl,
+            title: req.body?.title,
+        });
+        res.status(202).json({ ...toPublicJob(job), quota: VideoAdService.quota(req.user!.id) });
+    } catch (error: any) {
+        handleVideoError(res, error);
+    }
+});
+
+router.get('/video-ad/:jobId', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
+    try {
+        res.json(toPublicJob(await VideoAdService.status(req.user!.id, req.params.jobId)));
+    } catch (error: any) {
+        handleVideoError(res, error);
+    }
+});
+
 router.post('/batch-delete', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res) => {
     try {
         res.json(await ProductsService.batchDelete(req.body?.ids, actorOf(req)));

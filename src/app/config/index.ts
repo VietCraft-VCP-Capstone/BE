@@ -56,6 +56,20 @@ export const config = {
         folder: process.env.CLOUDINARY_FOLDER || 'vietcraft',
         apiBase: process.env.CLOUDINARY_API_BASE || 'https://api.cloudinary.com',
     },
+    // Video quảng cáo AI (gateway tương thích OpenAI, TÍNH TIỀN theo mỗi lần tạo).
+    videoAi: {
+        apiKey: process.env.VIDEO_AI_API_KEY || '',
+        baseUrl: (process.env.VIDEO_AI_BASE_URL || 'https://cheapkeyai.shop/v1').replace(/\/+$/, ''),
+        // grok-imagine-video rẻ nhất (~$0.006/lần); veo_3_1-fast ~$0.06; veo_3_1 ~$0.08.
+        model: process.env.VIDEO_AI_MODEL || 'grok-imagine-video',
+        durationSec: Number(process.env.VIDEO_AI_DURATION_SEC) || 4,
+        // Kill switch: đặt VIDEO_AI_ENABLED=false để chặn mọi lần gọi tốn tiền.
+        enabled: process.env.VIDEO_AI_ENABLED !== 'false',
+        // Trần chi phí: số video tối đa / seller / 24h và toàn hệ thống / 24h.
+        dailyLimitPerUser: Number(process.env.VIDEO_AI_DAILY_LIMIT_PER_USER) || 3,
+        dailyLimitGlobal: Number(process.env.VIDEO_AI_DAILY_LIMIT_GLOBAL) || 30,
+        pollTimeoutMs: Number(process.env.VIDEO_AI_POLL_TIMEOUT_MS) || 10 * 60 * 1000,
+    },
     paymentCallbackSecret: process.env.PAYMENT_CALLBACK_SECRET || '',
     payos: {
         // Thu tiền (payment link)
