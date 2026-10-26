@@ -40,12 +40,15 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/alerts', ai: () => '/api/notifications/alerts', query: ['period'] },
     { method: 'get', path: '/categories', ai: () => '/api/analytics/shop/categories/revenue', query: ['timeRange'] },
     { method: 'get', path: '/competitors', ai: () => '/api/analytics/competitors', query: ['categoryId'] },
+    { method: 'get', path: '/competitor-brief', ai: () => '/api/analytics/competitor-brief' },
     { method: 'get', path: '/shop-comparison', ai: () => '/api/analytics/shop-comparison' },
     { method: 'get', path: '/tag-gap', ai: () => '/api/analytics/tag-gap', query: ['categoryId'] },
     { method: 'get', path: '/pricing', ai: () => '/api/analytics/pricing', query: ['productType', 'price', 'productId'] },
     { method: 'get', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking' },
     { method: 'post', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
     { method: 'delete', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
+    // Đúng dạng SRS 3.9.5; bản nhận body ở trên giữ cho client cũ.
+    { method: 'delete', path: '/competitor-tracking/:shopId', ai: p => `/api/analytics/competitor-tracking/${p.shopId}`, forwardShopIdBody: true },
     // Dự báo (SRS 3.10)
     { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window'] },
     { method: 'get', path: '/forecast/seasonal', ai: () => '/api/analytics/forecast/seasonal', query: ['categoryId', 'category_slug', 'campaign_id', 'campaignId', 'keyword'] },
@@ -156,10 +159,7 @@ async function viewerOrReply(req: AuthenticatedRequest, res: Response): Promise<
     return viewer;
 }
 
-/**
- * Thêm / bỏ theo dõi của gian hàng THẬT: BE tự ghi vào follow của sàn, không chuyển sang AI.
- * Service AI chỉ đọc danh sách đó khi trả GET /competitor-tracking.
- */
+// Gian hàng thật: BE ghi follow của sàn, AI chỉ đọc lại khi GET /competitor-tracking.
 async function replyLiveTracking(method: Method, userId: string, target: string, viewer: AnalyticsViewer, res: Response) {
     try {
         const data = method === 'post'
@@ -184,6 +184,25 @@ router.get('/context', async (req: AuthenticatedRequest, res: Response) => {
         return res.json({ data: { ...viewer, ai_reachable: reachable } });
     } catch (error: any) {
         return res.status(500).json({ error: error?.message || 'Không đọc được thông tin gian hàng.' });
+    }
+});
+
+const SHOP_SEARCH_MAX = 60;
+
+router.get('/competitor-tracking/search', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+        if (!q || q.length > SHOP_SEARCH_MAX) {
+            return res.status(400).json({ error: 'invalid_param', field: 'q', expected: `1-${SHOP_SEARCH_MAX} ký tự` });
+        }
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        // Shop mẫu theo dõi bằng mã shp_* của dữ liệu mồi, không tìm trên sàn.
+        if (viewer.demo) return res.json({ data: [], viewer });
+        const data = await CompetitorTrackingService.searchShops(req.user!.id, q);
+        return res.json({ data, viewer });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi tìm gian hàng.' });
     }
 });
 
@@ -277,7 +296,7 @@ for (const route of ROUTES) {
 
             let body: Record<string, unknown> | undefined;
             if (route.forwardShopIdBody) {
-                const target = req.body?.shop_id;
+                const target = req.params.shopId ?? req.body?.shop_id;
                 if (!AiGatewayService.isValidId(target)) {
                     return res.status(400).json({ error: 'invalid_param', field: 'shop_id' });
                 }
@@ -293,8 +312,7 @@ for (const route of ROUTES) {
             const viewer = await viewerOrReply(req, res);
             if (!viewer) return;
 
-            // Gian hàng thật theo dõi đối thủ bằng follow của sàn. Chỉ shop mẫu mới chuyển sang
-            // service AI (danh sách riêng trong dữ liệu mồi).
+            // Gian hàng thật theo dõi bằng follow của sàn; chỉ shop mẫu mới gọi AI.
             if (route.forwardShopIdBody && !viewer.demo) {
                 return await replyLiveTracking(route.method, req.user!.id, String(body!.shop_id), viewer, res);
             }

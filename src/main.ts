@@ -45,6 +45,8 @@ async function bootstrap() {
     const { RollupJob } = await import('./modules/analytics/application/rollup.job');
     RollupJob.schedule();
 
+    const { CompetitorAlertJob } = await import('./modules/analytics/application/competitor-alert.job');
+    CompetitorAlertJob.schedule();
     const { AnomalyAlertJob } = await import('./modules/analytics/application/anomaly-alert.job');
     AnomalyAlertJob.schedule();
 
