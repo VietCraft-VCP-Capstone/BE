@@ -60,6 +60,10 @@ router.use('/promotions', promotionRouter);
 router.use('/designs', designsRouter);
 router.use('/upload', uploadRouter);
 router.use('/chat', chatRouter);
+router.get('/notifications/alerts', (req, res, next) => {
+    req.url = '/alerts';
+    sellerAnalyticsRouter(req, res, next);
+});
 router.use('/notifications', notificationRouter);
 
 export default router;

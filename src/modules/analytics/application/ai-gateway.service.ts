@@ -60,6 +60,7 @@ export class AiGatewayService {
         shopId: string;
         query?: Record<string, string>;
         body?: Record<string, unknown>;
+        timeoutMs?: number;
     }): Promise<AiResponse> {
         if (!config.aiGatewaySecret) {
             return { status: 503, body: { error: 'ai_gateway_not_configured' } };
@@ -79,9 +80,10 @@ export class AiGatewayService {
         const hasBody = Boolean(options.body && Object.keys(options.body).length > 0 && options.method !== 'GET');
         if (hasBody) headers['Content-Type'] = 'application/json';
 
-        const timeoutMs = process.env.AI_TIMEOUT_MS
-            ? Number(process.env.AI_TIMEOUT_MS)
-            : Math.max(config.aiTimeoutMs || 5000, 20000);
+        const timeoutMs = options.timeoutMs
+            ?? (process.env.AI_TIMEOUT_MS
+                ? Number(process.env.AI_TIMEOUT_MS)
+                : Math.max(config.aiTimeoutMs || 5000, 20000));
 
         try {
             const response = await fetch(url, {
