@@ -15,9 +15,12 @@ import {
     maskBankAccount,
     areNamesMatching,
     generatePresignedToken,
-    verifyPresignedToken
+    verifyPresignedToken,
+    decryptBuffer,
+    encryptBuffer,
+    isBufferEncrypted
 } from '../../../shared/utils/crypto.service';
-import { resolveKycFilePath, KYC_STORAGE_ROOT } from '../../../shared/upload/kyc-storage.middleware';
+import { resolveKycFilePath, KYC_STORAGE_ROOT, verifyKycFileOwnership } from '../../../shared/upload/kyc-storage.middleware';
 import { config } from '../../../app/config';
 import { generateSlug } from '../../../shared/utils/slug';
 import { logger } from '../../../shared/utils/logger';
@@ -279,6 +282,21 @@ export class SellerKycService {
         if (!compliance.agreed_terms) {
             throw new Error('Bạn cần đồng ý với Điều khoản dịch vụ dành cho Người bán VietCraft.');
         }
+
+        // Xác minh quyền sở hữu toàn bộ file định danh KYC để chống IDOR nộp file người khác
+        const uploadedKycFiles = [
+            kyc.front_id_image,
+            kyc.back_id_image,
+            kyc.portrait_image,
+            kyc.business_license_image,
+        ].filter(Boolean);
+
+        for (const f of uploadedKycFiles) {
+            const isOwner = await verifyKycFileOwnership(f, userId, SellerApplication);
+            if (!isOwner) {
+                throw new Error(`Tài liệu "${f}" không thuộc quyền sở hữu của tài khoản bạn.`);
+            }
+        }
         if (!compliance.agreed_pdpd_policy) {
             throw new Error('Bạn cần đồng ý với Chính sách Bảo vệ Dữ liệu Cá nhân (Nghị định 13/2023/NĐ-CP) để tiếp tục.');
         }
@@ -426,28 +444,61 @@ export class SellerKycService {
         };
     }
 
-    static getSecureFilePath(filename: string, token?: string, userRole?: string, userId?: string) {
+    static isAuthorizedToAccessFile(filename: string, token?: string, userRole?: string, userId?: string): boolean {
         const absPath = resolveKycFilePath(filename);
-        if (!absPath) return null;
+        if (!absPath) return false;
 
         if (token && verifyPresignedToken(filename, token)) {
-            return absPath;
+            return true;
         }
 
         if (userRole === 'admin' || userRole === 'ADMIN') {
-            return absPath;
+            return true;
         }
 
-        return null;
+        if (userId) {
+            const cleanUserId = String(userId).replace(/[^a-zA-Z0-9]/g, '');
+            if (filename.startsWith(`kyc_${cleanUserId}_`)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    static getSecureFilePath(filename: string, token?: string, userRole?: string, userId?: string) {
+        if (!this.isAuthorizedToAccessFile(filename, token, userRole, userId)) {
+            return null;
+        }
+        return resolveKycFilePath(filename);
+    }
+
+    /**
+     * Đọc và giải mã dữ liệu file KYC từ đĩa (hỗ trợ at-rest encryption)
+     * Tự động nâng cấp mã hóa file cũ lên AES-256-GCM khi được truy cập (On-the-fly migration)
+     */
+    static readKycFileBuffer(filename: string): Buffer | null {
+        const absPath = resolveKycFilePath(filename);
+        if (!absPath || !fs.existsSync(absPath)) return null;
+        const diskBuffer = fs.readFileSync(absPath);
+        if (!isBufferEncrypted(diskBuffer)) {
+            try {
+                const encrypted = encryptBuffer(diskBuffer);
+                fs.writeFileSync(absPath, encrypted);
+                logger.info(`[KYC Storage] Đã tự động nâng cấp mã hóa AES-256-GCM cho file cũ: ${filename}`);
+            } catch (err: any) {
+                logger.warn(`[KYC Storage] Không thể ghi đè file mã hóa ${filename}: ${err.message}`);
+            }
+            return diskBuffer;
+        }
+        return decryptBuffer(diskBuffer);
     }
 
     static async scanCccd(filename: string, side: 'front' | 'back' = 'front') {
-        const absPath = resolveKycFilePath(filename);
-        if (!absPath || !fs.existsSync(absPath)) {
+        const fileBuffer = this.readKycFileBuffer(filename);
+        if (!fileBuffer) {
             throw new Error('Không tìm thấy file ảnh tài liệu để quét.');
         }
-
-        const fileBuffer = fs.readFileSync(absPath);
         const ext = path.extname(filename).toLowerCase();
         let mimeType = 'image/jpeg';
         if (ext === '.png') mimeType = 'image/png';
@@ -461,9 +512,15 @@ export class SellerKycService {
         const aiUrl = `${config.aiAnalyticsUrl}/api/v1/ocr/cccd/`;
         logger.info(`[Seller KYC] Sending CCCD scan request to AI service: ${aiUrl} (side=${side})`);
 
+        const headers: Record<string, string> = {};
+        if (config.aiGatewaySecret) {
+            headers['X-Gateway-Secret'] = config.aiGatewaySecret;
+        }
+
         try {
             const response = await fetch(aiUrl, {
                 method: 'POST',
+                headers,
                 body: formData,
                 signal: AbortSignal.timeout(30000), // OCR quét ảnh tiếng Việt mất 5-15s trên CPU
             });
@@ -487,12 +544,10 @@ export class SellerKycService {
     }
 
     static async validatePortrait(filename: string) {
-        const absPath = resolveKycFilePath(filename);
-        if (!absPath || !fs.existsSync(absPath)) {
+        const fileBuffer = this.readKycFileBuffer(filename);
+        if (!fileBuffer) {
             throw new Error('Không tìm thấy file ảnh chân dung để kiểm tra.');
         }
-
-        const fileBuffer = fs.readFileSync(absPath);
         const ext = path.extname(filename).toLowerCase();
         let mimeType = 'image/jpeg';
         if (ext === '.png') mimeType = 'image/png';
@@ -505,9 +560,15 @@ export class SellerKycService {
         const aiUrl = `${config.aiAnalyticsUrl}/api/v1/portrait/validate`;
         logger.info(`[Seller KYC] Sending portrait validation request to AI service: ${aiUrl}`);
 
+        const headers: Record<string, string> = {};
+        if (config.aiGatewaySecret) {
+            headers['X-Gateway-Secret'] = config.aiGatewaySecret;
+        }
+
         try {
             const response = await fetch(aiUrl, {
                 method: 'POST',
+                headers,
                 body: formData,
                 signal: AbortSignal.timeout(30000),
             });
@@ -528,6 +589,83 @@ export class SellerKycService {
             }
             throw error;
         }
+    }
+
+    /**
+     * Dọn dẹp các file KYC mồ côi (tải lên nhưng không nộp đơn hoặc đổi ảnh quá 24h).
+     * Bắt buộc số giờ phải là số nguyên dương (từ 1 đến 720 giờ) để tránh việc xóa nhầm file mới upload.
+     */
+    static async cleanupOrphanKycFiles(olderThanHours: number = 24): Promise<{ deletedCount: number; scannedCount: number }> {
+        if (typeof olderThanHours !== 'number' || isNaN(olderThanHours) || olderThanHours < 1 || olderThanHours > 720) {
+            throw new Error('Số giờ giới hạn (olderThanHours) không hợp lệ. Phải là số nguyên dương từ 1 đến 720 giờ (tối đa 30 ngày).');
+        }
+
+        if (!fs.existsSync(KYC_STORAGE_ROOT)) return { deletedCount: 0, scannedCount: 0 };
+        
+        const files = fs.readdirSync(KYC_STORAGE_ROOT);
+        const now = Date.now();
+        const thresholdMs = olderThanHours * 60 * 60 * 1000;
+
+        const applications = await SellerApplication.find({}).select('kyc_data').lean();
+        const activeFiles = new Set<string>();
+        for (const app of applications) {
+            if (app.kyc_data) {
+                if (app.kyc_data.front_id_image) activeFiles.add(app.kyc_data.front_id_image);
+                if (app.kyc_data.back_id_image) activeFiles.add(app.kyc_data.back_id_image);
+                if (app.kyc_data.portrait_image) activeFiles.add(app.kyc_data.portrait_image);
+                if (app.kyc_data.business_license_image) activeFiles.add(app.kyc_data.business_license_image);
+            }
+        }
+
+        let deletedCount = 0;
+        for (const file of files) {
+            if (activeFiles.has(file)) continue;
+            const filePath = path.join(KYC_STORAGE_ROOT, file);
+            try {
+                const stats = fs.statSync(filePath);
+                if (now - stats.mtimeMs > thresholdMs) {
+                    fs.unlinkSync(filePath);
+                    deletedCount++;
+                }
+            } catch (err: any) {
+                logger.warn(`[KYC Cleanup] Không thể xóa file mồ côi ${file}: ${err.message}`);
+            }
+        }
+        logger.info(`[KYC Cleanup] Đã dọn dẹp ${deletedCount}/${files.length} file tạm mồ côi (cũ hơn ${olderThanHours} giờ).`);
+        return { deletedCount, scannedCount: files.length };
+    }
+
+    /**
+     * Chuyển đổi hàng loạt các file KYC cũ chưa được mã hóa sang chuẩn AES-256-GCM
+     */
+    static async migrateUnencryptedKycFiles(): Promise<{ migratedCount: number; alreadyEncryptedCount: number; totalCount: number }> {
+        if (!fs.existsSync(KYC_STORAGE_ROOT)) return { migratedCount: 0, alreadyEncryptedCount: 0, totalCount: 0 };
+
+        const files = fs.readdirSync(KYC_STORAGE_ROOT);
+        let migratedCount = 0;
+        let alreadyEncryptedCount = 0;
+
+        for (const file of files) {
+            const filePath = path.join(KYC_STORAGE_ROOT, file);
+            try {
+                const stats = fs.statSync(filePath);
+                if (!stats.isFile()) continue;
+
+                const raw = fs.readFileSync(filePath);
+                if (isBufferEncrypted(raw)) {
+                    alreadyEncryptedCount++;
+                } else {
+                    const encrypted = encryptBuffer(raw);
+                    fs.writeFileSync(filePath, encrypted);
+                    migratedCount++;
+                }
+            } catch (err: any) {
+                logger.error(`[KYC Migration] Lỗi khi chuyển đổi file ${file}: ${err.message}`);
+            }
+        }
+
+        logger.info(`[KYC Migration] Chuyển đổi mã hóa hoàn tất: ${migratedCount} file đã mã hóa, ${alreadyEncryptedCount} file đã mã hóa trước đó, tổng cộng ${files.length} file.`);
+        return { migratedCount, alreadyEncryptedCount, totalCount: files.length };
     }
 }
 

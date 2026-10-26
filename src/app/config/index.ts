@@ -89,11 +89,11 @@ export const config = {
     speedSmsAccessToken: process.env.SPEEDSMS_ACCESS_TOKEN || '',
     speedSmsType: Number(process.env.SPEEDSMS_SMS_TYPE) || 2,
     vnpay: {
-        tmnCode: process.env.VNP_TMNCODE || 'R4B161KM',
-        hashSecret: process.env.VNP_HASHSECRET || 'TYQBZSLIPCVPYOVJLCUTLHKTDTDFHJXA',
-        url: process.env.VNP_URL || 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
-        apiUrl: process.env.VNP_API_URL || 'https://sandbox.vnpayment.vn/merchant_webapi/api/transaction',
-        returnUrl: process.env.VNP_RETURNURL || 'http://localhost:3000/orders/vnpay-return',
+        tmnCode: process.env.VNP_TMNCODE || '',
+        hashSecret: process.env.VNP_HASHSECRET || '',
+        url: process.env.VNP_URL || '',
+        apiUrl: process.env.VNP_API_URL || '',
+        returnUrl: process.env.VNP_RETURNURL || '',
     },
 };
 
@@ -103,6 +103,10 @@ if (!config.jwtSecret) {
     } else {
         logger.warn('JWT_SECRET is not defined. Authentication features will fail.');
     }
+}
+
+if (config.nodeEnv === 'production' && (!config.vnpay.tmnCode || !config.vnpay.hashSecret)) {
+    logger.warn('PRODUCTION WARNING: VNPay credentials (VNP_TMNCODE, VNP_HASHSECRET) are not configured. VNPay gateway will be disabled.');
 }
 
 // PostgreSQL pool

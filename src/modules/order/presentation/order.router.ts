@@ -29,10 +29,6 @@ function verifyPaymentCallback(req: Request, res: Response, next: NextFunction) 
     next();
 }
 
-/**
- * POST /api/orders/calculate-shipping
- * Tính toán phí vận chuyển linh hoạt theo gian hàng và địa chỉ nhận hàng
- */
 router.post('/calculate-shipping', async (req: Request, res: Response) => {
     try {
         const { shopId, address } = req.body;

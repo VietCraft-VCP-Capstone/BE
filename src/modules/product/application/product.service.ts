@@ -269,7 +269,7 @@ export class ProductsService {
         if (!isPod && (!partial || payload.variants !== undefined || payload.price !== undefined)) {
             if (variants.length === 0) {
                 if (typeof payload.price === 'number') {
-                    variants = [{ price: payload.price, stock: payload.stock ?? 100 }];
+                    variants = [{ price: payload.price, stock: payload.stock ?? 100, material: payload.material }];
                 } else {
                     errors.push('at least one variant is required');
                 }
