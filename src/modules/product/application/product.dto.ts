@@ -51,6 +51,7 @@ export interface ProductItemResponseDTO {
     shopInfo?: ShopInfoDTO;
     sellerId?: string;
     tags?: string[];
+    materials?: string[];
     rating?: number;
     ratingCount?: number;
     allowCustomization?: boolean;
@@ -67,6 +68,7 @@ export interface ProductFormDataDTO {
     categoryId?: string;
     tagIds?: string[];
     newTagNames?: string[];
+    materials?: string[];
     price: number;
     originalPrice?: number;
     stock?: number;

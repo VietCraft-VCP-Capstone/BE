@@ -77,7 +77,8 @@ const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
         },
         analytics: {
             weeklyReport: { email: true, app: false },
-            promotions: { email: false, app: true }
+            promotions: { email: false, app: true },
+            performanceAlert: { email: false, app: true }
         }
     },
     updatedAt: new Date().toISOString()
@@ -199,7 +200,8 @@ export class SellerSettingsService {
 
         const notifications: SellerNotificationSettingsDTO = {
             ...DEFAULT_SETTINGS.notifications,
-            ...(customSettings.notifications || {})
+            ...(customSettings.notifications || {}),
+            analytics: { ...DEFAULT_SETTINGS.notifications.analytics, ...(customSettings.notifications?.analytics || {}) }
         };
 
         return {

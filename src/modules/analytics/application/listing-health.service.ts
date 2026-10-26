@@ -7,7 +7,8 @@ import { EMPTY_SALES, HealthInputs, ListingProductInfo, ListingSales, healthInpu
 
 
 const COLLECTION = 'listing_health_scores';
-const MODEL_VERSION_FALLBACK = 'health-1.0';
+export const HEALTH_VERSION = 'health-2.2';
+const MODEL_VERSION_FALLBACK = HEALTH_VERSION;
 
 export type HealthStatus = 'good' | 'needs_improvement' | 'poor';
 
@@ -191,6 +192,7 @@ export class ListingHealthService {
 
         const rows = await ListingHealthScore.find({
             product_id: owned.product._id,
+            model_version: HEALTH_VERSION,
             date: { $gte: since },
             score: { $ne: null },
         })
@@ -248,7 +250,7 @@ export class ListingHealthService {
         if (productIds.length > 0) {
             const rows = await ListingHealthScore.aggregate([
                 { $match: { product_id: { $in: productIds } } },
-                { $sort: { date: -1 } },
+                { $sort: { date: -1, computed_at: -1 } },
                 {
                     $group: {
                         _id: '$product_id',

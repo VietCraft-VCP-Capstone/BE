@@ -47,6 +47,8 @@ async function bootstrap() {
 
     const { CompetitorAlertJob } = await import('./modules/analytics/application/competitor-alert.job');
     CompetitorAlertJob.schedule();
+    const { AnomalyAlertJob } = await import('./modules/analytics/application/anomaly-alert.job');
+    AnomalyAlertJob.schedule();
 
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);
