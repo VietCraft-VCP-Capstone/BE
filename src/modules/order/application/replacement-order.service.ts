@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import crypto from 'crypto';
 import { Order } from '../infrastructure/models/order.model';
-import { ReturnRequestV3, ReturnRequestLogV3 } from '../infrastructure/models/return-request-v3.model';
+import { ReturnRequest, ReturnRequestLog } from '../infrastructure/models/return-request.model';
 import { printingShopApiService } from '../infrastructure/services/printing-shop-api.service';
 import { logger } from '../../../shared/utils/logger';
 
@@ -14,44 +14,44 @@ export class ReplacementOrderService {
         replacementOrderCode: string;
         dispatchedToPrinter: boolean;
     }> {
-        // 1. Tìm yêu cầu đổi trả V3
-        const v3Doc: any = await ReturnRequestV3.findOne({
+        // 1. Tìm yêu cầu đổi trả
+        const returnDoc: any = await ReturnRequest.findOne({
             $or: [{ _id: requestId }, { id: requestId }]
         });
 
-        if (!v3Doc) {
+        if (!returnDoc) {
             throw new Error(`Không tìm thấy yêu cầu đổi/trả với mã: ${requestId}`);
         }
 
         // Nếu đã có đơn in bù trước đó, tránh tạo lặp
-        if (v3Doc.replacement_order_id && v3Doc.replacement_order_code) {
+        if (returnDoc.replacement_order_id && returnDoc.replacement_order_code) {
             return {
-                replacementOrderId: String(v3Doc.replacement_order_id),
-                replacementOrderCode: String(v3Doc.replacement_order_code),
+                replacementOrderId: String(returnDoc.replacement_order_id),
+                replacementOrderCode: String(returnDoc.replacement_order_code),
                 dispatchedToPrinter: true,
             };
         }
 
         // 2. Tìm đơn hàng gốc
         let parentOrder: any = null;
-        if (mongoose.Types.ObjectId.isValid(v3Doc.order_id)) {
-            parentOrder = await Order.findById(v3Doc.order_id);
+        if (mongoose.Types.ObjectId.isValid(returnDoc.order_id)) {
+            parentOrder = await Order.findById(returnDoc.order_id);
         }
         if (!parentOrder) {
-            parentOrder = await Order.findOne({ order_code: v3Doc.order_id });
+            parentOrder = await Order.findOne({ order_code: returnDoc.order_id });
         }
 
-        const parentOrderCode = parentOrder?.order_code || v3Doc.order_id;
+        const parentOrderCode = parentOrder?.order_code || returnDoc.order_id;
         const shortSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
         const cleanParentCode = String(parentOrderCode).replace(/^REPLACE-/, '');
         const replacementOrderCode = `REPLACE-${cleanParentCode}-${shortSuffix}`;
 
         // 3. Chuẩn bị thông tin sản phẩm in bù
-        const targetItem = parentOrder?.items?.find((it: any) => 
-            it.order_item_id === v3Doc.order_item_id || String(it._id) === v3Doc.order_item_id
+        const targetItem = parentOrder?.items?.find((it: any) =>
+            it.order_item_id === returnDoc.order_item_id || String(it._id) === returnDoc.order_item_id
         );
-        const itemSnapshot = v3Doc.item_snapshot || {};
-        const quantity = Number(v3Doc.quantity) || 1;
+        const itemSnapshot = returnDoc.item_snapshot || {};
+        const quantity = Number(returnDoc.quantity) || 1;
 
         const zeroDecimal = mongoose.Types.Decimal128.fromString('0');
 
@@ -90,8 +90,8 @@ export class ReplacementOrderService {
         };
 
         // 4. Tạo document đơn hàng in bù 0đ
-        const buyerId = parentOrder?.buyer_id || (mongoose.Types.ObjectId.isValid(v3Doc.buyer_id) ? new mongoose.Types.ObjectId(v3Doc.buyer_id) : new mongoose.Types.ObjectId());
-        const shopId = parentOrder?.shop_id || (mongoose.Types.ObjectId.isValid(v3Doc.seller_id) ? new mongoose.Types.ObjectId(v3Doc.seller_id) : new mongoose.Types.ObjectId());
+        const buyerId = parentOrder?.buyer_id || (mongoose.Types.ObjectId.isValid(returnDoc.buyer_id) ? new mongoose.Types.ObjectId(returnDoc.buyer_id) : new mongoose.Types.ObjectId());
+        const shopId = parentOrder?.shop_id || (mongoose.Types.ObjectId.isValid(returnDoc.seller_id) ? new mongoose.Types.ObjectId(returnDoc.seller_id) : new mongoose.Types.ObjectId());
 
         const replacementOrder = await Order.create({
             buyer_id: buyerId,
@@ -115,7 +115,7 @@ export class ReplacementOrderService {
             status_history: [{
                 status: 'PROCESSING',
                 changed_at: new Date(),
-                note: `Đơn in bù 0đ tự động tạo từ yêu cầu đổi trả ${v3Doc.id || v3Doc._id}`,
+                note: `Đơn in bù 0đ tự động tạo từ yêu cầu đổi trả ${returnDoc.id || returnDoc._id}`,
             }],
             order_hour_of_week: new Date().getDay() * 24 + new Date().getHours(),
         });
@@ -130,7 +130,7 @@ export class ReplacementOrderService {
                 replacementOrder.supplier_order_id = fulfillmentRes.supplier_order_id;
                 replacementOrder.fulfillment_status = 'SUBMITTED';
                 replacementOrder.printer_info = {
-                    printer_id: fulfillmentRes.printer_id || v3Doc.printer_id,
+                    printer_id: fulfillmentRes.printer_id || returnDoc.printer_id,
                     printer_name: fulfillmentRes.printer_name,
                     supplier_order_id: fulfillmentRes.supplier_order_id,
                     dispatched_at: new Date(),
@@ -144,10 +144,10 @@ export class ReplacementOrderService {
             logger.warn(`[REPLACEMENT DISPATCH WARNING] Gửi đơn in bù sang xưởng in thất bại: ${dispatchErr.message}`);
         }
 
-        // 6. Cập nhật trạng thái ReturnRequestV3 sang REPLACEMENT_CREATED
+        // 6. Cập nhật trạng thái ReturnRequest sang REPLACEMENT_CREATED
         const repOrderIdStr = String(replacementOrder._id);
-        await ReturnRequestV3.updateOne(
-            { _id: v3Doc._id },
+        await ReturnRequest.updateOne(
+            { _id: returnDoc._id },
             {
                 $set: {
                     status: 'REPLACEMENT_CREATED',
@@ -160,13 +160,13 @@ export class ReplacementOrderService {
             }
         );
 
-        // 7. Ghi nhận audit trail vào return_request_logs_v3
-        await ReturnRequestLogV3.create({
-            request_id: String(v3Doc.id || v3Doc._id),
+        // 7. Ghi nhận audit trail vào return_request_logs
+        await ReturnRequestLog.create({
+            request_id: String(returnDoc.id || returnDoc._id),
             actor_id: 'SYSTEM',
             actor_role: 'SYSTEM',
             acting_as: 'PRINTER',
-            from_status: v3Doc.status,
+            from_status: returnDoc.status,
             to_status: 'REPLACEMENT_CREATED',
             reason: `Đã tự động khởi tạo đơn in bù 0đ mã #${replacementOrderCode} và gửi lệnh sản xuất sang xưởng in.`,
             event_id: repOrderIdStr,

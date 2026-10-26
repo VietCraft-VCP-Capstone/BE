@@ -105,6 +105,7 @@ export function mapDbOrderToResponse(dbOrder: any, reviewsMap?: Map<string, any>
         items,
         totalAmount,
         shippingFee,
+        discount,
         status: feStatus,
         paymentGateway: dbOrder.payment_method?.toLowerCase() || 'vnpay',
         paymentMethod: dbOrder.payment_method,

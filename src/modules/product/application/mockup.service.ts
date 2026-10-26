@@ -30,7 +30,7 @@ export interface Placement {
 }
 export interface PrintArea { key: string; x: number; y: number; width: number; height: number }
 
-async function loadImage(url: string): Promise<Buffer> {
+export async function loadImage(url: string): Promise<Buffer> {
     if (!url || typeof url !== 'string' || !url.trim()) {
         throw new Error('Đường dẫn ảnh phôi hoặc thiết kế không hợp lệ');
     }

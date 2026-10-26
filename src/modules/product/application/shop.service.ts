@@ -3,6 +3,18 @@ import { Shop } from '../infrastructure/models/shop.model';
 import { ShopFollower } from '../infrastructure/models/shop-follower.model';
 import { logger } from '../../../shared/utils/logger';
 
+// BR-201: người bán theo dõi gian hàng = theo dõi đối thủ, tối đa 10; người mua không giới hạn.
+export const SELLER_FOLLOW_LIMIT = 10;
+
+export class FollowLimitError extends Error {
+    readonly code = 'tracking_limit_reached';
+    readonly limit = SELLER_FOLLOW_LIMIT;
+
+    constructor() {
+        super(`Bạn đã theo dõi tối đa ${SELLER_FOLLOW_LIMIT} gian hàng đối thủ. Bỏ theo dõi bớt một gian hàng để theo dõi gian hàng mới.`);
+    }
+}
+
 export interface ShopDetailDTO {
     id: string;
     _id: string;
@@ -18,13 +30,31 @@ export interface ShopDetailDTO {
     listingCount: number;
     followersCount: number;
     isFollowing: boolean;
+    reputation_score?: number;
+    reputation_tier?: string;
     createdAt?: Date;
+    shippingSettings?: {
+        pricingType?: 'FLAT_RATE' | 'ZONE_BASED';
+        useFlatRate?: boolean;
+        flatRateFee?: number;
+        province?: string;
+        district?: string;
+        ward?: string;
+        carriers?: Array<{
+            id: string;
+            name: string;
+            enabled: boolean;
+            estimatedTime?: string;
+        }>;
+        zoneRates?: {
+            intraProvince: number;
+            intraRegion: number;
+            interRegion: number;
+        };
+    } | null;
 }
 
 export class ShopService {
-    /**
-     * Tìm gian hàng theo ObjectId hoặc slug
-     */
     static async resolveShop(shopIdOrSlug: string) {
         let shop = null;
         if (mongoose.Types.ObjectId.isValid(shopIdOrSlug)) {
@@ -36,9 +66,6 @@ export class ShopService {
         return shop;
     }
 
-    /**
-     * Lấy thông tin chi tiết gian hàng
-     */
     static async getShopDetail(shopIdOrSlug: string, currentUserId?: string): Promise<ShopDetailDTO> {
         const shop = await ShopService.resolveShop(shopIdOrSlug);
         if (!shop) {
@@ -51,6 +78,24 @@ export class ShopService {
             currentUserId &&
             followerDoc?.buyer_ids?.some(id => id.toString() === currentUserId)
         );
+
+        const score = typeof shop.reputation_score === 'number' ? shop.reputation_score : 80;
+        const tier = shop.reputation_tier || (score >= 90 ? 'TRUSTED' : score >= 70 ? 'NORMAL' : score >= 50 ? 'WARNING' : 'RESTRICTED');
+        const rawShipping = shop.settings?.shipping;
+        const shippingSettings = rawShipping ? {
+            pricingType: rawShipping.pricingType || (rawShipping.useFlatRate ? 'FLAT_RATE' : 'ZONE_BASED'),
+            useFlatRate: rawShipping.pricingType === 'FLAT_RATE' || Boolean(rawShipping.useFlatRate),
+            flatRateFee: Number(rawShipping.flatRateFee ?? 0),
+            province: rawShipping.province || '',
+            district: rawShipping.district || '',
+            ward: rawShipping.ward || '',
+            carriers: rawShipping.carriers || [],
+            zoneRates: rawShipping.zoneRates || {
+                intraProvince: 22000,
+                intraRegion: 30000,
+                interRegion: 38000
+            }
+        } : null;
 
         return {
             id: shop._id.toString(),
@@ -67,13 +112,31 @@ export class ShopService {
             listingCount: typeof shop.listing_count === 'number' ? shop.listing_count : 0,
             followersCount,
             isFollowing,
+            reputation_score: score,
+            reputation_tier: tier,
             createdAt: shop.created_at,
+            shippingSettings,
         };
     }
 
-    /**
-     * Theo dõi gian hàng
-     */
+    static async countFollowing(userId: string): Promise<number> {
+        return ShopFollower.countDocuments({ buyer_ids: new mongoose.Types.ObjectId(userId) });
+    }
+
+    static async isFollowing(shopId: mongoose.Types.ObjectId | string, userId: string): Promise<boolean> {
+        const found = await ShopFollower.exists({ shop_id: shopId, buyer_ids: new mongoose.Types.ObjectId(userId) });
+        return Boolean(found);
+    }
+
+    // Theo dõi lại gian hàng đang theo dõi thì không tốn thêm chỗ (BR-201).
+    static async assertSellerFollowSlot(shopIdOrSlug: string, userId: string): Promise<void> {
+        const shop = await ShopService.resolveShop(shopIdOrSlug);
+        if (!shop || await ShopService.isFollowing(shop._id, userId)) return;
+        if (await ShopService.countFollowing(userId) >= SELLER_FOLLOW_LIMIT) {
+            throw new FollowLimitError();
+        }
+    }
+
     static async followShop(shopIdOrSlug: string, buyerId: string) {
         const shop = await ShopService.resolveShop(shopIdOrSlug);
         if (!shop) {
@@ -104,9 +167,6 @@ export class ShopService {
         };
     }
 
-    /**
-     * Hủy theo dõi gian hàng
-     */
     static async unfollowShop(shopIdOrSlug: string, buyerId: string) {
         const shop = await ShopService.resolveShop(shopIdOrSlug);
         if (!shop) {
@@ -133,9 +193,6 @@ export class ShopService {
         };
     }
 
-    /**
-     * Lấy danh sách các gian hàng mà người dùng đang theo dõi
-     */
     static async getFollowedShops(userId: string): Promise<ShopDetailDTO[]> {
         if (!userId) return [];
         const userObjectId = new mongoose.Types.ObjectId(userId);

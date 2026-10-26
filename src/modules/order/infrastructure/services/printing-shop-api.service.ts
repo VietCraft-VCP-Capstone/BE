@@ -3,6 +3,7 @@ import { config } from '../../../../app/config';
 import { logger } from '../../../../shared/utils/logger';
 import { User } from '../../../user/infrastructure/models/user.model';
 import { Shop } from '../../../product/infrastructure/models/shop.model';
+import { decryptField } from '../../../../shared/utils/crypto.service';
 
 export class PrintingApiError extends Error {
     public statusCode?: number;
@@ -52,7 +53,7 @@ export class PrintingShopApiService {
             ? shop.printer_partner.api_url 
             : (config.printerApiUrl || 'http://localhost:8880');
         const targetApiKey = (shop?.printer_partner?.is_connected && shop.printer_partner.api_key)
-            ? shop.printer_partner.api_key
+            ? decryptField(shop.printer_partner.api_key)
             : (config.printerApiKey || '');
 
         if (!targetBaseUrl) {

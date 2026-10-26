@@ -16,3 +16,6 @@ export const executeVnpayRefund = executeRefund;
 export const settleRefundManually = (input: RefundExecutionInput, manual: ManualSettlement) => refundExecutionService.settleManually(input, manual);
 /** Ngữ cảnh hoàn tiền (gồm tài khoản nhận nếu cổng cho biết), chỉ đọc. */
 export const refundContextOf = (orderId: string) => refundRepository.loadContext(orderId);
+
+/** Khóa idempotent của hoàn tiền khi người mua tự hủy đơn: một đơn chỉ có một execution. */
+export const cancelRefundKey = (orderCode: string) => `CANCEL-${orderCode}`;

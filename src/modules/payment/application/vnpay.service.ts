@@ -73,6 +73,10 @@ export class VNPayService {
      * Tạo URL thanh toán VNPay chuẩn v2.1.0
      */
     async createPaymentUrl(dto: CreatePaymentUrlDto): Promise<string> {
+        if (!this.tmnCode || !this.hashSecret) {
+            throw new Error('Cổng thanh toán VNPay chưa được cấu hình đầy đủ (thiếu VNP_TMNCODE hoặc VNP_HASHSECRET trong biến môi trường).');
+        }
+
         const order = await Order.findOne(byCodeOrId(dto.orderId));
         if (!order) {
             throw new Error(`Đơn hàng không tồn tại: ${dto.orderId}`);
@@ -130,6 +134,11 @@ export class VNPayService {
      */
     async handleIpn(query: Record<string, any>): Promise<VNPayIpnResponse> {
         try {
+            if (!this.hashSecret) {
+                logger.error('[VNPay IPN] Chưa cấu hình VNP_HASHSECRET để xác thực chữ ký IPN.');
+                return { RspCode: '97', Message: 'VNPay not configured' };
+            }
+
             const secureHash = query['vnp_SecureHash'];
             if (!secureHash) {
                 return { RspCode: '97', Message: 'Missing checksum' };
@@ -320,6 +329,18 @@ export class VNPayService {
      * Kiểm tra tính hợp lệ của Return URL khi người dùng redirect về từ VNPay
      */
     verifyReturnUrl(query: Record<string, any>): VNPayReturnResult {
+        if (!this.hashSecret) {
+            return {
+                isSuccess: false,
+                message: 'Chưa cấu hình VNP_HASHSECRET để xác thực chữ ký trả về từ VNPay.',
+                orderCode: query['vnp_TxnRef'] || '',
+                amount: Number(query['vnp_Amount'] || 0) / 100,
+                transactionNo: query['vnp_TransactionNo'],
+                bankCode: query['vnp_BankCode'],
+                responseCode: query['vnp_ResponseCode'] || '',
+            };
+        }
+
         const secureHash = query['vnp_SecureHash'];
         const vnpParams: Record<string, any> = { ...query };
         delete vnpParams['vnp_SecureHash'];

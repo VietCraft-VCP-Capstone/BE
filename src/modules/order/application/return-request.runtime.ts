@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { Order } from '../infrastructure/models/order.model';
 import { createBuyerOrderIdResolver } from './buyer-order-id-resolver';
 import { Shop } from '../../product/infrastructure/models/shop.model';
-import { MongoReturnRequestV3Repository } from '../infrastructure/repositories/return-request-v3.repository';
+import { MongoReturnRequestRepository } from '../infrastructure/repositories/return-request.repository';
 import { MongooseReturnRefundExecutionRepository } from '../infrastructure/services/return-refund-execution.repository';
 import { createLinkedRefundExecution } from './return-refund-bridge.service';
 import { OrderDeliveredEventSource } from './order-delivered-event-source';
@@ -46,7 +46,7 @@ export function createOrderReturnSnapshotSource(allowSimulated = false, env: Nod
         }
         const status=String(order.order_status).toUpperCase();
         const sellerId = String(shop?.owner_id || order.shop_id || 'SELLER_DEFAULT');
-        const printerId = String((order as any).printer_info?.printer_id || shop?.printer_partner?.printer_id || env.PRINTER_REFUND_PRINTER_ID || 'PRINTING_SHOP_MOCK');
+        const printerId = String((order as any).printer_info?.printer_id || shop?.printer_partner?.printer_id || env.PRINTER_REFUND_PRINTER_ID || 'PRINTER_SHOP');
         const [usage, snapshot] = await Promise.all([getOrderItemReturnQuantityUsage(order,itemId,Number(item.quantity)||0), Promise.resolve(buildReturnItemSnapshot(order,item))]);
         return { orderId:String(order._id),orderItemId:itemId,buyerId:String(order.buyer_id),sellerId,printerId,cohort:order.is_pod||order.order_type==='POD'?'POD' as const:'NORMAL' as const,itemStatus:status==='DELIVERED'?'DELIVERED' as const:status==='SHIPPING'?'SHIPPING' as const:'OTHER' as const,itemSnapshot:snapshot.snapshot,valid:snapshot.valid,orderedQuantity:Number(item.quantity)||0,...usage,policyVersion:'pod-v1',schemaVersion:'v3',is_simulated:order.is_simulated===true };
     }
@@ -57,5 +57,5 @@ export function createReturnRequestService(realClock: ReturnRequestClock = { now
     const enabled=isDevOrderSimulationEnabled(env);
     const bridgeRepository=new MongooseReturnRefundExecutionRepository();
     const bridge: ReturnRequestRefundBridge={ async createLinkedRefund(input){ return createLinkedRefundExecution(bridgeRepository,input); } };
-    return new ReturnRequestApplicationService({ repository:new MongoReturnRequestV3Repository(),snapshotSource:createOrderReturnSnapshotSource(enabled,env),eligibilityItemSource:createReturnEligibilityItemSource(enabled),resolveBuyerOrderId,deliveredEventSource:new OrderDeliveredEventSource(enabled),bridge,executeRefund:executeReturnRefund,clock:createReturnClock(realClock,env),id:()=>crypto.randomUUID() });
+    return new ReturnRequestApplicationService({ repository:new MongoReturnRequestRepository(),snapshotSource:createOrderReturnSnapshotSource(enabled,env),eligibilityItemSource:createReturnEligibilityItemSource(enabled),resolveBuyerOrderId,deliveredEventSource:new OrderDeliveredEventSource(enabled),bridge,executeRefund:executeReturnRefund,clock:createReturnClock(realClock,env),id:()=>crypto.randomUUID() });
 }

@@ -29,6 +29,7 @@ export const config = {
     nodeEnv: process.env.NODE_ENV || 'development',
     databaseUrl: process.env.DATABASE_URL || '',
     mongoUri: process.env.MONGO_URI || '',
+    mongoDbData: process.env.MONGO_DB_DATA || 'data-collection',
     redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
     jwtSecret: process.env.JWT_SECRET || '',
     aiAnalyticsUrl: process.env.AI_ANALYTICS_URL || 'http://localhost:8000',
@@ -55,6 +56,20 @@ export const config = {
         folder: process.env.CLOUDINARY_FOLDER || 'vietcraft',
         apiBase: process.env.CLOUDINARY_API_BASE || 'https://api.cloudinary.com',
     },
+    // Video quảng cáo AI (gateway tương thích OpenAI, TÍNH TIỀN theo mỗi lần tạo).
+    videoAi: {
+        apiKey: process.env.VIDEO_AI_API_KEY || '',
+        baseUrl: (process.env.VIDEO_AI_BASE_URL || 'https://cheapkeyai.shop/v1').replace(/\/+$/, ''),
+        // grok-imagine-video rẻ nhất (~$0.006/lần); veo_3_1-fast ~$0.06; veo_3_1 ~$0.08.
+        model: process.env.VIDEO_AI_MODEL || 'grok-imagine-video',
+        durationSec: Number(process.env.VIDEO_AI_DURATION_SEC) || 4,
+        // Kill switch: đặt VIDEO_AI_ENABLED=false để chặn mọi lần gọi tốn tiền.
+        enabled: process.env.VIDEO_AI_ENABLED !== 'false',
+        // Trần chi phí: số video tối đa / seller / 24h và toàn hệ thống / 24h.
+        dailyLimitPerUser: Number(process.env.VIDEO_AI_DAILY_LIMIT_PER_USER) || 3,
+        dailyLimitGlobal: Number(process.env.VIDEO_AI_DAILY_LIMIT_GLOBAL) || 30,
+        pollTimeoutMs: Number(process.env.VIDEO_AI_POLL_TIMEOUT_MS) || 10 * 60 * 1000,
+    },
     paymentCallbackSecret: process.env.PAYMENT_CALLBACK_SECRET || '',
     payos: {
         // Thu tiền (payment link)
@@ -74,11 +89,11 @@ export const config = {
     speedSmsAccessToken: process.env.SPEEDSMS_ACCESS_TOKEN || '',
     speedSmsType: Number(process.env.SPEEDSMS_SMS_TYPE) || 2,
     vnpay: {
-        tmnCode: process.env.VNP_TMNCODE || 'R4B161KM',
-        hashSecret: process.env.VNP_HASHSECRET || 'TYQBZSLIPCVPYOVJLCUTLHKTDTDFHJXA',
-        url: process.env.VNP_URL || 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
-        apiUrl: process.env.VNP_API_URL || 'https://sandbox.vnpayment.vn/merchant_webapi/api/transaction',
-        returnUrl: process.env.VNP_RETURNURL || 'http://localhost:3000/orders/vnpay-return',
+        tmnCode: process.env.VNP_TMNCODE || '',
+        hashSecret: process.env.VNP_HASHSECRET || '',
+        url: process.env.VNP_URL || '',
+        apiUrl: process.env.VNP_API_URL || '',
+        returnUrl: process.env.VNP_RETURNURL || '',
     },
 };
 
@@ -88,6 +103,10 @@ if (!config.jwtSecret) {
     } else {
         logger.warn('JWT_SECRET is not defined. Authentication features will fail.');
     }
+}
+
+if (config.nodeEnv === 'production' && (!config.vnpay.tmnCode || !config.vnpay.hashSecret)) {
+    logger.warn('PRODUCTION WARNING: VNPay credentials (VNP_TMNCODE, VNP_HASHSECRET) are not configured. VNPay gateway will be disabled.');
 }
 
 // PostgreSQL pool
@@ -116,6 +135,10 @@ export async function connectPostgres() {
 }
 
 // MongoDB connection
+export function isMongoReady(): boolean {
+    return mongoose.connection.readyState === 1;
+}
+
 export async function connectMongo() {
     if (!config.mongoUri) {
         logger.warn('Failed to connect to MongoDB: MONGO_URI is not defined.');

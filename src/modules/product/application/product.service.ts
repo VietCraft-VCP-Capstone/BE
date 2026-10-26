@@ -19,13 +19,28 @@ import {
     ProductColorVariantDTO,
     InventoryTrendPointDTO,
     ProductFilterQueryDTO,
-    PaginatedProductsResponseDTO
+    PaginatedProductsResponseDTO,
+    SearchProductsParams,
+    SuggestResultDTO
 } from './product.dto';
+import { SearchLog } from '../../analytics/infrastructure/models/search-log.model';
+import { BannedKeyword } from '../../analytics/infrastructure/models/banned-keyword.model';
+import { shouldLogSearch, rankSuggestions, SUGGEST_PROJECTION } from './product-search.helpers';
+import { buildKeywordSuggestions, fetchLoggedKeywords, fetchPopularKeywords } from './suggest-keywords';
+import { getTrendingKeywords as fetchTrendingKeywords } from './trending-keywords';
+import { buildTermsMatch, buildSearchPipeline } from './product-search.pipeline';
+import { findSearchHits } from './atlas-search';
+import { getSoldCounts } from './product-sold';
+import { RecommendService } from './recommend/recommend.service';
+import { normalizeVi, nfcLower, escapeRegex, accentInsensitive, extractSearchTerms } from '../../../shared/utils/vietnamese-search.util';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
 import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
+import { contentModerationService } from '../../../shared/services/content-moderation.service';
+import { normalizeMaterials } from '../../../shared/utils/materials';
+import { AiGatewayService } from '../../analytics/application/ai-gateway.service';
 
 function getColorHex(colorName: string): string {
     const lower = (colorName || '').toLowerCase();
@@ -42,22 +57,26 @@ function getColorHex(colorName: string): string {
     return '#8B5CF6';
 }
 
-function mapToProductItemResponse(product: any, variants: any[], shop?: any): ProductItemResponseDTO {
+function mapToProductItemResponse(product: any, variants: any[], shop?: any, soldCount = 0): ProductItemResponseDTO {
     const mainVariant = variants[0];
     const price = mainVariant ? parseFloat(mainVariant.retail_price?.toString() || '0') : 0;
     const totalStock = variants.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
     const stockValue = price * totalStock;
     const sku = mainVariant?.sku || `VC-PRD-${product._id.toString().substring(18).toUpperCase()}`;
 
-    const colors: ProductColorVariantDTO[] = variants
-        .filter(v => Boolean(v.color))
-        .map(v => {
+    const seenColors = new Set<string>();
+    const colors: ProductColorVariantDTO[] = [];
+    for (const v of variants) {
+        if (v.color && !seenColors.has(v.color.trim().toLowerCase())) {
+            seenColors.add(v.color.trim().toLowerCase());
             const hex = (v.mockup_image && v.mockup_image.startsWith('#')) ? v.mockup_image : getColorHex(v.color);
-            return {
+            colors.push({
                 name: v.color,
                 hex: hex
-            };
-        });
+            });
+        }
+    }
+    const distinctSizes = [...new Set(variants.map(v => v.size).filter(Boolean))] as string[];
 
     const status: ProductStatus = product.listing_status === 'INACTIVE'
         ? 'INACTIVE'
@@ -124,6 +143,7 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         thumbnail,
         images,
         colors: colors.length > 0 ? colors : [{ name: 'Tự nhiên', hex: '#5C4033' }],
+        sizes: distinctSizes.length > 0 ? distinctSizes : undefined,
         engagementTrend,
         inventoryTrends,
         variants: mappedVariants,
@@ -131,14 +151,19 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
             id: shop._id.toString(),
             name: shop.shop_name,
             logo: shop.logo,
-            rating: shop.average_rating || 5.0,
+            rating: shop.average_rating ?? 5.0,
         } : undefined,
         sellerId: product.shop_id ? product.shop_id.toString() : undefined,
         tags: product.tags || [],
-        rating: typeof product.average_rating === 'number' ? product.average_rating : 5.0,
+        materials: product.materials || [],
+        rating: (typeof product.rating_count === 'number' && product.rating_count > 0)
+            ? (typeof product.average_rating === 'number' ? product.average_rating : 0)
+            : 0,
         ratingCount: typeof product.rating_count === 'number' ? product.rating_count : 0,
         allowCustomization: Boolean(product.allow_customization),
         customizationType: product.customization_type || 'NONE',
+        productType: product.product_type || 'READY_TO_SHIP',
+        soldCount,
         createdAt: product.created_at ? new Date(product.created_at).toISOString() : new Date().toISOString(),
         updatedAt: product.updated_at ? new Date(product.updated_at).toISOString() : new Date().toISOString(),
     };
@@ -192,7 +217,7 @@ export interface ProductActor {
     role: string;
 }
 
-const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
+export const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
 
 export class ProductsService {
 
@@ -247,7 +272,7 @@ export class ProductsService {
         if (!isPod && (!partial || payload.variants !== undefined || payload.price !== undefined)) {
             if (variants.length === 0) {
                 if (typeof payload.price === 'number') {
-                    variants = [{ price: payload.price, stock: payload.stock ?? 100 }];
+                    variants = [{ price: payload.price, stock: payload.stock ?? 100, material: payload.material }];
                 } else {
                     errors.push('at least one variant is required');
                 }
@@ -417,11 +442,29 @@ export class ProductsService {
         const docs: { _id: mongoose.Types.ObjectId; name: string }[] = [];
         let proposed = 0;
         for (const name of names) {
-            const slug = generateSlug(name);
+            const trimmed = String(name || '').trim();
+            if (!trimmed) continue;
+
+            // Kiểm tra từ cấm cho thẻ đề xuất
+            const check = await contentModerationService.checkContent(trimmed);
+            if (!check.isClean) {
+                throw new Error(`Thẻ "${trimmed}" không thể sử dụng: ${check.reason || 'chứa từ ngữ không phù hợp'}`);
+            }
+
+            const slug = generateSlug(trimmed);
             if (!slug) continue;
             let tag: any = await Tag.findOne({ slug }).lean();
+            if (tag && (tag.status === 'banned' || tag.review_status === 'banned')) {
+                throw new Error(`Thẻ "${trimmed}" đã bị cấm bởi Ban quản trị sàn`);
+            }
             if (!tag) {
-                tag = await Tag.create({ name, slug, status: 'pending', proposed_by: sellerId });
+                tag = await Tag.create({
+                    name: trimmed,
+                    slug,
+                    status: 'active', // Cho phép dùng ngay
+                    review_status: 'pending', // Chờ Admin rà soát sau
+                    proposed_by: sellerId
+                });
                 proposed += 1;
             }
             docs.push({ _id: tag._id, name: tag.name });
@@ -475,15 +518,15 @@ export class ProductsService {
 
         if (filter?.category && filter.category.trim() !== ''
             && filter.category !== 'Tất cả danh mục' && filter.category !== 'ALL') {
-            query.categories = { $in: [new RegExp(filter.category.trim(), 'i')] };
+            query.categories = { $regex: escapeRegex(filter.category.trim()), $options: 'i' };
         }
 
         if (filter?.search && filter.search.trim() !== '') {
-            const s = filter.search.trim();
+            const safeRegex = escapeRegex(filter.search.trim());
             query.$or = [
-                { title: { $regex: s, $options: 'i' } },
-                { description: { $regex: s, $options: 'i' } },
-                { tags: { $in: [new RegExp(s, 'i')] } }
+                { title: { $regex: safeRegex, $options: 'i' } },
+                { description: { $regex: safeRegex, $options: 'i' } },
+                { tags: { $regex: safeRegex, $options: 'i' } }
             ];
         }
 
@@ -520,6 +563,27 @@ export class ProductsService {
                 { $skip: skip },
                 { $limit: limit }
             ]).exec();
+        } else if (filter?.search && (!sort || sort === 'relevance')) {
+            // SEO Nội sàn: Ưu tiên hiển thị sản phẩm của Shop có điểm uy tín cao (SRS)
+            docsPromise = MongoProduct.aggregate([
+                { $match: query },
+                {
+                    $lookup: {
+                        from: 'shops',
+                        localField: 'shop_id',
+                        foreignField: '_id',
+                        as: '_shop'
+                    }
+                },
+                {
+                    $addFields: {
+                        _reputationScore: { $ifNull: [{ $arrayElemAt: ['$_shop.reputation_score', 0] }, 80] }
+                    }
+                },
+                { $sort: { _reputationScore: -1, created_at: -1 } },
+                { $skip: skip },
+                { $limit: limit }
+            ]).exec();
         } else {
             const sortOption: any = sort === 'rank_asc'
                 ? { display_rank: 1, created_at: -1 }
@@ -536,15 +600,16 @@ export class ProductsService {
         const items = await ProductsService.mapMany(docs);
         return { items, total, page, limit, totalPages };
     }
-    private static async mapMany(docs: any[]): Promise<ProductItemResponseDTO[]> {
+    static async mapMany(docs: any[], soldMap?: Map<string, number>): Promise<ProductItemResponseDTO[]> {
         if (docs.length === 0) return [];
 
         const productIds = docs.map(p => p._id);
         const shopIds = [...new Set(docs.map(p => p.shop_id).filter(Boolean).map((s: any) => s.toString()))];
 
-        const [allVariants, allShops] = await Promise.all([
+        const [allVariants, allShops, sold] = await Promise.all([
             MongoVariant.find({ product_id: { $in: productIds } }).lean(),
-            Shop.find({ _id: { $in: shopIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+            Shop.find({ _id: { $in: shopIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean(),
+            soldMap ?? getSoldCounts(productIds)
         ]);
 
         const variantsByProductId = new Map<string, any[]>();
@@ -560,7 +625,8 @@ export class ProductsService {
         return docs.map(mp => mapToProductItemResponse(
             mp,
             variantsByProductId.get(mp._id.toString()) || [],
-            shopsById.get(mp.shop_id?.toString())
+            shopsById.get(mp.shop_id?.toString()),
+            sold.get(mp._id.toString()) ?? 0
         ));
     }
 
@@ -601,6 +667,175 @@ export class ProductsService {
         }, 120);
     }
 
+    static async search(params: SearchProductsParams): Promise<PaginatedProductsResponseDTO> {
+        const q = nfcLower(typeof params.q === 'string' ? params.q : '').slice(0, 100);
+        const terms = [...new Set(q.split(/\s+/).filter(Boolean))].slice(0, 8);
+        const page = Math.max(1, Number(params.page) || 1);
+        const n = Math.floor(Number(params.limit || params.pageSize));
+        const limit = n > 0 ? Math.min(48, n) : 12;
+
+        // Chỉ ghi lịch sử ở trang 1 với sort mặc định, tránh thổi phồng khi lọc/phân trang
+        const logId = shouldLogSearch(q, page, params) ? new mongoose.Types.ObjectId() : undefined;
+
+        const match: any = {
+            status: 'PUBLISHED',
+            is_hidden: { $ne: true },
+            listing_status: 'ACTIVE',
+            moderation_status: 'APPROVED',
+        };
+
+        const hits = q ? await findSearchHits(q) : null;
+        const andConditions: any[] = hits ? [{ _id: { $in: hits.ids } }] : buildTermsMatch(terms);
+
+        if (params.category && params.category !== 'ALL' && params.category !== 'Tất cả danh mục') {
+            const rawCat = params.category.trim();
+            andConditions.push(/^[0-9a-fA-F]{24}$/.test(rawCat)
+                ? { category_ids: new mongoose.Types.ObjectId(rawCat) }
+                : { categories: { $regex: escapeRegex(rawCat), $options: 'i' } });
+        }
+
+        const pType = params.productType || params.craftType;
+        if (pType && pType !== 'ALL') {
+            match.product_type = pType;
+        }
+
+        if (params.location && params.location.trim()) {
+            match.location = { $regex: escapeRegex(params.location.trim()), $options: 'i' };
+        }
+
+        if (params.rating) {
+            match.average_rating = { $gte: Number(params.rating) };
+            match.rating_count = { $gt: 0 };
+        }
+
+        const priceStock: any = {};
+        if (params.minPrice != null && params.minPrice !== '') {
+            priceStock._maxPrice = { $gte: Number(params.minPrice) };
+        }
+        if (params.maxPrice != null && params.maxPrice !== '') {
+            priceStock._minPrice = { $lte: Number(params.maxPrice) };
+        }
+        if (params.inStockOnly === true || params.inStockOnly === 'true') {
+            // POD in theo yêu cầu, luôn sẵn sàng phục vụ
+            priceStock.$or = [{ product_type: { $ne: 'READY_TO_SHIP' } }, { _totalStock: { $gt: 0 } }];
+        }
+
+        if (andConditions.length > 0) {
+            match.$and = andConditions;
+        }
+
+        const SORTS: Record<string, any> = {
+            relevance:   { _relevance: -1, created_at: -1 },
+            newest:      { created_at: -1 },
+            price_asc:   { _minPrice: 1, created_at: -1 },
+            price_desc:  { _maxPrice: -1, created_at: -1 },
+            rating_desc: { _rating: -1, rating_count: -1, created_at: -1 },
+            best_seller: { _sold: -1, created_at: -1 },
+        };
+
+        const sortKey = SORTS[params.sort as string] ? String(params.sort) : 'relevance';
+        const [res] = await MongoProduct.aggregate(
+            buildSearchPipeline({ match, q, priceStock, sort: SORTS[sortKey], withSold: sortKey === 'best_seller', page, limit, searchHits: hits ?? undefined }),
+            { allowDiskUse: true }
+        );
+
+        const rawDocs = res?.items || [];
+        const total = res?.total?.[0]?.n ?? 0;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+
+        if (logId) {
+            SearchLog.create({
+                _id: logId,
+                keyword: q,
+                result_count: total,
+                user_id: params.userId && mongoose.Types.ObjectId.isValid(params.userId) ? new mongoose.Types.ObjectId(params.userId) : undefined
+            }).catch(() => {});
+        }
+
+        const items = await ProductsService.mapMany(rawDocs);
+        return { items, total, page, limit, totalPages, ...(logId && { searchLogId: logId.toString() }) };
+    }
+
+    static async suggest(queryStr?: string, userId?: string): Promise<SuggestResultDTO> {
+        const q = nfcLower(typeof queryStr === 'string' ? queryStr : '').slice(0, 60);
+        const norm = normalizeVi(q);
+        if (!norm) {
+            return { keywords: [], shops: [], categories: [] };
+        }
+        const terms = extractSearchTerms(q, 4);
+        const qRegex = { $regex: accentInsensitive(q), $options: 'i' };
+        const safeSlugQ = escapeRegex(norm.replace(/\s+/g, '-'));
+
+        const restrictedShopIds = await Shop.find({ reputation_tier: 'RESTRICTED' }).distinct('_id');
+        const prodBase: any = {
+            status: 'PUBLISHED',
+            is_hidden: { $ne: true },
+            listing_status: 'ACTIVE',
+            moderation_status: 'APPROVED',
+            shop_id: { $nin: restrictedShopIds },
+        };
+        const atlas = await findSearchHits(q);
+        const [hits, matchingShops, matchingCategories, loggedKeywords, popularKeywords, banned] = await Promise.all([
+            MongoProduct.find(
+                atlas ? { ...prodBase, _id: { $in: atlas.ids.slice(0, 50) } } : { ...prodBase, $or: [{ title: qRegex }, { tags: qRegex }, { categories: qRegex }] },
+                SUGGEST_PROJECTION
+            )
+                .sort({ rating_count: -1, created_at: -1 })
+                .limit(20)
+                .lean(),
+
+            Shop.find({
+                reputation_tier: { $ne: 'RESTRICTED' },
+                status: { $nin: ['CLOSED', 'INACTIVE'] },
+                $or: [
+                    { shop_name: qRegex },
+                    { slug: { $regex: '^' + safeSlugQ } }
+                ]
+            })
+                .select('_id shop_name slug logo reputation_score reputation_tier')
+                .sort({ reputation_score: -1 })
+                .limit(2)
+                .lean(),
+
+            Category.find({
+                is_active: true,
+                $or: [
+                    { name: qRegex },
+                    { slug: { $regex: '^' + safeSlugQ } }
+                ]
+            })
+                .select('_id name slug')
+                .limit(3)
+                .lean(),
+
+            userId && mongoose.Types.ObjectId.isValid(userId) ? fetchLoggedKeywords(q, userId) : [],
+            fetchPopularKeywords(q),
+            BannedKeyword.distinct('keyword')
+        ]);
+
+        const ranked = rankSuggestions(hits, norm, terms, 20);
+
+        return {
+            keywords: buildKeywordSuggestions(q, [...loggedKeywords, ...popularKeywords], ranked.map((p: any) => p.title), banned),
+            shops: matchingShops.map((s: any) => ({
+                id: s._id.toString(),
+                name: s.shop_name,
+                slug: s.slug,
+                logo: s.logo,
+                reputationScore: s.reputation_score ?? 80,
+                reputationTier: s.reputation_tier || 'NORMAL'
+            })),
+            categories: matchingCategories.map((c: any) => ({
+                id: c._id.toString(),
+                name: c.name,
+                slug: c.slug
+            }))
+        };
+    }
+
+    static async getTrendingKeywords(limit = 8): Promise<string[]> {
+        return fetchTrendingKeywords(limit);
+    }
 
     static async getMine(actor: ProductActor, filter?: ProductFilterQueryDTO): Promise<PaginatedProductsResponseDTO> {
         const limit = Number(filter?.limit || filter?.pageSize) || 6;
@@ -626,11 +861,12 @@ export class ProductsService {
             const mp = await MongoProduct.findOne(query).lean();
             if (!mp) throw new Error('Không tìm thấy sản phẩm.');
 
-            const [variants, shop] = await Promise.all([
+            const [variants, shop, sold] = await Promise.all([
                 MongoVariant.find({ product_id: mp._id }).lean(),
-                Shop.findById(mp.shop_id).lean()
+                Shop.findById(mp.shop_id).lean(),
+                getSoldCounts([mp._id])
             ]);
-            return mapToProductItemResponse(mp, variants, shop);
+            return mapToProductItemResponse(mp, variants, shop, sold.get(mp._id.toString()) ?? 0);
         };
 
         if (opts.includeHidden) {
@@ -674,29 +910,7 @@ export class ProductsService {
     static async getRelated(id: string, category?: string, limit = 4): Promise<ProductItemResponseDTO[]> {
         if (!mongoose.Types.ObjectId.isValid(id)) return [];
         const cacheKey = `vietcraft:products:related:${id}:${category || 'auto'}:${limit}`;
-        return cacheService.getOrSet(cacheKey, async () => {
-            const self = new mongoose.Types.ObjectId(id);
-
-            let cat = category;
-            if (!cat) {
-                const p = await MongoProduct.findById(self).select('categories').lean();
-                cat = p?.categories?.[0];
-            }
-
-            const base: any = { ...PUBLIC_QUERY, listing_status: 'ACTIVE', _id: { $ne: self } };
-            let docs = await MongoProduct.find(cat ? { ...base, categories: cat } : base)
-                .limit(limit).lean();
-
-            if (docs.length < limit) {
-                const extra = await MongoProduct.find({
-                    ...base,
-                    _id: { $nin: [self, ...docs.map(p => p._id)] }
-                }).limit(limit - docs.length).lean();
-                docs = [...docs, ...extra];
-            }
-
-            return ProductsService.mapMany(docs);
-        }, 600);
+        return cacheService.getOrSet(cacheKey, () => RecommendService.related(id, category, limit), 600);
     }
 
     static async getFeaturedShops(): Promise<any[]> {
@@ -762,6 +976,7 @@ export class ProductsService {
             categories: [data.category.name],
             category_ids: [data.category._id],
             tags: allTags.map(t => t.name),
+            materials: normalizeMaterials(payload.materials),
             tag_ids: allTags.map(t => t._id),
             weight_g: payload.weight_g ?? 500,
             dimensions_cm: payload.dimensions_cm ?? { length: 10, width: 10, height: 10 },
@@ -778,6 +993,7 @@ export class ProductsService {
 
         await Shop.updateOne({ _id: shop._id }, { $inc: { listing_count: 1 } });
         await ProductsService.invalidateProductCache(mp._id.toString());
+        logger.info(`Created new product (structured): ${mp._id} (${mp.title}) | category="${data.category?.name}" (${data.category?._id}) | tags=${allTags.length}`);
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
 
@@ -865,6 +1081,7 @@ export class ProductsService {
             categories: [catalog.category!.name],
             category_ids: [catalog.category!._id],
             tags: tags.map(t => t.name),
+            materials: normalizeMaterials(payload.materials),
             tag_ids: tags.map(t => t._id),
             weight_g: 500,
             dimensions_cm: { length: 10, width: 10, height: 10 },
@@ -883,13 +1100,16 @@ export class ProductsService {
             basePrice,
             await CommissionSetting.resolvePercent(catalog.category!._id.toString(), 'READY_TO_SHIP'),
         );
-        await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice));
+        await ProductsService.writeVariants(
+            mp._id,
+            ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
+        );
         if (tags.length) {
             await Tag.updateMany({ _id: { $in: tags.map(t => t._id) } }, { $inc: { product_count: 1 } });
         }
         await Shop.updateOne({ _id: shop._id }, { $inc: { listing_count: 1 } });
         await ProductsService.invalidateProductCache(mp._id.toString());
-        logger.info(`Created new product: ${mp._id} (${mp.title})`);
+        logger.info(`Created new product: ${mp._id} (${mp.title}) | category="${catalog.category!.name}" (${catalog.category!._id}) | tags=${tags.length}`);
         return ProductsService.getById(mp._id.toString(), { includeHidden: true });
     }
 
@@ -898,46 +1118,102 @@ export class ProductsService {
      * `basePrice` là giá người bán nhận (dùng để suy ra giá vốn), `listPrice` là giá niêm yết
      * đã cộng hoa hồng sàn. Hai số khác nhau nên phải truyền riêng — lấy listPrice tính giá vốn
      * thì giá vốn bị thổi theo hoa hồng.
+     * Hỗ trợ tạo biến thể theo bảng size cho sản phẩm áo quần/thời trang.
      */
     private static colorsToVariants(
         colors: ProductColorVariantDTO[] | undefined,
         baseSku: string,
         basePrice: number,
         totalStock: number,
-        listPrice: number
+        listPrice: number,
+        sizes?: string[]
     ): VariantInput[] {
         const baseCost = Math.round(basePrice * 0.7);
+        const validSizes = (sizes || []).map(s => String(s || '').trim()).filter(Boolean);
+        const validColors = (colors || []).filter(c => c && c.name && c.name.trim());
 
-        if (!colors || colors.length === 0) {
-            return [{
-                sku: baseSku,
-                color: 'Tự nhiên',
-                base_cost: baseCost,
-                price: listPrice,
-                stock: totalStock,
-            }];
+        // Trường hợp 1: Có cả danh sách màu và danh sách size -> tổ hợp màu x size
+        if (validColors.length > 0 && validSizes.length > 0) {
+            const totalCombos = validColors.length * validSizes.length;
+            const perVariant = Math.max(0, Math.floor(totalStock / totalCombos));
+            const list: VariantInput[] = [];
+            let count = 0;
+            for (let cIdx = 0; cIdx < validColors.length; cIdx++) {
+                const c = validColors[cIdx];
+                for (let sIdx = 0; sIdx < validSizes.length; sIdx++) {
+                    const s = validSizes[sIdx];
+                    count++;
+                    const isLast = count === totalCombos;
+                    list.push({
+                        sku: `${baseSku}-${cIdx + 1}-${s}`,
+                        color: c.name,
+                        size: s,
+                        mockup_image: c.hex,
+                        base_cost: baseCost,
+                        price: listPrice,
+                        stock: isLast ? totalStock - perVariant * (totalCombos - 1) : perVariant,
+                    });
+                }
+            }
+            return list;
         }
 
-        const perColor = Math.max(0, Math.floor(totalStock / colors.length));
-        return colors.map((c, i) => ({
-            sku: `${baseSku}-${i + 1}`,
-            color: c.name,
-            mockup_image: c.hex,
+        // Trường hợp 2: Chỉ có size (không có màu tùy chỉnh)
+        if (validSizes.length > 0) {
+            const perVariant = Math.max(0, Math.floor(totalStock / validSizes.length));
+            return validSizes.map((s, i) => ({
+                sku: `${baseSku}-${s}`,
+                size: s,
+                color: validColors[0]?.name || 'Tiêu chuẩn',
+                mockup_image: validColors[0]?.hex || '#5C4033',
+                base_cost: baseCost,
+                price: listPrice,
+                stock: i === validSizes.length - 1 ? totalStock - perVariant * (validSizes.length - 1) : perVariant,
+            }));
+        }
+
+        // Trường hợp 3: Chỉ có màu, không chọn size
+        if (validColors.length > 0) {
+            const perColor = Math.max(0, Math.floor(totalStock / validColors.length));
+            return validColors.map((c, i) => ({
+                sku: `${baseSku}-${i + 1}`,
+                color: c.name,
+                mockup_image: c.hex,
+                base_cost: baseCost,
+                price: listPrice,
+                stock: i === validColors.length - 1 ? totalStock - perColor * (validColors.length - 1) : perColor,
+            }));
+        }
+
+        // Trường hợp 4: Không màu, không size
+        return [{
+            sku: baseSku,
+            color: 'Tự nhiên',
             base_cost: baseCost,
             price: listPrice,
-            stock: i === colors.length - 1 ? totalStock - perColor * (colors.length - 1) : perColor,
-        }));
+            stock: totalStock,
+        }];
     }
 
 
     static async create(sellerId: string, payload: any): Promise<ProductItemResponseDTO> {
-
         const isStructured = payload?.blankId !== undefined
             || Array.isArray(payload?.designPlacements)
             || Array.isArray(payload?.variants);
-        return isStructured
+        const result = await (isStructured
             ? ProductsService.createStructured(sellerId, payload)
-            : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO);
+            : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO));
+        if (result?.id) {
+            const shopId = result.shopInfo?.id || result.sellerId || '';
+            AiGatewayService.call({
+                method: 'POST',
+                path: `/api/analytics/listings/${result.id}/sync`,
+                shopId: String(shopId),
+            }).catch(err => {
+                logger.warn(`AI sync failed for created product ${result.id}: ${err?.message}`);
+            });
+        }
+        return result;
     }
 
     /**
@@ -1145,6 +1421,7 @@ export class ProductsService {
         } else if (payload.thumbnail && Array.isArray(mp.images) && mp.images.includes(payload.thumbnail)) {
             mp.images = [payload.thumbnail, ...mp.images.filter((img: string) => img !== payload.thumbnail)];
         }
+        if (payload.materials !== undefined) mp.materials = normalizeMaterials(payload.materials);
         if (payload.categoryId !== undefined && data.category) {
             mp.categories = [data.category.name];
             mp.category_ids = [data.category._id];
@@ -1205,6 +1482,7 @@ export class ProductsService {
             mp.slug = await ProductsService.uniqueSlug(payload.title, mp._id.toString());
         }
         if (payload.description !== undefined) mp.description = payload.description;
+        if (payload.materials !== undefined) mp.materials = normalizeMaterials(payload.materials);
         if (!catalog.category && payload.category !== undefined) mp.categories = [payload.category];
         if (payload.location !== undefined) mp.location = payload.location;
         if (payload.rank !== undefined) mp.display_rank = payload.rank;
@@ -1228,7 +1506,7 @@ export class ProductsService {
         }
         await mp.save();
 
-        if (payload.colors && payload.colors.length > 0) {
+        if ((payload.colors && payload.colors.length > 0) || (payload.sizes && payload.sizes.length > 0)) {
             const existing = await MongoVariant.find({ product_id: mp._id }).lean();
             const baseSku = payload.sku || existing[0]?.sku?.replace(/-\d+$/, '') || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
             const totalStock = payload.stock !== undefined
@@ -1236,7 +1514,7 @@ export class ProductsService {
                 : existing.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
 
             // `payload.price` là giá người bán NHẬN, còn giá trong DB là giá NIÊM YẾT (đã gồm
-            // hoa hồng). Sửa màu mà không nhập giá thì giữ nguyên giá niêm yết từng đồng, đồng
+            // hoa hồng). Sửa màu/size mà không nhập giá thì giữ nguyên giá niêm yết từng đồng, đồng
             // thời bóc hoa hồng ra để giá vốn vẫn tính trên cùng cơ sở như lúc tạo sản phẩm.
             const dbPrice = parseFloat(existing[0]?.retail_price?.toString() || '0');
             const commissionPercent = await ProductsService.resolveProductCommission(mp);
@@ -1246,7 +1524,10 @@ export class ProductsService {
             const listPrice = payload.price !== undefined
                 ? withCommission(basePrice, commissionPercent)
                 : dbPrice;
-            await ProductsService.writeVariants(mp._id, ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice));
+            await ProductsService.writeVariants(
+                mp._id, 
+                ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
+            );
         } else {
             const updates: any = {};
             if (payload.price !== undefined) {
@@ -1281,6 +1562,14 @@ export class ProductsService {
             : ProductsService.updateSimple(mp, actor, payload as Partial<ProductFormDataDTO>));
 
         await ProductsService.invalidateProductCache(id);
+        const shopId = mp.shop_id ? String(mp.shop_id) : (result?.shopInfo?.id || '');
+        AiGatewayService.call({
+            method: 'POST',
+            path: `/api/analytics/listings/${id}/sync`,
+            shopId,
+        }).catch(err => {
+            logger.warn(`AI sync failed for product ${id}: ${err?.message}`);
+        });
         return result;
     }
 

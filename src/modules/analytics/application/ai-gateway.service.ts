@@ -31,13 +31,26 @@ export class AiGatewayService {
         }
         const liveShopId = shop ? String(shop._id) : null;
         const mapped = config.aiShopMap[(user.email || '').toLowerCase()];
-        const demoShopId = mapped || config.aiDemoShopId.trim();
+        const globalDemoShopId = (process.env.AI_DEMO_SHOP_ID ?? config.aiDemoShopId).trim();
+
+        // Ưu tiên shop thật nếu seller đã mở gian hàng trên sàn.
+        // Chỉ dùng demo nếu email cố tình được map hoặc seller chưa có shop thật.
+        let targetShopId = liveShopId;
+        let isDemo = false;
+
+        if (mapped) {
+            targetShopId = mapped;
+            isDemo = true;
+        } else if (!liveShopId && globalDemoShopId) {
+            targetShopId = globalDemoShopId;
+            isDemo = true;
+        }
 
         return {
             live_shop_id: liveShopId,
             shop_name: shop?.shop_name ?? null,
-            analysed_shop_id: demoShopId || liveShopId,
-            demo: Boolean(demoShopId),
+            analysed_shop_id: targetShopId,
+            demo: isDemo,
         };
     }
 
@@ -47,6 +60,7 @@ export class AiGatewayService {
         shopId: string;
         query?: Record<string, string>;
         body?: Record<string, unknown>;
+        timeoutMs?: number;
     }): Promise<AiResponse> {
         if (!config.aiGatewaySecret) {
             return { status: 503, body: { error: 'ai_gateway_not_configured' } };
@@ -63,14 +77,24 @@ export class AiGatewayService {
             'X-Shop-Id': options.shopId,
             'X-Debug-Shop-Id': options.shopId,
         };
-        if (options.body) headers['Content-Type'] = 'application/json';
+        // fetch ném lỗi nếu GET kèm body; router luôn có req.body = {} nên chỉ gửi body cho POST/DELETE.
+        const guiBody = options.body !== undefined && options.method !== 'GET';
+        if (guiBody) headers['Content-Type'] = 'application/json';
+        const hasBody = Boolean(options.body && Object.keys(options.body).length > 0 && options.method !== 'GET');
+        if (hasBody) headers['Content-Type'] = 'application/json';
+
+        const timeoutMs = options.timeoutMs
+            ?? (process.env.AI_TIMEOUT_MS
+                ? Number(process.env.AI_TIMEOUT_MS)
+                : Math.max(config.aiTimeoutMs || 5000, 20000));
 
         try {
             const response = await fetch(url, {
                 method: options.method,
                 headers,
-                body: options.body ? JSON.stringify(options.body) : undefined,
-                signal: AbortSignal.timeout(config.aiTimeoutMs),
+                body: guiBody ? JSON.stringify(options.body) : undefined,
+                body: hasBody ? JSON.stringify(options.body) : undefined,
+                signal: AbortSignal.timeout(timeoutMs),
             });
             const text = await response.text();
             try {
@@ -82,7 +106,7 @@ export class AiGatewayService {
         } catch (error: any) {
             const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
             logger.error(
-                `AI ${options.method} ${options.path} lỗi: ${timedOut ? `quá ${config.aiTimeoutMs}ms` : error?.message}`,
+                `AI ${options.method} ${options.path} lỗi: ${timedOut ? `quá ${timeoutMs}ms` : error?.message}`,
             );
             return timedOut
                 ? { status: 504, body: { error: 'ai_timeout' } }

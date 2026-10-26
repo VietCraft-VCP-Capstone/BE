@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authRouter } from '../modules/auth';
 
-import { adminRouter, adminPromotionsRouter, adminFinanceRouter } from '../modules/admin';
+import { adminRouter, adminPromotionsRouter, adminFinanceRouter, bannedKeywordsRouter } from '../modules/admin';
 import { categoryRouter } from '../modules/category';
 import { tagsRouter } from '../modules/tags';
 import { userRouter } from '../modules/user';
@@ -25,8 +25,11 @@ import { uploadRouter } from '../modules/upload';
 const router = Router();
 
 router.use('/auth', authRouter);
+router.use('/categories', categoryRouter);
+router.use('/tags', tagsRouter);
 router.use('/admin/categories', categoryRouter);
 router.use('/admin/tags', tagsRouter);
+router.use('/admin/banned-keywords', bannedKeywordsRouter);
 router.use('/admin/promotions', adminPromotionsRouter);
 router.use('/admin/finance', adminFinanceRouter);
 router.use('/admin', adminRouter);
@@ -45,7 +48,7 @@ router.use('/products', productsRouter);
 router.use('/shops', shopRouter);
 router.use('/orders', ordersRouter);
 const returnClock = { now: () => new Date() };
-router.use('/returns/v3', createReturnRequestRouter({ service: createReturnRequestService(returnClock), authenticate, clock: createReturnClock(returnClock) }));
+router.use('/returns', createReturnRequestRouter({ service: createReturnRequestService(returnClock), authenticate, clock: createReturnClock(returnClock) }));
 router.use('/', refundRequestRouter);
 router.use('/reviews', reviewRouter);
 router.use('/payment', paymentRouter);
@@ -57,6 +60,10 @@ router.use('/promotions', promotionRouter);
 router.use('/designs', designsRouter);
 router.use('/upload', uploadRouter);
 router.use('/chat', chatRouter);
+router.get('/notifications/alerts', (req, res, next) => {
+    req.url = '/alerts';
+    sellerAnalyticsRouter(req, res, next);
+});
 router.use('/notifications', notificationRouter);
 
 export default router;

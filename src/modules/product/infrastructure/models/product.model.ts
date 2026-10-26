@@ -20,6 +20,7 @@ export interface IProduct extends Document {
     unpublish_reason?: string;
     images: string[];
     tags: string[];
+    materials: string[];
     categories: string[];
     tag_ids: mongoose.Types.ObjectId[];
     category_ids: mongoose.Types.ObjectId[];
@@ -49,6 +50,8 @@ export interface IProduct extends Document {
     }[];
     average_rating?: number;
     rating_count?: number;
+    // Do script seed ghi thẳng; khai báo để query lọc seed_ref có kiểu.
+    seed_ref?: string;
     created_at: Date;
     updated_at: Date;
 }
@@ -128,6 +131,7 @@ const ProductSchema = new Schema<IProduct>({
     unpublish_reason: { type: String },
     images: { type: [String], default: [] },
     tags: { type: [String], index: true, default: [] },
+    materials: { type: [String], default: [] },
     categories: { type: [String], default: [] },
     tag_ids: { type: [{ type: Schema.Types.ObjectId, ref: 'Tag' }], index: true, default: [] },
     category_ids: { type: [{ type: Schema.Types.ObjectId, ref: 'Category' }], index: true, default: [] },
@@ -155,7 +159,6 @@ const ProductSchema = new Schema<IProduct>({
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
-ProductSchema.index({ title: 'text' });
 ProductSchema.index({ status: 1, is_hidden: 1, created_at: -1 });
 ProductSchema.index({ status: 1, is_hidden: 1, categories: 1 });
 ProductSchema.index({ shop_id: 1, status: 1 });

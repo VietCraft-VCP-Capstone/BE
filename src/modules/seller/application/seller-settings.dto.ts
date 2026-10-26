@@ -22,6 +22,14 @@ export interface ShippingCarrierItemDTO {
     estimatedTime?: string;
 }
 
+export type ShippingPricingType = 'FLAT_RATE' | 'ZONE_BASED';
+
+export interface ZoneShippingRatesDTO {
+    intraProvince: number; 
+    intraRegion: number;   
+    interRegion: number;  
+}
+
 export interface SellerShippingSettingsDTO {
     senderName: string;
     senderPhone: string;
@@ -30,8 +38,10 @@ export interface SellerShippingSettingsDTO {
     ward: string;
     specificAddress: string;
     carriers: ShippingCarrierItemDTO[];
+    pricingType?: ShippingPricingType;
     useFlatRate: boolean;
     flatRateFee: number;
+    zoneRates?: ZoneShippingRatesDTO;
 }
 
 export interface BankAccountItemDTO {
@@ -69,6 +79,7 @@ export interface SellerNotificationSettingsDTO {
     analytics: {
         weeklyReport: NotificationChannelSettingDTO;
         promotions: NotificationChannelSettingDTO;
+        performanceAlert: NotificationChannelSettingDTO;
     };
 }
 

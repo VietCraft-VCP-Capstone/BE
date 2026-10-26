@@ -3,6 +3,7 @@ import { Order } from '../../order/infrastructure/models/order.model';
 import { Shop } from '../../product/infrastructure/models/shop.model';
 import { notificationService } from '../../notification';
 import { dispatchToPrinter } from '../../order/application/printer-dispatch.service';
+import { ReputationService } from './reputation.service';
 import {
     SellerOrderDTO,
     SellerOrderListDTO,
@@ -261,6 +262,8 @@ export class SellerOrdersService {
             note: String(payload.note || '').trim() || undefined
         });
         await order.save();
+
+        if (next === 'DELIVERED') void ReputationService.recordCleanOrder(order);
 
         // Gửi thông báo thời gian thực cho người mua về cập nhật trạng thái đơn hàng
         try {

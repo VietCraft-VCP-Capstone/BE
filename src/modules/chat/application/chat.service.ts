@@ -112,15 +112,27 @@ export class ChatService {
 
         // Lấy thông tin partner
         const partnerUser = await User.findById(resolvedPartnerId).lean();
-        const partnerShop = await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(resolvedPartnerId) }).lean();
+        const convShop = conv.shop_id ? await Shop.findById(conv.shop_id).lean() : null;
+
+        // Nếu shop trong conversation thuộc về userAId (user gọi API là Seller/chủ shop) -> partner chính là Khách hàng (Buyer)
+        const isUserATheShopOwner = Boolean(convShop && convShop.owner_id && convShop.owner_id.toString() === userAId);
+
+        let partnerShop = null;
+        if (!isUserATheShopOwner) {
+            partnerShop = convShop || await Shop.findOne({ owner_id: new mongoose.Types.ObjectId(resolvedPartnerId) }).lean();
+        }
 
         const partnerDTO: ConversationPartnerDTO = {
             id: resolvedPartnerId,
-            full_name: partnerShop?.shop_name || partnerUser?.full_name || 'Người dùng VietCraft',
-            avatar: partnerShop?.logo || partnerUser?.avatar || '',
+            full_name: (!isUserATheShopOwner && partnerShop?.shop_name)
+                ? partnerShop.shop_name
+                : (partnerUser?.full_name || 'Khách hàng'),
+            avatar: (!isUserATheShopOwner && partnerShop?.logo)
+                ? partnerShop.logo
+                : (partnerUser?.avatar || ''),
             email: partnerUser?.email || '',
-            role: partnerUser?.role || 'BUYER',
-            shop: partnerShop ? {
+            role: (!isUserATheShopOwner && partnerShop) ? 'SELLER' : (partnerUser?.role || 'BUYER'),
+            shop: (!isUserATheShopOwner && partnerShop) ? {
                 id: partnerShop._id.toString(),
                 name: partnerShop.shop_name,
                 logo: partnerShop.logo,
@@ -187,19 +199,28 @@ export class ChatService {
             if (!pId) continue;
 
             const u = userMap.get(pId);
-            const shop = (c.shop_id ? shopById.get(c.shop_id.toString()) : null) || shopByOwner.get(pId);
+            const convShop = c.shop_id ? shopById.get(c.shop_id.toString()) : null;
+
+            // Kiểm tra xem userId (người đang xem) có phải là chủ shop trong cuộc hội thoại này không
+            const isCurrentUserShopOwner = Boolean(
+                convShop && convShop.owner_id && convShop.owner_id.toString() === userId
+            );
+
+            // Nếu người xem là Chủ shop -> Partner phải là Khách hàng (u).
+            // Chỉ khi người xem là Khách hàng (Buyer) -> Partner mới là Shop (convShop hoặc shopByOwner).
+            const partnerShop = !isCurrentUserShopOwner ? (convShop || shopByOwner.get(pId)) : null;
 
             const partnerDTO: ConversationPartnerDTO = {
                 id: pId,
-                full_name: shop?.shop_name || u?.full_name || 'Người dùng VietCraft',
-                avatar: shop?.logo || u?.avatar || '',
+                full_name: partnerShop?.shop_name || u?.full_name || 'Khách hàng',
+                avatar: partnerShop?.logo || u?.avatar || '',
                 email: u?.email || '',
-                role: u?.role || 'BUYER',
-                shop: shop ? {
-                    id: shop._id.toString(),
-                    name: shop.shop_name,
-                    logo: shop.logo,
-                    slug: shop.slug
+                role: partnerShop ? 'SELLER' : (u?.role || 'BUYER'),
+                shop: partnerShop ? {
+                    id: partnerShop._id.toString(),
+                    name: partnerShop.shop_name,
+                    logo: partnerShop.logo,
+                    slug: partnerShop.slug
                 } : undefined
             };
 

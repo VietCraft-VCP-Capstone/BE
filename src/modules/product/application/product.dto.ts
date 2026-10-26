@@ -44,16 +44,20 @@ export interface ProductItemResponseDTO {
     thumbnail: string;
     images: string[];
     colors: ProductColorVariantDTO[];
+    sizes?: string[];
     engagementTrend: number[];
     inventoryTrends: InventoryTrendPointDTO[];
     variants?: ProductVariantDTO[];
     shopInfo?: ShopInfoDTO;
     sellerId?: string;
     tags?: string[];
+    materials?: string[];
     rating?: number;
     ratingCount?: number;
     allowCustomization?: boolean;
     customizationType?: string;
+    productType?: string;
+    soldCount?: number;
     createdAt: string;
     updatedAt: string;
 }
@@ -64,6 +68,7 @@ export interface ProductFormDataDTO {
     categoryId?: string;
     tagIds?: string[];
     newTagNames?: string[];
+    materials?: string[];
     price: number;
     originalPrice?: number;
     stock?: number;
@@ -75,6 +80,7 @@ export interface ProductFormDataDTO {
     thumbnail?: string;
     images?: string[];
     colors?: ProductColorVariantDTO[];
+    sizes?: string[];
 }
 
 export interface ProductFilterQueryDTO {
@@ -95,4 +101,44 @@ export interface PaginatedProductsResponseDTO {
     page: number;
     limit: number;
     totalPages: number;
+    searchLogId?: string;
 }
+
+export interface SearchProductsParams {
+    q?: string;
+    category?: string;
+    productType?: string;
+    craftType?: string;
+    location?: string;
+    rating?: number | string;
+    minPrice?: number | string;
+    maxPrice?: number | string;
+    sort?: string;
+    page?: number | string;
+    limit?: number | string;
+    pageSize?: number | string;
+    inStockOnly?: boolean | string;
+    userId?: string;
+}
+
+export interface SuggestShopItem {
+    id: string;
+    name: string;
+    slug: string;
+    logo?: string;
+    reputationScore: number;
+    reputationTier: string;
+}
+
+export interface SuggestCategoryItem {
+    id: string;
+    name: string;
+    slug: string;
+}
+
+export interface SuggestResultDTO {
+    keywords: string[];
+    shops: SuggestShopItem[];
+    categories: SuggestCategoryItem[];
+}
+

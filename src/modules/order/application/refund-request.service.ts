@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { Order } from '../infrastructure/models/order.model';
-import { ReturnRequestV3, RETURN_REQUEST_V3_ACTIVE_STATUSES } from '../infrastructure/models/return-request-v3.model';
+import { ReturnRequest, RETURN_REQUEST_ACTIVE_STATUSES } from '../infrastructure/models/return-request.model';
 import { executeVnpayRefund, refundContextOf, settleRefundManually } from '../../payment/application/refund-runtime';
 import { bankNameOf } from '../../payment/domain/bank-codes';
 import { RefundRequest, IRefundRequest, RefundRequestStatus } from '../infrastructure/models/refund-request.model';
@@ -11,6 +11,7 @@ import { User } from '../../user/infrastructure/models/user.model';
 import { notificationService } from '../../notification';
 import { logger } from '../../../shared/utils/logger';
 import { config } from '../../../app/config';
+import { ReputationService } from '../../seller/application/reputation.service';
 import { initialRefundStatus, sellerCanActOnRefund, buyerCanDispute } from './refund-actor-policy';
 import { validateRefundEvidence } from './refund-evidence-policy';
 const DAY = 24 * 60 * 60 * 1000;
@@ -73,7 +74,7 @@ export class RefundRequestService {
         if (!deliveredAt) throw new Error('Không xác định được thời điểm giao hàng của đơn');
         if (now.getTime() > deliveredAt.getTime() + 7 * DAY) throw new Error('Đã quá thời hạn yêu cầu hoàn tiền 7 ngày');
         if (order.refund_status !== 'NONE') throw new Error('Đơn hàng đã có yêu cầu hoàn tiền hoặc đã được xử lý');
-        if (await ReturnRequestV3.exists({ order_id: String(order._id), status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES, 'COMPLETED', 'REPLACEMENT_CREATED'] } })) throw new Error('Đơn đã có yêu cầu đổi/hoàn tiền theo món; hãy xử lý trong yêu cầu đó.');
+        if (await ReturnRequest.exists({ order_id: String(order._id), status: { $in: [...RETURN_REQUEST_ACTIVE_STATUSES, 'COMPLETED', 'REPLACEMENT_CREATED'] } })) throw new Error('Đơn đã có yêu cầu đổi/hoàn tiền theo món; hãy xử lý trong yêu cầu đó.');
 
         const products = await Product.find({ _id: { $in: order.items.map(item => item.product_id) } }).select('product_type shop_id').lean();
         if (!products.length) throw new Error('Không xác định được sản phẩm trong đơn hàng');
@@ -93,7 +94,7 @@ export class RefundRequestService {
             reason_category: input.reason_category, description: input.description.trim(), evidence,
             refund_type: input.refund_type, refund_amount: amount, status: initialStatus,
             responsible_party: productType === 'POD' ? 'PRINTER' : null,
-            printer_id: productType === 'POD' ? String(order.printer_info?.printer_id || process.env.PRINTER_REFUND_PRINTER_ID || (config.nodeEnv === 'production' ? '' : 'PRINTING_SHOP_MOCK')) : undefined,
+            printer_id: productType === 'POD' ? String(order.printer_info?.printer_id || process.env.PRINTER_REFUND_PRINTER_ID || 'PRINTER_SHOP') : undefined,
             sla_deadlines: productType === 'POD' ? { seller_deadline: new Date(now.getTime() + 48 * 60 * 60 * 1000), printer_deadline: printerDeadline } : { seller_deadline: new Date(now.getTime() + 48 * 60 * 60 * 1000) },
         });
         const changed = await Order.updateOne({ _id: order._id, refund_status: 'NONE' }, { $set: { refund_status: 'REQUESTED' } });
@@ -362,6 +363,9 @@ export class RefundRequestService {
                 const admins = await User.find({ role: 'ADMIN' }).select('_id').lean();
                 await Promise.allSettled(admins.map(admin => this.notify(admin._id.toString(), 'Printer quá SLA — cần Admin phân xử', `Refund ${request._id} được tự động đưa vào hàng chờ Admin.`, '/admin/refund-requests?status=DISPUTED', { refundRequestId: request._id.toString() })));
             } else {
+                if (request.seller_id) {
+                    void ReputationService.deductBySellerOrShop(request.seller_id, 3, 'Quá hạn 48h phản hồi khiếu nại hoàn tiền', 'TIMEOUT', request._id.toString());
+                }
                 void this.notify(request.buyer_id.toString(), 'Seller quá SLA', 'Người bán chưa phản hồi đúng hạn. Bạn có thể mở tranh chấp.', `/refund-requests/${request._id}`, { refundRequestId: request._id.toString() }).catch(err => logger.error(`[REFUND] Notification failed: ${err.message}`));
             }
         }
