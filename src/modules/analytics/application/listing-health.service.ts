@@ -7,7 +7,7 @@ import { EMPTY_SALES, HealthInputs, ListingProductInfo, ListingSales, healthInpu
 
 
 const COLLECTION = 'listing_health_scores';
-export const HEALTH_VERSION = 'health-2.1';
+export const HEALTH_VERSION = 'health-2.2';
 const MODEL_VERSION_FALLBACK = HEALTH_VERSION;
 
 export type HealthStatus = 'good' | 'needs_improvement' | 'poor';
