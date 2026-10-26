@@ -36,6 +36,8 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking' },
     { method: 'post', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
     { method: 'delete', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
+    // Đúng dạng SRS 3.9.5; bản nhận body ở trên giữ cho client cũ.
+    { method: 'delete', path: '/competitor-tracking/:shopId', ai: p => `/api/analytics/competitor-tracking/${p.shopId}`, forwardShopIdBody: true },
     // Dự báo (SRS 3.10)
     { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window'] },
     { method: 'get', path: '/forecast/seasonal', ai: () => '/api/analytics/forecast/seasonal', query: ['categoryId', 'category_slug', 'campaign_id', 'campaignId', 'keyword'] },
@@ -174,6 +176,25 @@ router.get('/context', async (req: AuthenticatedRequest, res: Response) => {
     }
 });
 
+const SHOP_SEARCH_MAX = 60;
+
+router.get('/competitor-tracking/search', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+        if (!q || q.length > SHOP_SEARCH_MAX) {
+            return res.status(400).json({ error: 'invalid_param', field: 'q', expected: `1-${SHOP_SEARCH_MAX} ký tự` });
+        }
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        // Shop mẫu theo dõi bằng mã shp_* của dữ liệu mồi, không tìm trên sàn.
+        if (viewer.demo) return res.json({ data: [], viewer });
+        const data = await CompetitorTrackingService.searchShops(req.user!.id, q);
+        return res.json({ data, viewer });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi tìm gian hàng.' });
+    }
+});
+
 const HEALTH_STATUSES: HealthStatus[] = ['good', 'needs_improvement', 'poor'];
 
 router.get('/listings/:id/health', async (req: AuthenticatedRequest, res: Response) => {
@@ -275,7 +296,7 @@ for (const route of ROUTES) {
 
             let body: Record<string, unknown> | undefined;
             if (route.forwardShopIdBody) {
-                const target = req.body?.shop_id;
+                const target = req.params.shopId ?? req.body?.shop_id;
                 if (!AiGatewayService.isValidId(target)) {
                     return res.status(400).json({ error: 'invalid_param', field: 'shop_id' });
                 }
