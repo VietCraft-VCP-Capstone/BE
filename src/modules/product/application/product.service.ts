@@ -37,6 +37,7 @@ import { commissionFromGross, withCommission } from '../../../shared/utils/commi
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
 import { contentModerationService } from '../../../shared/services/content-moderation.service';
 import { normalizeMaterials } from '../../../shared/utils/materials';
+import { AiGatewayService } from '../../analytics/application/ai-gateway.service';
 
 function getColorHex(colorName: string): string {
     const lower = (colorName || '').toLowerCase();
@@ -1276,13 +1277,23 @@ export class ProductsService {
 
 
     static async create(sellerId: string, payload: any): Promise<ProductItemResponseDTO> {
-
         const isStructured = payload?.blankId !== undefined
             || Array.isArray(payload?.designPlacements)
             || Array.isArray(payload?.variants);
-        return isStructured
+        const result = await (isStructured
             ? ProductsService.createStructured(sellerId, payload)
-            : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO);
+            : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO));
+        if (result?.id) {
+            const shopId = result.shopInfo?.id || result.sellerId || '';
+            AiGatewayService.call({
+                method: 'POST',
+                path: `/api/analytics/listings/${result.id}/sync`,
+                shopId: String(shopId),
+            }).catch(err => {
+                logger.warn(`AI sync failed for created product ${result.id}: ${err?.message}`);
+            });
+        }
+        return result;
     }
 
     /**
@@ -1632,6 +1643,14 @@ export class ProductsService {
             : ProductsService.updateSimple(mp, actor, payload as Partial<ProductFormDataDTO>));
 
         await ProductsService.invalidateProductCache(id);
+        const shopId = mp.shop_id ? String(mp.shop_id) : (result?.shopInfo?.id || '');
+        AiGatewayService.call({
+            method: 'POST',
+            path: `/api/analytics/listings/${id}/sync`,
+            shopId,
+        }).catch(err => {
+            logger.warn(`AI sync failed for product ${id}: ${err?.message}`);
+        });
         return result;
     }
 
