@@ -6,6 +6,9 @@ import { parseSearchClick, recordSearchClick } from '../application/search-click
 import { VideoAdService, VideoAdError, toPublicJob } from '../application/video-ad.service';
 import { authenticate, requireRole, optionalAuthenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { ReviewService } from '../../order';
+import { RecommendService } from '../application/recommend/recommend.service';
+import { nfcLower } from '../../../shared/utils/vietnamese-search.util';
+import { getRecentSearches, addRecentSearch, clearRecentSearches } from '../application/recent-searches';
 
 const router = Router();
 
@@ -136,6 +139,58 @@ router.get('/meta/tags', async (req, res) => {
         res.json(await ProductsService.listTags());
     } catch (error: any) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+// shortcut: q/q[] chỉ lấy chuỗi, tối đa 3 từ khoá, mỗi từ 50 ký tự
+function forYouKeywords(req: AuthenticatedRequest): string[] {
+    return [req.query.q, req.query['q[]']].flat()
+        .filter((v): v is string => typeof v === 'string')
+        .map(v => nfcLower(v).slice(0, 50).trim())
+        .filter(Boolean)
+        .slice(0, 3);
+}
+
+router.get('/meta/recent-searches', authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+        res.json(await getRecentSearches(req.user!.id));
+    } catch (error: any) {
+        handleError(res, error);
+    }
+});
+
+router.post('/meta/recent-searches', authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+        const keyword = req.body?.keyword;
+        if (typeof keyword !== 'string' || !keyword.trim()) {
+            return res.status(400).json({ error: 'Thiếu từ khoá' });
+        }
+        res.json(await addRecentSearch(req.user!.id, keyword));
+    } catch (error: any) {
+        handleError(res, error);
+    }
+});
+
+router.delete('/meta/recent-searches', authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+        await clearRecentSearches(req.user!.id);
+        res.status(204).end();
+    } catch (error: any) {
+        handleError(res, error);
+    }
+});
+
+router.get('/meta/for-you', optionalAuthenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+        const sid = typeof req.query.sessionId === 'string' ? req.query.sessionId.trim().slice(0, 100) : '';
+        res.json(await RecommendService.forYou({
+            userId: req.user?.id,
+            sessionId: sid || undefined,
+            limit: Math.min(24, Math.max(1, Math.floor(Number(req.query.limit)) || 8)),
+            q: forYouKeywords(req),
+        }));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tải gợi ý sản phẩm.' });
     }
 });
 

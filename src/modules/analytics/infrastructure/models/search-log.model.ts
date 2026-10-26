@@ -8,7 +8,6 @@ export interface ISearchClick {
 
 export interface ISearchLog extends Document {
     keyword: string;
-    keyword_norm?: string;
     user_id?: mongoose.Types.ObjectId;
     result_count?: number;
     clicks?: ISearchClick[];
@@ -23,7 +22,6 @@ const SearchClickSchema = new Schema<ISearchClick>({
 
 const SearchLogSchema = new Schema<ISearchLog>({
     keyword: { type: String, required: true, index: true },
-    keyword_norm: { type: String, index: true },
     user_id: { type: Schema.Types.ObjectId, ref: 'User' },
     result_count: { type: Number },
     clicks: { type: [SearchClickSchema], default: undefined }
@@ -31,6 +29,5 @@ const SearchLogSchema = new Schema<ISearchLog>({
     timestamps: { createdAt: 'created_at', updatedAt: false }
 });
 
-SearchLogSchema.index({ user_id: 1, keyword_norm: 1 });
 
 export const SearchLog = mongoose.model<ISearchLog>('SearchLog', SearchLogSchema, 'search_logs');

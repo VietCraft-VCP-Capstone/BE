@@ -7,6 +7,7 @@ import { config, initializeDatabases } from './app/config';
 import { logger } from './shared/utils/logger';
 import { ChatGateway } from './modules/chat';
 import { NotificationGateway } from './modules/notification';
+import { RecommendService } from './modules/product/application/recommend/recommend.service';
 // payOS (và một số cổng khác) whitelist theo IPv4. Máy có IPv6 thì Node mặc định có thể
 // kết nối qua IPv6, cổng thấy địa chỉ lạ và trả 403 dù IPv4 đã được thêm. Ưu tiên IPv4.
 dns.setDefaultResultOrder('ipv4first');
@@ -55,6 +56,7 @@ async function bootstrap() {
         logger.info(` VietCraft Backend Monolith Running...`);
         logger.info(` Port: ${config.port} | Mode: ${config.nodeEnv}`);
         logger.info(`------------------------------------------`);
+        RecommendService.warmPopular().catch(() => {});
     });
 }
 
