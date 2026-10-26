@@ -12,12 +12,61 @@ function isParticipant(user: AuthUser, roomId: string): boolean {
     return roomId.split('_').includes(user.id);
 }
 
+let chatIoInstance: SocketIOServer | null = null;
+
 export class ChatGateway {
     private io: SocketIOServer;
 
     constructor(io: SocketIOServer) {
         this.io = io;
+        chatIoInstance = io;
         this.initialize();
+    }
+
+    static getIO(): SocketIOServer | null {
+        return chatIoInstance;
+    }
+
+    static async broadcastNewMessage(
+        savedMessage: any,
+        receiverId: string,
+        senderId: string,
+        roomId: string
+    ) {
+        if (!chatIoInstance) return;
+        try {
+            const receiverUnreadCount = await chatService.getTotalUnreadCount(receiverId);
+            const senderUnreadCount = await chatService.getTotalUnreadCount(senderId);
+
+            // 1. Gửi tới phòng hội thoại (cho client đang mở đúng phòng này)
+            chatIoInstance.to(roomId).emit('message_received', savedMessage);
+
+            // 2. Gửi trực tiếp tới phòng cá nhân người nhận (cho dù chưa join room vẫn nhận được tin nhắn realtime)
+            chatIoInstance.to(`user_${receiverId}`).emit('message_received', savedMessage);
+            chatIoInstance.to(`user_${receiverId}`).emit('new_message_notification', {
+                message: savedMessage,
+                unreadCount: receiverUnreadCount
+            });
+
+            // 3. Gửi tới phòng cá nhân người gửi (đồng bộ đa tab)
+            chatIoInstance.to(`user_${senderId}`).emit('message_received', savedMessage);
+            chatIoInstance.to(`user_${senderId}`).emit('unread_count_updated', {
+                unreadCount: senderUnreadCount
+            });
+        } catch (error: any) {
+            logger.error(`Lỗi broadcast tin nhắn: ${error.message}`);
+        }
+    }
+
+    static async broadcastMessagesRead(roomId: string, readerId: string) {
+        if (!chatIoInstance) return;
+        try {
+            chatIoInstance.to(roomId).emit('messages_read', { roomId, readerId });
+            const unreadCount = await chatService.getTotalUnreadCount(readerId);
+            chatIoInstance.to(`user_${readerId}`).emit('unread_count_updated', { unreadCount });
+        } catch (error: any) {
+            logger.error(`Lỗi broadcast đã đọc: ${error.message}`);
+        }
     }
 
     private initialize() {
@@ -118,15 +167,8 @@ export class ChatGateway {
                         customQuotation: data.customQuotation
                     });
 
-                    // Phát tin nhắn tới tất cả client đang mở phòng hội thoại
-                    this.io.to(roomId).emit('message_received', savedMessage);
-
-                    // Gửi thông báo tin nhắn mới tới phòng cá nhân của người nhận (dành cho badge & notification)
-                    const receiverUnreadCount = await chatService.getTotalUnreadCount(receiverId);
-                    this.io.to(`user_${receiverId}`).emit('new_message_notification', {
-                        message: savedMessage,
-                        unreadCount: receiverUnreadCount
-                    });
+                    // Phát tin nhắn realtime tới cả phòng lẫn các user cá nhân
+                    await ChatGateway.broadcastNewMessage(savedMessage, receiverId, user.id, roomId);
 
                     logger.info(`Tin nhắn trong phòng ${roomId} gửi bởi ${user.id}`);
 
@@ -167,13 +209,7 @@ export class ChatGateway {
                 if (data?.roomId && isParticipant(user, data.roomId)) {
                     try {
                         await chatService.markAsRead(data.roomId, user.id);
-                        socket.to(data.roomId).emit('messages_read', {
-                            roomId: data.roomId,
-                            readerId: user.id
-                        });
-                        const unreadCount = await chatService.getTotalUnreadCount(user.id);
-                        this.io.to(`user_${user.id}`).emit('unread_count_updated', { unreadCount });
-                        socket.emit('unread_count_updated', { unreadCount });
+                        await ChatGateway.broadcastMessagesRead(data.roomId, user.id);
                     } catch (error: any) {
                         logger.error(`Lỗi đánh dấu đã đọc socket: ${error.message}`);
                     }
