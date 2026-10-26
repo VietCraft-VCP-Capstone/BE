@@ -45,6 +45,9 @@ async function bootstrap() {
     const { RollupJob } = await import('./modules/analytics/application/rollup.job');
     RollupJob.schedule();
 
+    const { CompetitorAlertJob } = await import('./modules/analytics/application/competitor-alert.job');
+    CompetitorAlertJob.schedule();
+
     server.listen(config.port, () => {
         logger.info(`------------------------------------------`);
         logger.info(` VietCraft Backend Monolith Running...`);
