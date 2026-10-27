@@ -25,6 +25,7 @@ import {
 } from './product.dto';
 import { SearchLog } from '../../analytics/infrastructure/models/search-log.model';
 import { BannedKeyword } from '../../analytics/infrastructure/models/banned-keyword.model';
+import { ProductEvent } from '../../analytics/infrastructure/models/product-event.model';
 import { shouldLogSearch, rankSuggestions, SUGGEST_PROJECTION } from './product-search.helpers';
 import { buildKeywordSuggestions, fetchLoggedKeywords, fetchPopularKeywords } from './suggest-keywords';
 import { getTrendingKeywords as fetchTrendingKeywords } from './trending-keywords';
@@ -57,7 +58,13 @@ function getColorHex(colorName: string): string {
     return '#8B5CF6';
 }
 
-function mapToProductItemResponse(product: any, variants: any[], shop?: any, soldCount = 0): ProductItemResponseDTO {
+function mapToProductItemResponse(
+    product: any, 
+    variants: any[], 
+    shop?: any, 
+    soldCount = 0,
+    customTrend?: number[]
+): ProductItemResponseDTO {
     const mainVariant = variants[0];
     const price = mainVariant ? parseFloat(mainVariant.retail_price?.toString() || '0') : 0;
     const totalStock = variants.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
@@ -94,17 +101,30 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any, sol
     const originalPrice = product.original_price
         ?? legacyOriginal
         ?? undefined;
-
     const baseRank = product.display_rank ?? product.stock_alert_threshold ?? 1;
-    const engagementTrend = [
-        Math.max(15, (baseRank * 12 + 10) % 90 + 20),
-        Math.max(20, (baseRank * 15 + 15) % 100 + 25),
-        Math.max(30, (baseRank * 22 + 20) % 110 + 35),
-        Math.max(45, (baseRank * 28 + 25) % 120 + 45),
-        Math.max(55, (baseRank * 35 + 30) % 130 + 55),
-        Math.max(70, (baseRank * 40 + 35) % 140 + 70),
-        Math.max(85, (baseRank * 45 + 40) % 150 + 85),
-    ];
+
+    let engagementTrend = customTrend;
+    if (!engagementTrend || engagementTrend.length < 2) {
+        // Fallback tự nhiên theo seed _id sản phẩm: mỗi sản phẩm có một biên độ dao động riêng biệt
+        const pidStr = product._id?.toString() || 'default_seed';
+        let seed = 0;
+        for (let i = 0; i < pidStr.length; i++) {
+            seed = ((seed << 5) - seed + pidStr.charCodeAt(i)) | 0;
+        }
+        seed = Math.abs(seed);
+        const base = Math.max(10, (seed % 35) + Math.min(soldCount * 2, 40));
+        const pattern = seed % 5;
+        engagementTrend = Array.from({ length: 7 }, (_, d) => {
+            const jitter = ((seed * (d + 2) * 13) % 9) - 4;
+            let val = base;
+            if (pattern === 0) val = Math.round(base * (0.65 + (d / 6) * 0.75)) + jitter; // Tăng trưởng mạnh
+            else if (pattern === 1) val = Math.round(base * (0.8 + (d / 6) * 0.4)) + jitter;  // Tăng trưởng vừa
+            else if (pattern === 2) val = Math.round(base * (0.9 + Math.sin(d * 1.3) * 0.25)) + jitter; // Dao động tự nhiên
+            else if (pattern === 3) val = Math.round(base * (1.0 + ((d % 2 === 0 ? 1 : -1) * 0.12))) + jitter; // Đi ngang
+            else val = Math.round(base * (1.15 - (d / 6) * 0.35)) + jitter; // Giảm nhẹ
+            return Math.max(1, val);
+        });
+    }
 
     const inventoryTrends: InventoryTrendPointDTO[] = [
         { date: 'Jan 21', stock: Math.round(totalStock * 1.6) },
@@ -605,12 +625,55 @@ export class ProductsService {
 
         const productIds = docs.map(p => p._id);
         const shopIds = [...new Set(docs.map(p => p.shop_id).filter(Boolean).map((s: any) => s.toString()))];
+        const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000);
 
-        const [allVariants, allShops, sold] = await Promise.all([
+        const [allVariants, allShops, sold, eventRows] = await Promise.all([
             MongoVariant.find({ product_id: { $in: productIds } }).lean(),
             Shop.find({ _id: { $in: shopIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean(),
-            soldMap ?? getSoldCounts(productIds)
+            soldMap ?? getSoldCounts(productIds),
+            ProductEvent.aggregate([
+                {
+                    $match: {
+                        product_id: { $in: productIds },
+                        created_at: { $gte: sevenDaysAgo }
+                    }
+                },
+                {
+                    $group: {
+                        _id: {
+                            product_id: '$product_id',
+                            day: { $dateToString: { format: '%Y-%m-%d', date: '$created_at' } }
+                        },
+                        count: { $sum: 1 }
+                    }
+                }
+            ]).catch(() => [])
         ]);
+
+        const dayKeys: string[] = [];
+        const now = new Date();
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date(now.getTime() - i * 86_400_000);
+            dayKeys.push(d.toISOString().slice(0, 10));
+        }
+
+        const eventsByProductDay = new Map<string, Map<string, number>>();
+        for (const row of (eventRows || [])) {
+            const pid = row._id?.product_id?.toString();
+            const day = row._id?.day;
+            if (pid && day) {
+                if (!eventsByProductDay.has(pid)) eventsByProductDay.set(pid, new Map());
+                eventsByProductDay.get(pid)!.set(day, row.count);
+            }
+        }
+
+        const realTrendsByProduct = new Map<string, number[]>();
+        for (const [pid, dayMap] of eventsByProductDay.entries()) {
+            const points = dayKeys.map(k => dayMap.get(k) || 0);
+            if (points.some(p => p > 0)) {
+                realTrendsByProduct.set(pid, points);
+            }
+        }
 
         const variantsByProductId = new Map<string, any[]>();
         for (const v of allVariants) {
@@ -622,12 +685,16 @@ export class ProductsService {
         const shopsById = new Map<string, any>();
         for (const s of allShops) shopsById.set(s._id.toString(), s);
 
-        return docs.map(mp => mapToProductItemResponse(
-            mp,
-            variantsByProductId.get(mp._id.toString()) || [],
-            shopsById.get(mp.shop_id?.toString()),
-            sold.get(mp._id.toString()) ?? 0
-        ));
+        return docs.map(mp => {
+            const pid = mp._id.toString();
+            return mapToProductItemResponse(
+                mp,
+                variantsByProductId.get(pid) || [],
+                shopsById.get(mp.shop_id?.toString()),
+                sold.get(pid) ?? 0,
+                realTrendsByProduct.get(pid)
+            );
+        });
     }
 
     public static async invalidateProductCache(productId?: string): Promise<void> {
