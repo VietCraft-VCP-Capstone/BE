@@ -205,7 +205,7 @@ router.get('/listings/:id/health/history', async (req: AuthenticatedRequest, res
         const payload = httpStatus < 400 ? { ...body, viewer } : body;
         return res.status(httpStatus).json(payload);
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc lịch sử điểm sức khoẻ.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc lịch sử điểm tối ưu sản phẩm.' });
     }
 });
 
@@ -227,7 +227,7 @@ router.get('/listings/health', async (req: AuthenticatedRequest, res: Response) 
         const payload = httpStatus < 400 ? { ...body, viewer } : body;
         return res.status(httpStatus).json(payload);
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc danh sách sức khoẻ listing.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc danh sách tối ưu sản phẩm.' });
     }
 });
 
@@ -255,7 +255,7 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
         const { httpStatus, body } = await healthSummary(viewer.analysed_shop_id!, days);
         return res.status(httpStatus).json({ ...body, viewer });
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc điểm sức khoẻ của shop.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc điểm tối ưu sản phẩm của shop.' });
     }
 });
 
