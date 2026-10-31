@@ -113,7 +113,7 @@ export class ListingHealthService {
             return {
                 httpStatus: 200,
                 body: insufficient(
-                    'Cần thiết lập gian hàng thật trước khi xem điểm sức khoẻ listing.',
+                    'Cần thiết lập gian hàng thật trước khi xem điểm tối ưu sản phẩm.',
                     metaForListing(productId, {}),
                 ),
             };
@@ -131,7 +131,7 @@ export class ListingHealthService {
             return {
                 httpStatus: 200,
                 body: insufficient(
-                    'Chưa đủ dữ liệu để chấm điểm sức khoẻ cho sản phẩm này.',
+                    'Chưa đủ dữ liệu để tính điểm tối ưu cho sản phẩm này.',
                     metaForListing(productId, {
                         computed_at: record?.computed_at ?? null,
                         model_version: record?.model_version,
@@ -177,7 +177,7 @@ export class ListingHealthService {
             return {
                 httpStatus: 200,
                 body: insufficient(
-                    'Cần thiết lập gian hàng thật trước khi xem lịch sử điểm sức khoẻ.',
+                    'Cần thiết lập gian hàng thật trước khi xem lịch sử điểm tối ưu.',
                     metaForListing(productId, {}),
                 ),
             };
@@ -233,7 +233,7 @@ export class ListingHealthService {
             return {
                 httpStatus: 200,
                 body: insufficient(
-                    'Cần thiết lập gian hàng thật trước khi xem điểm sức khoẻ listing.',
+                    'Cần thiết lập gian hàng thật trước khi xem điểm tối ưu sản phẩm.',
                     buildMeta({ scope: 'shop', scope_id: null, database: 'vietcraft', collection: COLLECTION, mode: 'live' }),
                 ),
             };
