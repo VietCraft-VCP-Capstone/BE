@@ -77,17 +77,7 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
     if (!data) return data;
 
     data.seller_shop_name = viewer.shop_name || 'Gian hàng của bạn';
-    data.seller_category = { slug: 'thoi-trang', name: 'Thời trang & May mặc' };
     data.is_live_shop = Boolean(viewer.live_shop_id);
-
-    if (!data.events || !Array.isArray(data.events)) return data;
-
-    let sellerBlanks: Blank[] = [];
-    try {
-        sellerBlanks = await BlankClient.listBlanks(req.user?.id);
-    } catch {
-        sellerBlanks = [];
-    }
 
     let shopProducts: any[] = [];
     if (viewer.live_shop_id && mongoose.Types.ObjectId.isValid(viewer.live_shop_id)) {
@@ -99,6 +89,49 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
         } catch {
             shopProducts = [];
         }
+    }
+
+    // Tự động nhận diện ngành hàng chính từ sản phẩm thực tế của người bán
+    let detectedSlug = 'thoi-trang';
+    let detectedName = 'Thời trang & May mặc';
+    if (shopProducts.length > 0) {
+        const catScores: Record<string, number> = { 'thoi-trang': 0, 'gia-dung': 0, 'phu-kien': 0, 'trang-tri': 0 };
+        for (const p of shopProducts) {
+            const text = `${p.title || ''} ${(p.categories || []).join(' ')} ${(p.tags || []).join(' ')}`.toLowerCase();
+            if (/áo|quần|váy|đầm|hoodie|sweater|thời trang|tweed|nỉ|jacket|khoác/.test(text)) {
+                catScores['thoi-trang'] += 2;
+            }
+            if (/cốc|ly|gốm|sứ|bát|bếp|thớt|gia dụng|bình/.test(text)) {
+                catScores['gia-dung'] += 2;
+            }
+            if (/tranh|khung|canvas|treo tường|decor|trang trí|nến/.test(text)) {
+                catScores['trang-tri'] += 2;
+            }
+            if (/túi|tote|ví|khăn|mũ|nón|phụ kiện/.test(text)) {
+                catScores['phu-kien'] += 2;
+            }
+        }
+        const bestCat = Object.entries(catScores).sort((a, b) => b[1] - a[1])[0];
+        if (bestCat && bestCat[1] > 0) {
+            detectedSlug = bestCat[0];
+            const nameMap: Record<string, string> = {
+                'thoi-trang': 'Thời trang & May mặc',
+                'gia-dung': 'Gia dụng & Quà lưu niệm',
+                'trang-tri': 'Trang trí nhà cửa & Decor',
+                'phu-kien': 'Phụ kiện & Túi xách',
+            };
+            detectedName = nameMap[detectedSlug] || 'Thời trang & May mặc';
+        }
+    }
+    data.seller_category = { slug: detectedSlug, name: detectedName };
+
+    if (!data.events || !Array.isArray(data.events)) return data;
+
+    let sellerBlanks: Blank[] = [];
+    try {
+        sellerBlanks = await BlankClient.listBlanks(req.user?.id);
+    } catch {
+        sellerBlanks = [];
     }
 
     for (const event of data.events) {
