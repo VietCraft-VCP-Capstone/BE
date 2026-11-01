@@ -50,7 +50,7 @@ const ROUTES: GatewayRoute[] = [
     // Đúng dạng SRS 3.9.5; bản nhận body ở trên giữ cho client cũ.
     { method: 'delete', path: '/competitor-tracking/:shopId', ai: p => `/api/analytics/competitor-tracking/${p.shopId}`, forwardShopIdBody: true },
     // Dự báo (SRS 3.10)
-    { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window'] },
+    { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window', 'targetId'] },
     { method: 'get', path: '/forecast/seasonal', ai: () => '/api/analytics/forecast/seasonal', query: ['categoryId', 'category_slug', 'campaign_id', 'campaignId', 'keyword'] },
     { method: 'get', path: '/forecast/niches', ai: () => '/api/analytics/forecast/niches', query: ['categoryId'] },
     { method: 'get', path: '/forecast/radar', ai: () => '/api/analytics/forecast/radar' },
@@ -76,8 +76,8 @@ function pickQuery(source: AuthenticatedRequest['query'], allowed: string[] = []
 async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: AnalyticsViewer) {
     if (!data) return data;
 
-    data.seller_shop_name = viewer.shop_name || 'SNOWKAT';
-    data.seller_category = { slug: 'thoi-trang', name: 'Thời trang Nữ & Set may mặc' };
+    data.seller_shop_name = viewer.shop_name || 'Gian hàng của bạn';
+    data.seller_category = { slug: 'thoi-trang', name: 'Thời trang & May mặc' };
     data.is_live_shop = Boolean(viewer.live_shop_id);
 
     if (!data.events || !Array.isArray(data.events)) return data;
