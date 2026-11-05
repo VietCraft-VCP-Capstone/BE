@@ -4,6 +4,8 @@ import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/mi
 import { AiGatewayService, AnalyticsViewer } from '../application/ai-gateway.service';
 import { CompetitorTrackingService, TrackingError } from '../application/competitor-tracking.service';
 import { Product } from '../../product/infrastructure/models/product.model';
+import { Shop } from '../../product/infrastructure/models/shop.model';
+import { Order } from '../../order/infrastructure/models/order.model';
 import { BlankClient, Blank } from '../../product/application/blank-client.service';
 import { ListingHealthService, HealthStatus } from '../application/listing-health.service';
 import { healthSummary } from '../application/listing-health-summary.service';
@@ -180,6 +182,74 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
         printer_name: b.printer_name
     }));
 
+    // Tính số đơn hoàn tất 8 tuần qua của shop thật để làm cơ sở cá nhân hóa dự kiến đơn
+    let shop8WeeksOrders = 0;
+    if (viewer.live_shop_id && mongoose.Types.ObjectId.isValid(viewer.live_shop_id)) {
+        try {
+            const eightWeeksAgo = new Date();
+            eightWeeksAgo.setDate(eightWeeksAgo.getDate() - 56);
+            shop8WeeksOrders = await Order.countDocuments({
+                shop_id: new mongoose.Types.ObjectId(viewer.live_shop_id),
+                created_at: { $gte: eightWeeksAgo },
+                order_status: { $in: ['COMPLETED', 'DELIVERED', 'PAID'] }
+            });
+        } catch {
+            shop8WeeksOrders = 0;
+        }
+    }
+    data.shop_8_weeks_orders = shop8WeeksOrders;
+
+    // Nếu shop thật có đơn hàng ngày thường, cá nhân hóa khoảng dao động expected_orders theo đúng số liệu shop
+    if (shop8WeeksOrders > 0 && Array.isArray(data.all_campaigns)) {
+        const weeklyAvg = Math.max(1, Math.round(shop8WeeksOrders / 8));
+        for (const camp of data.all_campaigns) {
+            let multMin = 2.0;
+            let multMax = 3.5;
+            if (camp.id === 'tet') { multMin = 4.5; multMax = 7.0; }
+            else if (camp.id === 'noel') { multMin = 3.0; multMax = 5.0; }
+            else if (camp.id === '12/12') { multMin = 2.5; multMax = 4.0; }
+            else if (camp.id === '11/11') { multMin = 2.0; multMax = 3.0; }
+
+            const low = Math.round(weeklyAvg * multMin);
+            const high = Math.round(weeklyAvg * multMax);
+            camp.expected_orders = `${low}–${high}`;
+
+            // Nếu shop có trên 100 đơn trong 8 tuần và dịp gần (< 30 ngày) -> củng cố độ tin cậy Cao
+            if (shop8WeeksOrders >= 100 && (camp.timing?.days_to_event ?? 100) <= 30) {
+                camp.confidence = {
+                    level: 'high',
+                    text: 'Cao',
+                    dots: 4,
+                    reason: `Shop có ${shop8WeeksOrders} đơn đối soát trong 8 tuần qua, dữ liệu tin cậy cao.`
+                };
+                camp.confidence_text = 'Cao';
+                camp.confidence_dots = 4;
+            }
+        }
+    }
+    // Đọc trạng thái ý tưởng đã lưu và checklist mốc thời gian từ gian hàng
+    let savedIdeas: string[] = [];
+    let checkedMilestones: Record<string, boolean> = {};
+    if (viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+        try {
+            const shopDoc = await Shop.findById(viewer.analysed_shop_id).select('settings').lean();
+            const seasonalPrefs = (shopDoc as any)?.settings?.seasonal_preferences;
+            if (seasonalPrefs) {
+                if (Array.isArray(seasonalPrefs.saved_ideas)) {
+                    savedIdeas = seasonalPrefs.saved_ideas;
+                }
+                if (seasonalPrefs.checked_milestones) {
+                    checkedMilestones = seasonalPrefs.checked_milestones;
+                }
+            }
+        } catch {
+            savedIdeas = [];
+            checkedMilestones = {};
+        }
+    }
+    data.saved_ideas = savedIdeas;
+    data.checked_milestones = checkedMilestones;
+
     return data;
 }
 
@@ -312,6 +382,68 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
 });
 
 router.post('/listings/intel/preview', userRateLimit(20, 60_000, 'Bạn thử quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
+
+// Lưu/Bỏ lưu ý tưởng sản phẩm mùa vụ (lưu trực tiếp vào settings gian hàng)
+router.post('/forecast/seasonal/save-idea', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { idea_id } = req.body;
+        if (!idea_id || typeof idea_id !== 'string') {
+            return res.status(400).json({ error: 'invalid_param', field: 'idea_id' });
+        }
+        if (viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            const shopDoc = await Shop.findById(viewer.analysed_shop_id);
+            if (shopDoc) {
+                shopDoc.settings = shopDoc.settings || {};
+                shopDoc.settings.seasonal_preferences = shopDoc.settings.seasonal_preferences || {};
+                const current: string[] = shopDoc.settings.seasonal_preferences.saved_ideas || [];
+                const idx = current.indexOf(idea_id);
+                if (idx > -1) {
+                    current.splice(idx, 1);
+                } else {
+                    current.push(idea_id);
+                }
+                shopDoc.settings.seasonal_preferences.saved_ideas = current;
+                shopDoc.markModified('settings');
+                await shopDoc.save();
+                return res.json({ success: true, saved_ideas: current });
+            }
+        }
+        return res.json({ success: true, saved_ideas: [idea_id] });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi lưu ý tưởng mùa vụ.' });
+    }
+});
+
+// Cập nhật tiến độ checklist mốc thời gian (lưu trực tiếp vào settings gian hàng)
+router.post('/forecast/seasonal/milestone', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { milestone_idx, is_done, camp_id } = req.body;
+        if (typeof milestone_idx !== 'number') {
+            return res.status(400).json({ error: 'invalid_param', field: 'milestone_idx' });
+        }
+        if (viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            const shopDoc = await Shop.findById(viewer.analysed_shop_id);
+            if (shopDoc) {
+                shopDoc.settings = shopDoc.settings || {};
+                shopDoc.settings.seasonal_preferences = shopDoc.settings.seasonal_preferences || {};
+                const currentMilestones = shopDoc.settings.seasonal_preferences.checked_milestones || {};
+                const key = camp_id ? `${camp_id}_${milestone_idx}` : String(milestone_idx);
+                currentMilestones[key] = Boolean(is_done);
+                shopDoc.settings.seasonal_preferences.checked_milestones = currentMilestones;
+                shopDoc.markModified('settings');
+                await shopDoc.save();
+                return res.json({ success: true, checked_milestones: currentMilestones });
+            }
+        }
+        return res.json({ success: true, checked_milestones: { [milestone_idx]: Boolean(is_done) } });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi cập nhật tiến độ mốc.' });
+    }
+});
 
 for (const route of ROUTES) {
     router[route.method](route.path, async (req: AuthenticatedRequest, res: Response) => {
