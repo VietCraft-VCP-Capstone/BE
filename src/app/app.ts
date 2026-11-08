@@ -19,7 +19,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// Trust proxy từ Nginx API Gateway để đọc đúng IP client và IPN VNPay
+// Trust proxy từ Nginx API Gateway để đọc đúng IP client
 app.set('trust proxy', 1);
 
 const allowedOrigins = [

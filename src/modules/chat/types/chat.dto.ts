@@ -31,7 +31,6 @@ export interface ConversationPartnerDTO {
     id: string;
     full_name: string;
     avatar?: string;
-    email: string;
     role: string;
     shop?: {
         id: string;

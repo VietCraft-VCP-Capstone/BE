@@ -1,4 +1,5 @@
 import fs from 'fs';
+import crypto from 'crypto';
 import path from 'path';
 import mongoose from 'mongoose';
 import { User } from '../../user/infrastructure/models/user.model';
@@ -8,6 +9,15 @@ import {
     SellerType
 } from '../infrastructure/models/seller-application.model';
 import { OtpVerification } from '../../auth/infrastructure/models/otp.model';
+import { KycOcrScan } from '../infrastructure/models/kyc-ocr-scan.model';
+import {
+    compareOcrWithSubmission,
+    summarizeOcrResult,
+    OcrBackSummary,
+    OcrFrontSummary,
+    OcrScanRecord,
+    OCR_MISMATCH_LABELS,
+} from './kyc-ocr-check';
 import {
     encryptField,
     decryptField,
@@ -116,7 +126,7 @@ export class SellerKycService {
             throw new Error('Số điện thoại không đúng định dạng di động Việt Nam (ví dụ: 0912345678).');
         }
 
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otp = crypto.randomInt(100000, 1000000).toString(); // Math.random() đoán được, không dùng cho OTP
         const expired_at = new Date(Date.now() + PHONE_OTP_TTL_MS);
 
         await OtpVerification.deleteMany({ phone, purpose: 'PHONE_VERIFY' });
@@ -131,20 +141,24 @@ export class SellerKycService {
         // Gửi SMS thật đến số điện thoại qua SpeedSMS
         const smsResult = await SmsService.sendOtp(phone, otp);
 
-        // Gửi email dự phòng song song
+        // Email dự phòng CHỈ dùng khi dev: mã xác minh SỐ ĐIỆN THOẠI mà gửi về email của chính người
+        // yêu cầu thì ai cũng "xác minh" được số của người khác. Production chỉ gửi qua SMS.
+        const isProd = config.nodeEnv === 'production';
         const user = await User.findById(userId);
-        if (user && user.email) {
+        if (!isProd && user && user.email) {
             await sendPhoneVerificationOtpEmail(user.email, phone, otp);
-            logger.info(`📧 Đã gửi email dự phòng mã OTP tới: ${user.email}`);
+            logger.info(`📧 [DEV] Đã gửi email dự phòng mã OTP tới: ${user.email}`);
         }
 
-        logger.info(`📱 SMS OTP -> ${phone}: [ ${otp} ] (SpeedSMS status: ${smsResult.success ? 'SENT' : smsResult.message})`);
+        logger.info(isProd
+            ? `📱 SMS OTP -> ${phone} (SpeedSMS status: ${smsResult.success ? 'SENT' : smsResult.message})`
+            : `📱 [DEV] SMS OTP -> ${phone}: [ ${otp} ] (SpeedSMS status: ${smsResult.success ? 'SENT' : smsResult.message})`);
 
         return {
             success: true,
             message: `Mã xác thực OTP đã được gửi tới số điện thoại ${phone}. Vui lòng kiểm tra tin nhắn trên điện thoại của bạn.`,
             smsSent: smsResult.success,
-            sentToEmail: user?.email || null
+            sentToEmail: !isProd ? (user?.email || null) : null
         };
     }
 
@@ -210,7 +224,8 @@ export class SellerKycService {
             throw new Error('Tài khoản này đã là Người bán trên hệ thống.');
         }
 
-        if (!user.is_phone_verified && !payload.phone_verified) {
+        // Chỉ tin trạng thái đã xác minh lưu ở server (verifyPhoneOtp đặt), không tin cờ client gửi lên
+        if (!user.is_phone_verified || !user.phone) {
             throw new Error('Vui lòng xác thực số điện thoại qua OTP trước khi nộp hồ sơ.');
         }
 
@@ -220,9 +235,10 @@ export class SellerKycService {
         const fullName = String(kyc.full_name || user.full_name || '').trim();
         if (!fullName) throw new Error('Họ và tên trên CCCD không được để trống.');
 
-        const idCardNumber = String(kyc.identity_card_number || '').trim();
-        if (!idCardNumber || idCardNumber.length < 9) {
-            throw new Error('Số Căn cước công dân (CCCD/CMND) không hợp lệ.');
+        // CCCD/Căn cước: đúng 12 chữ số (cho phép seller gõ có khoảng trắng / dấu chấm)
+        const idCardNumber = String(kyc.identity_card_number || '').replace(/[\s.]/g, '');
+        if (!/^\d{12}$/.test(idCardNumber)) {
+            throw new Error('Số Căn cước công dân không hợp lệ. Vui lòng nhập đúng 12 chữ số in trên thẻ.');
         }
 
         if (sellerType === 'INDIVIDUAL') {
@@ -305,6 +321,15 @@ export class SellerKycService {
             throw new Error('Vui lòng ký tên xác nhận điện tử.');
         }
 
+        // Đối chiếu với kết quả quét OCR: không chặn nộp (OCR có thể đọc sai), chỉ gắn cờ cho admin.
+        const ocrCheck = sellerType === 'INDIVIDUAL'
+            ? await this.buildOcrCheck(userId, kyc.front_id_image, kyc.back_id_image, {
+                id_number: idCardNumber,
+                full_name: fullName,
+                date_of_birth: kyc.date_of_birth,
+            })
+            : undefined;
+
         const encryptedIdCard = encryptField(idCardNumber);
         const encryptedAccountNumber = encryptField(accountNumber);
         const encryptedBusinessLicense = kyc.business_license_number
@@ -318,7 +343,7 @@ export class SellerKycService {
             user_id: user._id,
             seller_type: sellerType,
             status: 'PENDING_APPROVAL',
-            phone: user.phone || payload.phone,
+            phone: user.phone,
             is_phone_verified: true,
             email: user.email,
             is_email_verified: true,
@@ -347,7 +372,7 @@ export class SellerKycService {
                 main_category: shop.main_category,
                 pickup_address: {
                     recipient_name: String(pickup.recipient_name || fullName).trim(),
-                    phone: String(pickup.phone || user.phone || payload.phone || '').trim(),
+                    phone: pickupPhone,
                     province_id: String(pickup.province_id || '').trim(),
                     district_id: String(pickup.district_id || '').trim(),
                     ward_code: String(pickup.ward_code || '').trim(),
@@ -361,20 +386,25 @@ export class SellerKycService {
                 account_holder: accountHolder,
                 is_name_matched: true,
             },
+            ocr_check: ocrCheck,
             compliance: {
                 agreed_terms: true,
                 agreed_pdpd_policy: true,
                 electronic_signature: signature,
                 signed_at: new Date(),
-                ip_address: clientIp || '127.0.0.1',
+                ip_address: clientIp, // không có thì để trống, không ghi IP giả
             }
         };
 
+        const ocrNote = !ocrCheck ? ''
+            : ocrCheck.status === 'MISMATCH'
+                ? ` — OCR lệch: ${ocrCheck.mismatches.map(m => OCR_MISMATCH_LABELS[m] || m).join(', ')}`
+                : ` — OCR: ${ocrCheck.status}`;
         const auditEntry = {
             action: 'SUBMITTED',
             actor_id: user._id,
             timestamp: new Date(),
-            note: 'Người dùng nộp hồ sơ KYC đăng ký Người bán'
+            note: `Người dùng nộp hồ sơ KYC đăng ký Người bán${ocrNote}`
         };
 
         const existingApp = await SellerApplication.findOne({ user_id: user._id });
@@ -494,7 +524,41 @@ export class SellerKycService {
         return decryptBuffer(diskBuffer);
     }
 
-    static async scanCccd(filename: string, side: 'front' | 'back' = 'front') {
+    /** Kết quả quét gần nhất của user cho một file ảnh (đã giải mã), null nếu chưa quét. */
+    private static async loadOcrScan<T>(userId: string, filename: string | undefined, side: 'front' | 'back'): Promise<OcrScanRecord<T> | null> {
+        if (!filename || !mongoose.Types.ObjectId.isValid(userId)) return null;
+        const doc = await KycOcrScan.findOne({ user_id: userId, filename, side }).lean();
+        if (!doc) return null;
+        try {
+            return {
+                summary: JSON.parse(decryptField(doc.data_encrypted)) as T,
+                is_valid: doc.is_valid,
+                confidence_score: doc.confidence_score,
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    private static async buildOcrCheck(
+        userId: string,
+        frontFile: string | undefined,
+        backFile: string | undefined,
+        submitted: { id_number: string; full_name: string; date_of_birth?: string },
+    ) {
+        try {
+            const [front, back] = await Promise.all([
+                this.loadOcrScan<OcrFrontSummary>(userId, frontFile, 'front'),
+                this.loadOcrScan<OcrBackSummary>(userId, backFile, 'back'),
+            ]);
+            return compareOcrWithSubmission(front, back, submitted, areNamesMatching);
+        } catch (err: any) {
+            logger.warn(`[Seller KYC] Không đối chiếu được kết quả OCR: ${err?.name || 'Error'}`);
+            return undefined;
+        }
+    }
+
+    static async scanCccd(filename: string, side: 'front' | 'back' = 'front', userId?: string) {
         const fileBuffer = this.readKycFileBuffer(filename);
         if (!fileBuffer) {
             throw new Error('Không tìm thấy file ảnh tài liệu để quét.');
@@ -526,12 +590,36 @@ export class SellerKycService {
             });
 
             if (!response.ok) {
-                const errText = await response.text();
-                logger.error(`[Seller KYC] AI OCR Service Error (${response.status}): ${errText}`);
-                throw new Error(`AI OCR Service trả về lỗi: ${errText}`);
+                // Lỗi 400 của service OCR là thông báo cho người dùng (ảnh quá lớn, sai định dạng...).
+                // Lỗi khác (401/5xx) là lỗi nội bộ — không đưa chi tiết ra ngoài.
+                let userMessage = 'Dịch vụ quét CCCD đang gặp sự cố. Bạn vui lòng tự nhập thông tin hoặc thử lại sau.';
+                if (response.status === 400) {
+                    try {
+                        const body: any = await response.json();
+                        if (typeof body?.detail?.message === 'string') userMessage = body.detail.message;
+                    } catch { /* giữ thông báo chung */ }
+                }
+                logger.error(`[Seller KYC] AI OCR Service Error (${response.status})`);
+                throw new Error(userMessage);
             }
 
-            const data = await response.json();
+            const data: any = await response.json();
+            if (userId && data?.success) {
+                try {
+                    await KycOcrScan.findOneAndUpdate(
+                        { user_id: userId, filename, side },
+                        {
+                            data_encrypted: encryptField(JSON.stringify(summarizeOcrResult(side, data))),
+                            is_valid: Boolean(data.verification?.is_valid_format_and_quality),
+                            confidence_score: Number(data.verification?.confidence_score) || 0,
+                        },
+                        { upsert: true, setDefaultsOnInsert: true },
+                    );
+                } catch (err: any) {
+                    // Lưu thất bại không làm hỏng lượt quét; chỉ mất khả năng đối chiếu cho file này
+                    logger.warn(`[Seller KYC] Không lưu được kết quả quét OCR: ${err?.name || 'Error'}`);
+                }
+            }
             return data;
         } catch (error: any) {
             const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';

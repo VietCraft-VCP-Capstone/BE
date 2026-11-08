@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { notificationService } from '../application/notification.service';
+import { config } from '../../../app/config';
 
 const router = Router();
 
@@ -105,6 +106,10 @@ router.delete('/:id', async (req: AuthenticatedRequest, res: Response) => {
  * Tạo một thông báo thử nghiệm (dành cho kiểm thử hoặc dev)
  */
 router.post('/test', async (req: AuthenticatedRequest, res: Response) => {
+    // Endpoint thử nghiệm: production không mở cho người dùng tự tạo thông báo tuỳ ý
+    if (config.nodeEnv === 'production') {
+        return res.status(404).json({ success: false, error: 'Not Found' });
+    }
     try {
         const userId = req.user!.id;
         const { title, content, type, link, metadata } = req.body;

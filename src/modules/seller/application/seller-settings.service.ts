@@ -13,6 +13,8 @@ import { generateSlug } from '../../../shared/utils/slug';
 import { isCloudinaryEnabled, uploadImage } from '../../../infrastructure/storage/cloudinary.service';
 import { encryptField, decryptField, maskBankAccount, isEncryptedField } from '../../../shared/utils/crypto.service';
 
+const MAX_SHIPPING_FEE = 2_000_000;
+
 const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
     brand: {
         storeName: '',
@@ -265,6 +267,24 @@ export class SellerSettingsService {
         }
 
         if (payload.shipping) {
+            // Phí âm sẽ bị trừ thẳng vào tổng đơn, chữ thành NaN — chặn ngay khi lưu
+            const feeOf = (v: any, fallback: number, label: string) => {
+                const n = Number(v ?? fallback);
+                if (!Number.isFinite(n) || n < 0 || n > MAX_SHIPPING_FEE) {
+                    throw new Error(`${label} phải là số từ 0 đến ${MAX_SHIPPING_FEE.toLocaleString('vi-VN')}đ.`);
+                }
+                return Math.round(n);
+            };
+            if (payload.shipping.pricingType !== undefined
+                && !['FLAT_RATE', 'ZONE_BASED'].includes(payload.shipping.pricingType)) {
+                throw new Error('Cách tính phí vận chuyển không hợp lệ.');
+            }
+            const flatRateFee = feeOf(payload.shipping.flatRateFee, 0, 'Phí đồng giá');
+            const zoneRates = {
+                intraProvince: feeOf(payload.shipping.zoneRates?.intraProvince, 22000, 'Phí nội tỉnh'),
+                intraRegion: feeOf(payload.shipping.zoneRates?.intraRegion, 30000, 'Phí nội vùng'),
+                interRegion: feeOf(payload.shipping.zoneRates?.interRegion, 38000, 'Phí liên vùng'),
+            };
             const cleanCarriers = (payload.shipping.carriers || []).filter(
                 (c: any) => c && c.id !== 'viettelpost' && c.id !== 'vtp' && !c.name?.toLowerCase().includes('viettel')
             );
@@ -274,12 +294,8 @@ export class SellerSettingsService {
                 ...payload.shipping,
                 pricingType,
                 useFlatRate: pricingType === 'FLAT_RATE',
-                flatRateFee: Number(payload.shipping.flatRateFee ?? 0),
-                zoneRates: {
-                    intraProvince: Number(payload.shipping.zoneRates?.intraProvince ?? 22000),
-                    intraRegion: Number(payload.shipping.zoneRates?.intraRegion ?? 30000),
-                    interRegion: Number(payload.shipping.zoneRates?.interRegion ?? 38000),
-                },
+                flatRateFee,
+                zoneRates,
                 carriers: cleanCarriers
             };
         }

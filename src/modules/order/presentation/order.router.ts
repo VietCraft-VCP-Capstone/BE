@@ -49,10 +49,16 @@ router.post('/', authenticate, async (req: AuthenticatedRequest, res) => {
     }
 });
 
+const BUYER_ORDER_TABS = ['all', 'pending', 'paid', 'shipping', 'completed', 'cancelled'];
+
 router.get('/', authenticate, async (req: AuthenticatedRequest, res) => {
     try {
         const buyerId = req.user!.id;
         const status = req.query.status as string;
+        // Giá trị lạ trước đây lặng lẽ trả về TẤT CẢ đơn (tab hiển thị sai mà không báo lỗi)
+        if (status && !BUYER_ORDER_TABS.includes(status.toLowerCase())) {
+            return res.status(400).json({ error: `Trạng thái đơn không hợp lệ: ${status}` });
+        }
         const orders = await OrdersService.getOrdersByBuyer(buyerId, status);
         res.json(orders);
     } catch (error: any) {
