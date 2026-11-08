@@ -383,7 +383,7 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
 
 router.post('/listings/intel/preview', userRateLimit(20, 60_000, 'Bạn thử quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 
-// Lưu/Bỏ lưu ý tưởng sản phẩm mùa vụ (lưu trực tiếp vào settings gian hàng)
+// Lưu/Bỏ lưu ý tưởng sản phẩm theo dịp (lưu trực tiếp vào settings gian hàng)
 router.post('/forecast/seasonal/save-idea', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const viewer = await viewerOrReply(req, res);
@@ -412,7 +412,7 @@ router.post('/forecast/seasonal/save-idea', async (req: AuthenticatedRequest, re
         }
         return res.json({ success: true, saved_ideas: [idea_id] });
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi lưu ý tưởng mùa vụ.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi lưu ý tưởng theo dịp.' });
     }
 });
 
