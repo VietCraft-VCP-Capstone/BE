@@ -50,6 +50,9 @@ ReviewSchema.index({ product_id: 1, rating: -1, created_at: -1 });
 // Hỗ trợ truy vấn đánh giá theo shop
 ReviewSchema.index({ shop_id: 1, created_at: -1 });
 
+// Hỗ trợ scheduler quét các review mới cập nhật (F29 Minute Scan)
+ReviewSchema.index({ updated_at: 1 });
+
 /**
  * Static method recalculateRatings:
  * Tính toán lại average_rating và rating_count cho Product và Shop bằng Aggregation Pipeline.

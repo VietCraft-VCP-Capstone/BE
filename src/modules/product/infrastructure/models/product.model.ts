@@ -216,5 +216,7 @@ ProductSchema.index({ tags_norm: 1 });
 ProductSchema.index({ categories_norm: 1 });
 ProductSchema.index({ shop_id: 1, status: 1 });
 ProductSchema.index({ listing_status: 1, status: 1 });
+ProductSchema.index({ updated_at: 1 });
+ProductSchema.index({ is_hidden: 1, updated_at: 1 });
 
 export const Product = mongoose.model<IProduct>('Product', ProductSchema, 'products');
