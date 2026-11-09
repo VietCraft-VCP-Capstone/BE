@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 import { Order as OrderModel } from "../infrastructure/models/order.model";
 import { WebhookLog } from "../infrastructure/models/webhook-log.model";
 import { Product } from "../../product/infrastructure/models/product.model";
-import { ProductVariant, syncProductDenorm } from "../../product/infrastructure/models/product-variant.model";
+import { ProductVariant } from "../../product/infrastructure/models/product-variant.model";
 import { Shop } from "../../product/infrastructure/models/shop.model";
 import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
@@ -15,18 +15,14 @@ import { CommissionSetting } from "../../../shared/services/commission-setting.s
 import { commissionFromGross } from "../../../shared/utils/commission";
 import { mapDbOrderToResponse } from "../infrastructure/dto/order.dto";
 import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
-import { executeRefund, cancelRefundKey } from "../../payment/application/refund-runtime";
+import { executeRefund } from "../../payment/application/refund-runtime";
 import { payosService } from "../../payment/application/payos.service";
 import { logger } from "../../../shared/utils/logger";
-import { ReputationService } from "../../seller/application/reputation.service";
+
 
 export class OrdersService {
 
-  /**
-   * Tính toán phí vận chuyển linh hoạt dựa theo cấu hình của Shop và địa chỉ người nhận.
-   * - Flat Rate: Phí cố định (hoặc 0đ nếu Freeship)
-   * - Zone-based: Phân vùng Nội tỉnh / Nội vùng / Liên vùng
-   */
+
   static async resolveShippingFee(shopId?: string | mongoose.Types.ObjectId | null, address?: any): Promise<{
     shippingFee: number;
     pricingType: 'FLAT_RATE' | 'ZONE_BASED';
@@ -354,7 +350,6 @@ export class OrdersService {
           { _id: it.variant_id },
           { $inc: { stock_quantity: -it.quantity } }
         ).catch(err => console.error('[STOCK] Lỗi trừ tồn kho khi tạo đơn:', err?.message || err));
-        void syncProductDenorm(it.product_id);
       }
     }
 
@@ -410,7 +405,6 @@ export class OrdersService {
             { _id: vId },
             { $inc: { stock_quantity: it.quantity || 1 } }
           ).catch(err => console.error('[STOCK] Lỗi hoàn tồn kho:', err?.message || err));
-          void syncProductDenorm(it.product_id?._id || it.product_id);
         }
       }
     }
@@ -479,14 +473,11 @@ export class OrdersService {
       note: `Người mua tự hủy đơn hàng. Lý do: ${reason || 'Người mua đổi ý'}`
     });
 
-    // Chưa đánh dấu REFUNDED: chỉ khi cổng xác nhận đã chi thì materializeSuccess mới đặt
-    // payment_status/refund_status = REFUNDED. Trước đó giữ PAID + REQUESTED để job đối soát chạy lại.
     if (wasPaid) {
       order.refund_status = 'REQUESTED';
     }
 
-    // Chỉ validate các trường vừa thay đổi: đơn cũ có thể thiếu trường bắt buộc (ward_code, base_cost...) khiến save() báo 400
-    await order.save({ validateModifiedOnly: true });
+    await order.save();
 
     // Hoàn lại kho và voucher
     await OrdersService.restoreOrderStockAndCoupon(order);
@@ -504,7 +495,7 @@ export class OrdersService {
         try {
           const refundResult = await executeRefund({
             orderId: String(order._id),
-            businessKey: cancelRefundKey(order.order_code),
+            businessKey: `CANCEL-${order.order_code}-${Date.now()}`,
             amount: Math.round(refundAmount),
             reason: `Người mua tự hủy đơn #${order.order_code}`,
             createdBy: String(buyerId),
@@ -518,7 +509,7 @@ export class OrdersService {
               changed_at: new Date(),
               note: `Cổng thanh toán đã hoàn trả thành công ${refundAmount.toLocaleString('vi-VN')}đ về tài khoản ngân hàng.`
             });
-            await order.save({ validateModifiedOnly: true });
+            await order.save();
             refundMessageSuffix = ' Số tiền thanh toán đã được hoàn về tài khoản ngân hàng của bạn.';
             logger.info(`[AUTO-REFUND SUCCESS] #${order.order_code}: amount=${refundResult.amount}`);
           } else if (refundResult.status === 'PENDING') {
@@ -528,7 +519,7 @@ export class OrdersService {
               changed_at: new Date(),
               note: `Lệnh hoàn tiền ${refundAmount.toLocaleString('vi-VN')}đ đang được cổng thanh toán xử lý.`
             });
-            await order.save({ validateModifiedOnly: true });
+            await order.save();
             refundMessageSuffix = ' Lệnh hoàn tiền đang được xử lý về tài khoản ngân hàng của bạn.';
             logger.info(`[AUTO-REFUND PENDING] #${order.order_code}: ${refundResult.error || 'Đang xử lý'}`);
           } else {
@@ -539,7 +530,7 @@ export class OrdersService {
               changed_at: new Date(),
               note: `Hoàn tiền tự động không thành công: ${failReason}. Đang chờ đối soát hoàn thủ công.`
             });
-            await order.save({ validateModifiedOnly: true });
+            await order.save();
             refundMessageSuffix = ` Lưu ý: Lệnh hoàn tiền tự động chưa hoàn tất (${failReason}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
             logger.error(`[AUTO-REFUND FAILED] #${order.order_code}: ${failReason}`);
           }
@@ -551,7 +542,7 @@ export class OrdersService {
             changed_at: new Date(),
             note: `Lỗi xử lý hoàn tiền: ${errMsg}. Đang chờ đối soát hoàn thủ công.`
           });
-          await order.save({ validateModifiedOnly: true });
+          await order.save();
           refundMessageSuffix = ` Lưu ý: Lỗi xử lý hoàn tiền (${errMsg}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
           logger.error(`[AUTO-REFUND ERROR] #${order.order_code}: ${errMsg}`);
         }
@@ -1127,8 +1118,6 @@ export class OrdersService {
 
     await order.save();
 
-    if (order.order_status === 'DELIVERED') void ReputationService.recordCleanOrder(order);
-
     await WebhookLog.create({
       provider: 'PRINTING_SHOP',
       event_type: payload.event || pStatus || (tracking ? 'TRACKING_UPDATE' : 'STATUS_UPDATE'),
@@ -1221,8 +1210,6 @@ export class OrdersService {
       note: 'Khách hàng đã bấm xác nhận nhận được hàng thành công.'
     });
     await order.save();
-
-    void ReputationService.recordCleanOrder(order);
 
     // Thông báo realtime cho Người bán
     const shopOwnerId = (order.shop_id as any)?.owner_id;

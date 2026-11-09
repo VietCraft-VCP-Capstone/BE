@@ -1,8 +1,8 @@
 import { evaluatePodEligibility } from './return-policy';
-import type { DeliveredEventSourceV3, ReturnEligibilityItem, ReturnEligibilityItemSource, ReturnRequestClock } from './return-request.service';
-import type { ReturnRequestV3Repository } from '../infrastructure/repositories/return-request-v3.repository';
+import type { ReturnDeliveredEventSource, ReturnEligibilityItem, ReturnEligibilityItemSource, ReturnRequestClock } from './return-request.service';
+import type { ReturnRequestRepository } from '../infrastructure/repositories/return-request.repository';
 
-export async function evaluateBuyerReturnEligibility(input:{actorId:string;orderId:string;source:ReturnEligibilityItemSource;repository:ReturnRequestV3Repository;deliveredEventSource:DeliveredEventSourceV3;clock:ReturnRequestClock;r06DeliveredWindowHours?:number}):Promise<ReturnEligibilityItem[]> {
+export async function evaluateBuyerReturnEligibility(input:{actorId:string;orderId:string;source:ReturnEligibilityItemSource;repository:ReturnRequestRepository;deliveredEventSource:ReturnDeliveredEventSource;clock:ReturnRequestClock;r06DeliveredWindowHours?:number}):Promise<ReturnEligibilityItem[]> {
     const rows=await input.source.getItems(input.orderId);
     if(!rows.length || rows.some(row=>row.buyerId!==input.actorId)) throw Object.assign(new Error('Buyer does not own this order.'),{statusCode:403});
     const activeRequests=await input.repository.listActiveByOrder(input.orderId);

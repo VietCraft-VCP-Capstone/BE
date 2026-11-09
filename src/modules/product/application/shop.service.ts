@@ -3,10 +3,7 @@ import { Shop } from '../infrastructure/models/shop.model';
 import { ShopFollower } from '../infrastructure/models/shop-follower.model';
 import { logger } from '../../../shared/utils/logger';
 
-/**
- * BR-201: với người bán, theo dõi một gian hàng chính là theo dõi đối thủ — cùng danh sách
- * với mục "Theo dõi đối thủ" của khu Phân tích — nên tối đa 10 gian hàng. Người mua không giới hạn.
- */
+// BR-201: người bán theo dõi gian hàng = theo dõi đối thủ, tối đa 10; người mua không giới hạn.
 export const SELLER_FOLLOW_LIMIT = 10;
 
 export class FollowLimitError extends Error {
@@ -58,9 +55,6 @@ export interface ShopDetailDTO {
 }
 
 export class ShopService {
-    /**
-     * Tìm gian hàng theo ObjectId hoặc slug
-     */
     static async resolveShop(shopIdOrSlug: string) {
         let shop = null;
         if (mongoose.Types.ObjectId.isValid(shopIdOrSlug)) {
@@ -72,9 +66,6 @@ export class ShopService {
         return shop;
     }
 
-    /**
-     * Lấy thông tin chi tiết gian hàng
-     */
     static async getShopDetail(shopIdOrSlug: string, currentUserId?: string): Promise<ShopDetailDTO> {
         const shop = await ShopService.resolveShop(shopIdOrSlug);
         if (!shop) {
@@ -128,25 +119,16 @@ export class ShopService {
         };
     }
 
-    /**
-     * Số gian hàng người dùng đang theo dõi.
-     */
     static async countFollowing(userId: string): Promise<number> {
         return ShopFollower.countDocuments({ buyer_ids: new mongoose.Types.ObjectId(userId) });
     }
 
-    /**
-     * Người dùng có đang theo dõi gian hàng này không.
-     */
     static async isFollowing(shopId: mongoose.Types.ObjectId | string, userId: string): Promise<boolean> {
         const found = await ShopFollower.exists({ shop_id: shopId, buyer_ids: new mongoose.Types.ObjectId(userId) });
         return Boolean(found);
     }
 
-    /**
-     * Chặn người bán theo dõi quá SELLER_FOLLOW_LIMIT gian hàng (BR-201).
-     * Theo dõi lại gian hàng đang theo dõi thì không tốn thêm chỗ.
-     */
+    // Theo dõi lại gian hàng đang theo dõi thì không tốn thêm chỗ (BR-201).
     static async assertSellerFollowSlot(shopIdOrSlug: string, userId: string): Promise<void> {
         const shop = await ShopService.resolveShop(shopIdOrSlug);
         if (!shop || await ShopService.isFollowing(shop._id, userId)) return;
@@ -155,9 +137,6 @@ export class ShopService {
         }
     }
 
-    /**
-     * Theo dõi gian hàng
-     */
     static async followShop(shopIdOrSlug: string, buyerId: string) {
         const shop = await ShopService.resolveShop(shopIdOrSlug);
         if (!shop) {
@@ -188,9 +167,6 @@ export class ShopService {
         };
     }
 
-    /**
-     * Hủy theo dõi gian hàng
-     */
     static async unfollowShop(shopIdOrSlug: string, buyerId: string) {
         const shop = await ShopService.resolveShop(shopIdOrSlug);
         if (!shop) {
@@ -217,9 +193,6 @@ export class ShopService {
         };
     }
 
-    /**
-     * Lấy danh sách các gian hàng mà người dùng đang theo dõi
-     */
     static async getFollowedShops(userId: string): Promise<ShopDetailDTO[]> {
         if (!userId) return [];
         const userObjectId = new mongoose.Types.ObjectId(userId);

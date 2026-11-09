@@ -1,5 +1,4 @@
 import mongoose, { Schema, Document } from 'mongoose';
-import { normalizeVi } from '../../../../shared/utils/vietnamese-search.util';
 
 export interface IBankInfo {
     bank_code: string;
@@ -24,7 +23,6 @@ export type ReputationTier = 'TRUSTED' | 'NORMAL' | 'WARNING' | 'RESTRICTED';
 export interface IShop extends Document {
     owner_id: mongoose.Types.ObjectId;
     shop_name: string;
-    shop_name_norm?: string;
     slug: string;
     status: 'ACTIVE' | 'INACTIVE' | 'CLOSED' | 'PENDING';
     logo?: string;
@@ -72,7 +70,6 @@ const PrinterPartnerSchema = new Schema<IPrinterPartner>({
 const ShopSchema = new Schema<IShop>({
     owner_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true, index: true },
     shop_name: { type: String, required: true },
-    shop_name_norm: { type: String, index: true },
     slug: { type: String, required: true, unique: true, index: true },
     status: {
         type: String,
@@ -109,13 +106,5 @@ const ShopSchema = new Schema<IShop>({
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
-ShopSchema.pre('save', function (next) {
-    if (this.isModified('shop_name') || !this.shop_name_norm) {
-        this.shop_name_norm = normalizeVi(this.shop_name || '');
-    }
-    next();
-});
-
-ShopSchema.index({ shop_name_norm: 1 });
 
 export const Shop = mongoose.model<IShop>('Shop', ShopSchema, 'shops');

@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { chatService } from '../application/chat.service';
+import { ChatGateway } from './chat.gateway';
 
 const router = Router();
 
@@ -32,13 +33,19 @@ router.post('/conversations', async (req: AuthenticatedRequest, res: Response) =
 
         // Chỉ tự động gửi tin nhắn khởi tạo nếu có nội dung tin nhắn ban đầu
         if (initialMessage && initialMessage.trim()) {
-            await chatService.saveMessage({
+            const savedMsg = await chatService.saveMessage({
                 senderId: userId,
                 receiverId: conversation.partner.id,
                 roomId: conversation.conversation_id,
                 messageText: initialMessage.trim(),
                 productWidget: productWidget
             });
+            await ChatGateway.broadcastNewMessage(
+                savedMsg,
+                conversation.partner.id,
+                userId,
+                conversation.conversation_id
+            );
         }
 
         res.status(201).json({ success: true, data: conversation });
@@ -59,6 +66,7 @@ router.get('/conversations/:id/messages', async (req: AuthenticatedRequest, res:
 
         // Tự động đánh dấu đã đọc các tin nhắn gửi tới user hiện tại
         await chatService.markAsRead(conversationId, userId);
+        await ChatGateway.broadcastMessagesRead(conversationId, userId);
 
         res.json({ success: true, data: messages });
     } catch (error: any) {
@@ -83,6 +91,11 @@ router.post('/conversations/:id/messages', async (req: AuthenticatedRequest, res
             customQuotation: custom_quotation
         });
 
+        const targetReceiverId = receiver_id || conversationId.split('_').find(id => id !== userId);
+        if (targetReceiverId) {
+            await ChatGateway.broadcastNewMessage(message, targetReceiverId, userId, conversationId);
+        }
+
         res.status(201).json({ success: true, data: message });
     } catch (error: any) {
         res.status(400).json({ success: false, error: error.message });
@@ -95,6 +108,7 @@ router.put('/conversations/:id/read', async (req: AuthenticatedRequest, res: Res
         const userId = req.user!.id;
         const conversationId = req.params.id;
         await chatService.markAsRead(conversationId, userId);
+        await ChatGateway.broadcastMessagesRead(conversationId, userId);
         res.json({ success: true, message: 'Đã cập nhật trạng thái đọc' });
     } catch (error: any) {
         res.status(400).json({ success: false, error: error.message });

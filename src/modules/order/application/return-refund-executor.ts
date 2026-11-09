@@ -1,11 +1,11 @@
 import { executeVnpayRefund } from '../../payment/application/refund-runtime';
 import { ReturnRefundExecution } from '../infrastructure/models/return-refund-execution.model';
-import { ReturnRequestV3 } from '../infrastructure/models/return-request-v3.model';
-import type { ReturnRequestV3Data } from '../infrastructure/repositories/return-request-v3.repository';
+import { ReturnRequest } from '../infrastructure/models/return-request.model';
+import type { ReturnRequestData } from '../infrastructure/repositories/return-request.repository';
 import type { ReturnRefundExecutionStatus } from '../infrastructure/models/return-refund-execution.model';
 
 /** Uses the saved Admin decision; request-body amounts can never change an execution. */
-export async function executeReturnRefund(request: ReturnRequestV3Data): Promise<{ id: string; status: ReturnRefundExecutionStatus }> {
+export async function executeReturnRefund(request: ReturnRequestData): Promise<{ id: string; status: ReturnRefundExecutionStatus }> {
     const linked = await ReturnRefundExecution.findOne({ request_id: request.id, order_item_id: request.order_item_id }).lean();
     if (!linked || !request.refund_admin_confirmed || linked.admin_decision_id !== request.admin_decision_id) throw new Error('Không tìm thấy quyết định hoàn tiền đã được Admin xác nhận.');
     if (linked.status === 'REFUNDED') return { id: String(linked._id), status: 'REFUNDED' };
@@ -22,6 +22,6 @@ export async function executeReturnRefund(request: ReturnRequestV3Data): Promise
         error = cause instanceof Error ? cause.message : 'Chưa xác nhận chuyển tiền.';
     }
     await ReturnRefundExecution.updateOne({ _id: linked._id, status: { $ne: 'REFUNDED' } }, { $set: { status, error } }, { runValidators: true });
-    await ReturnRequestV3.updateOne({ _id: request.id, status: { $ne: 'COMPLETED' } }, { $set: { linked_refund_status: status }, $inc: { version: 1 } });
+    await ReturnRequest.updateOne({ _id: request.id, status: { $ne: 'COMPLETED' } }, { $set: { linked_refund_status: status }, $inc: { version: 1 } });
     return { id: String(linked._id), status };
 }

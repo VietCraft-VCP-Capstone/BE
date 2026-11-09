@@ -1,5 +1,5 @@
 import { Order } from '../infrastructure/models/order.model';
-import type { DeliveredEventSourceV3 } from './return-request.service';
+import type { ReturnDeliveredEventSource } from './return-request.service';
 import type { R06TrackingEvidence, VerifiedDeliveredEvent } from './return-policy';
 
 function validDate(value: unknown): value is Date {
@@ -7,7 +7,7 @@ function validDate(value: unknown): value is Date {
 }
 
 /** Reads delivery history written by authenticated fulfillment or buyer confirmation handlers. */
-export class OrderDeliveredEventSource implements DeliveredEventSourceV3 {
+export class OrderDeliveredEventSource implements ReturnDeliveredEventSource {
     constructor(private readonly allowSimulated = false) {}
 
     private async getOrder(orderId: string, itemId: string): Promise<any | null> {

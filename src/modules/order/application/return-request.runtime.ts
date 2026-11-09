@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { Order } from '../infrastructure/models/order.model';
 import { createBuyerOrderIdResolver } from './buyer-order-id-resolver';
 import { Shop } from '../../product/infrastructure/models/shop.model';
-import { MongoReturnRequestV3Repository } from '../infrastructure/repositories/return-request-v3.repository';
+import { MongoReturnRequestRepository } from '../infrastructure/repositories/return-request.repository';
 import { MongooseReturnRefundExecutionRepository } from '../infrastructure/services/return-refund-execution.repository';
 import { createLinkedRefundExecution } from './return-refund-bridge.service';
 import { OrderDeliveredEventSource } from './order-delivered-event-source';
@@ -57,5 +57,5 @@ export function createReturnRequestService(realClock: ReturnRequestClock = { now
     const enabled=isDevOrderSimulationEnabled(env);
     const bridgeRepository=new MongooseReturnRefundExecutionRepository();
     const bridge: ReturnRequestRefundBridge={ async createLinkedRefund(input){ return createLinkedRefundExecution(bridgeRepository,input); } };
-    return new ReturnRequestApplicationService({ repository:new MongoReturnRequestV3Repository(),snapshotSource:createOrderReturnSnapshotSource(enabled,env),eligibilityItemSource:createReturnEligibilityItemSource(enabled),resolveBuyerOrderId,deliveredEventSource:new OrderDeliveredEventSource(enabled),bridge,executeRefund:executeReturnRefund,clock:createReturnClock(realClock,env),id:()=>crypto.randomUUID() });
+    return new ReturnRequestApplicationService({ repository:new MongoReturnRequestRepository(),snapshotSource:createOrderReturnSnapshotSource(enabled,env),eligibilityItemSource:createReturnEligibilityItemSource(enabled),resolveBuyerOrderId,deliveredEventSource:new OrderDeliveredEventSource(enabled),bridge,executeRefund:executeReturnRefund,clock:createReturnClock(realClock,env),id:()=>crypto.randomUUID() });
 }

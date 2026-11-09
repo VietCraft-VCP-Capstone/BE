@@ -52,8 +52,8 @@ async function fetchFromAi(): Promise<string[]> {
 }
 
 async function fetchFromTrendCollections(): Promise<string[]> {
-    const db = mongoose.connection.db;
-    if (mongoose.connection.readyState !== 1 || !db) return [];
+    if (mongoose.connection.readyState !== 1) return [];
+    const db = mongoose.connection.getClient().db(config.mongoDbData);
     try {
         const colNames = (await db.listCollections().toArray()).map(c => c.name);
 

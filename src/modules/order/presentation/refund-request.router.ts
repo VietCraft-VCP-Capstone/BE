@@ -10,13 +10,13 @@ import { UploadService } from '../../upload/application/upload.service';
 import { UPLOAD_ROOT, publicUrl } from '../../../shared/upload/upload.middleware';
 import { RefundRequestService } from '../application/refund-request.service';
 import { isValidRefundImageBuffer, isValidRefundVideoBuffer } from '../application/refund-evidence-policy';
-import { ReturnRequestV3, ReturnEvidenceV3 } from '../infrastructure/models/return-request-v3.model';
+import { ReturnRequest, ReturnEvidence } from '../infrastructure/models/return-request.model';
 import { createReturnRequestService } from '../application/return-request.runtime';
 import { ReplacementOrderService } from '../application/replacement-order.service';
 import { Order } from '../infrastructure/models/order.model';
 import { User } from '../../user/infrastructure/models/user.model';
 import { RefundRequest } from '../infrastructure/models/refund-request.model';
-import { ReturnRequestLogV3 } from '../infrastructure/models/return-request-v3.model';
+import { ReturnRequestLog } from '../infrastructure/models/return-request.model';
 import { verifyPrinterRefundPartner, verifyMockPrinterRefund, type PrinterRefundRequest } from './middlewares/verify-printer-refund.middleware';
 
 const router = Router();
@@ -124,65 +124,65 @@ const listPrinterRefunds = asyncHandler(async (req: PrinterRefundRequest, res) =
     const legacyDocs = await RefundRequest.find({ printer_id: printerQuery, status: 'PENDING_PRINTER' })
         .populate('order_id').populate('buyer_id', 'full_name email').sort({ created_at: 1 }).lean();
     
-    // Đồng bộ các yêu cầu V3 (Đổi hàng & Hoàn tiền theo món) của xưởng in
-    const v3Docs = await ReturnRequestV3.find({
+    // Đồng bộ các yêu cầu đổi trả (Đổi hàng & Hoàn tiền theo món) của xưởng in
+    const returnDocs = await ReturnRequest.find({
         printer_id: printerQuery,
         status: { $in: ['PENDING_PRINTER', 'APPROVED', 'REJECTED', 'DISPUTED', 'AWAITING_ADMIN_REFUND'] }
     }).sort({ updated_at: -1, created_at: -1 }).limit(50).lean();
-    const v3Mapped = await Promise.all(v3Docs.map(async (v3: any) => {
-        const requestId = String(v3.id || v3._id);
-        const evidences = await ReturnEvidenceV3.find({ request_id: requestId }).lean();
+    const returnMapped = await Promise.all(returnDocs.map(async (returnReq: any) => {
+        const requestId = String(returnReq.id || returnReq._id);
+        const evidences = await ReturnEvidence.find({ request_id: requestId }).lean();
         let orderInfo: any = null;
-        if (mongoose.Types.ObjectId.isValid(v3.order_id)) {
-            orderInfo = await Order.findById(v3.order_id).select('order_code buyer_id items').lean();
+        if (mongoose.Types.ObjectId.isValid(returnReq.order_id)) {
+            orderInfo = await Order.findById(returnReq.order_id).select('order_code buyer_id items').lean();
         } else {
-            orderInfo = await Order.findOne({ order_code: v3.order_id }).select('order_code buyer_id items').lean();
+            orderInfo = await Order.findOne({ order_code: returnReq.order_id }).select('order_code buyer_id items').lean();
         }
         
         let buyerInfo: any = null;
-        const buyerId = orderInfo?.buyer_id || v3.buyer_id;
+        const buyerId = orderInfo?.buyer_id || returnReq.buyer_id;
         if (buyerId && mongoose.Types.ObjectId.isValid(buyerId)) {
             buyerInfo = await User.findById(buyerId).select('full_name email').lean();
         }
 
-        const isExchange = v3.requested_resolution === 'EXCHANGE';
-        const unitPrice = v3.item_snapshot?.unit_price || v3.item_snapshot?.price || 0;
-        const totalAmount = unitPrice * (v3.quantity || 1);
-        const orderCode = orderInfo?.order_code || v3.order_id;
+        const isExchange = returnReq.requested_resolution === 'EXCHANGE';
+        const unitPrice = returnReq.item_snapshot?.unit_price || returnReq.item_snapshot?.price || 0;
+        const totalAmount = unitPrice * (returnReq.quantity || 1);
+        const orderCode = orderInfo?.order_code || returnReq.order_id;
 
         return {
             _id: requestId,
             id: requestId,
-            is_v3: true,
-            printer_id: v3.printer_id || printerId,
+            is_return_request: true,
+            printer_id: returnReq.printer_id || printerId,
             order_id: {
-                _id: orderInfo?._id || v3.order_id,
+                _id: orderInfo?._id || returnReq.order_id,
                 order_code: orderCode,
             },
             order_code: orderCode,
             buyer_id: {
-                _id: v3.buyer_id,
+                _id: returnReq.buyer_id,
                 full_name: buyerInfo?.full_name || 'Khách hàng VietCraft',
-                email: buyerInfo?.email || v3.buyer_id,
+                email: buyerInfo?.email || returnReq.buyer_id,
             },
-            reason_category: `${v3.reason_code} - ${isExchange ? 'ĐỔI HÀNG (IN BÙ)' : 'HOÀN TIỀN'}`,
-            reason_code: v3.reason_code,
-            requested_resolution: v3.requested_resolution,
-            description: v3.reason_description,
+            reason_category: `${returnReq.reason_code} - ${isExchange ? 'ĐỔI HÀNG (IN BÙ)' : 'HOÀN TIỀN'}`,
+            reason_code: returnReq.reason_code,
+            requested_resolution: returnReq.requested_resolution,
+            description: returnReq.reason_description,
             evidence: evidences.map((e: any) => e.storage_ref),
             refund_type: isExchange ? 'EXCHANGE' : 'FULL',
             refund_amount: totalAmount,
-            quantity: v3.quantity || 1,
-            item_snapshot: v3.item_snapshot,
-            status: v3.status,
+            quantity: returnReq.quantity || 1,
+            item_snapshot: returnReq.item_snapshot,
+            status: returnReq.status,
             sla_deadlines: {
-                printer_deadline: v3.deadline_at,
+                printer_deadline: returnReq.deadline_at,
             },
-            created_at: v3.created_at,
+            created_at: returnReq.created_at,
         };
     }));
 
-    return res.json({ success: true, data: [...v3Mapped, ...legacyDocs] });
+    return res.json({ success: true, data: [...returnMapped, ...legacyDocs] });
 });
 const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, res) => {
     const id = String(req.params.id);
@@ -196,14 +196,14 @@ const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, re
     const note = String(req.body?.note || '').trim();
     if (!['APPROVE', 'REJECT'].includes(decision)) throw new Error('decision không hợp lệ');
     if (decision === 'REJECT' && note.length < 3) throw new Error('Khi từ chối, cần ghi rõ lý do (ít nhất 3 ký tự)');
-    const v3Doc: any = await ReturnRequestV3.findOne({ $or: [{ id }, { _id: id }] }).lean();
-    if (v3Doc) {
-        if (!isMatchedPrinter(v3Doc.printer_id)) return res.status(403).json({ error: 'Assigned Printer required' });
-        const requestId = String(v3Doc.id || v3Doc._id);
+    const returnDoc: any = await ReturnRequest.findOne({ $or: [{ id }, { _id: id }] }).lean();
+    if (returnDoc) {
+        if (!isMatchedPrinter(returnDoc.printer_id)) return res.status(403).json({ error: 'Assigned Printer required' });
+        const requestId = String(returnDoc.id || returnDoc._id);
         // Retry after a lost callback response must acknowledge the original decision.
-        const previous = await ReturnRequestLogV3.findOne({ request_id: requestId, actor_id: printerId, actor_role: 'PRINTER',
+        const previous = await ReturnRequestLog.findOne({ request_id: requestId, actor_id: printerId, actor_role: 'PRINTER',
             to_status: { $in: decision === 'APPROVE' ? ['APPROVED', 'AWAITING_ADMIN_REFUND'] : ['REJECTED'] } }).lean();
-        if (previous) return res.json({ success: true, data: v3Doc });
+        if (previous) return res.json({ success: true, data: returnDoc });
         const service = createReturnRequestService();
         const printerAction = decision as 'APPROVE' | 'REJECT';
         const reason = note || 'Xưởng in đã xác nhận và chấp thuận';
@@ -221,10 +221,10 @@ const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, re
             evidence: printerEvidence,
         });
 
-        if (printerAction === 'APPROVE' && (v3Doc.requested_resolution === 'EXCHANGE' || updated.final_resolution === 'EXCHANGE')) {
+        if (printerAction === 'APPROVE' && (returnDoc.requested_resolution === 'EXCHANGE' || updated.final_resolution === 'EXCHANGE')) {
             try {
                 await ReplacementOrderService.createAndDispatchReplacement(requestId);
-                const freshDoc = await ReturnRequestV3.findOne({ $or: [{ id: requestId }, { _id: requestId }] }).lean();
+                const freshDoc = await ReturnRequest.findOne({ $or: [{ id: requestId }, { _id: requestId }] }).lean();
                 return res.json({ success: true, data: freshDoc || updated });
             } catch (err: any) {
                 console.error('[REPLACEMENT CREATION ERROR]', err.message);
