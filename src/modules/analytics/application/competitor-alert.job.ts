@@ -30,7 +30,7 @@ export interface CompetitorAlert {
 export function alertContent(alert: CompetitorAlert, tagNames: Record<string, string>): string {
     const tags = alert.matched_tags.slice(0, 3).map(t => tagNames[t] ?? t);
     const why = tags.length ? `cùng từ khoá ${tags.join(', ')}` : `cùng loại hàng ${alert.type_name ?? alert.category_name ?? 'với bạn'}`;
-    const high = alert.threat?.level === 'high' ? ' Mức đe doạ: cao.' : '';
+    const high = alert.threat?.level === 'high' ? ' Mức cạnh tranh: cao.' : '';
     return `${alert.shop_name ?? 'Shop bạn theo dõi'} vừa đăng "${alert.title ?? 'sản phẩm mới'}", ${why}.${high}`;
 }
 

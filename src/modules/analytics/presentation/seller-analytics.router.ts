@@ -189,17 +189,30 @@ router.get('/context', async (req: AuthenticatedRequest, res: Response) => {
 
 const SHOP_SEARCH_MAX = 60;
 
+router.get('/competitor-tracking/categories', async (_req: AuthenticatedRequest, res: Response) => {
+    try {
+        return res.json({ data: await CompetitorTrackingService.rootCategories() });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc danh mục.' });
+    }
+});
+
 router.get('/competitor-tracking/search', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
-        if (!q || q.length > SHOP_SEARCH_MAX) {
+        const categoryId = typeof req.query.categoryId === 'string' ? req.query.categoryId : '';
+        // Tìm theo tên, theo danh mục, hoặc cả hai; phải có ít nhất một.
+        if (q.length > SHOP_SEARCH_MAX || (!q && !categoryId)) {
             return res.status(400).json({ error: 'invalid_param', field: 'q', expected: `1-${SHOP_SEARCH_MAX} ký tự` });
+        }
+        if (categoryId && !/^[a-f0-9]{24}$/i.test(categoryId)) {
+            return res.status(400).json({ error: 'invalid_param', field: 'categoryId' });
         }
         const viewer = await viewerOrReply(req, res);
         if (!viewer) return;
         // Shop mẫu theo dõi bằng mã shp_* của dữ liệu mồi, không tìm trên sàn.
         if (viewer.demo) return res.json({ data: [], viewer });
-        const data = await CompetitorTrackingService.searchShops(req.user!.id, q);
+        const data = await CompetitorTrackingService.searchShops(req.user!.id, q, categoryId || undefined);
         return res.json({ data, viewer });
     } catch (error: any) {
         return res.status(500).json({ error: error?.message || 'Lỗi khi tìm gian hàng.' });
