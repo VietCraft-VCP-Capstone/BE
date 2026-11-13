@@ -57,7 +57,7 @@ export class ReturnRequestApplicationService {
         const linkedRequest = await this.deps.repository.transitionWithAudit(request.id, request.version, { linked_refund_id:linked.id, linked_refund_status:linked.status, updated_at:this.now() }, { request_id:request.id, actor_id:'SYSTEM', actor_role:'SYSTEM', from_status:request.status, to_status:request.status, reason:'Persisted idempotent linked Refund bridge reference.', event_id:linked.id, created_at:this.now() });
         return this.executeLinkedRefund(linkedRequest);
     }
-    /** Money moves only through the idempotent VNPay execution; the result is re-read so callers see the real status. */
+    /** Money moves only through the idempotent refund execution; the result is re-read so callers see the real status. */
     private async executeLinkedRefund(request: ReturnRequestData): Promise<ReturnRequestData> {
         if (!this.deps.executeRefund) return request;
         await this.deps.executeRefund(request);

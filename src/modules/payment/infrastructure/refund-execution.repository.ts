@@ -4,7 +4,6 @@ import { PaymentRefundExecution, type PaymentRefundRecord, type PaymentRefundSta
 import { Order } from '../../order/infrastructure/models/order.model';
 import { Transaction } from '../../order/infrastructure/models/transaction.model';
 import { byCodeOrId, num, dec } from '../../order/utils';
-import { formatVnpayDate } from '../utils/vnpay.util';
 import { payosService } from '../application/payos.service';
 import { RefundExecutionError, type RefundContext, type RefundExecutionInput, type RefundExecutionRepository, type RefundGatewayResult } from '../application/refund-execution.service';
 
@@ -25,7 +24,7 @@ export class MongoRefundExecutionRepository implements RefundExecutionRepository
             simulated: order.is_simulated === true || /^TEST-/.test(order.order_code),
             paidAmount: tx ? Math.min(total, num(tx.amount)) : total,
             originalTransactionId: tx?.gateway_transaction_id || '',
-            transactionDate: tx?.callback_payload?.vnp_CreateDate || tx?.callback_payload?.vnp_PayDate || formatVnpayDate(tx?.created_at),
+            transactionDate: tx?.created_at ? new Date(tx.created_at).toISOString() : new Date().toISOString(),
             ...(order.payment_method === 'PAYOS' ? { destination: await payosService.resolveRefundDestination(order, tx) } : {}),
         };
     }
@@ -65,12 +64,12 @@ export class MongoRefundExecutionRepository implements RefundExecutionRepository
         const manual = record.gateway_response?.manual === true;
         await Transaction.updateOne({ refund_execution_id: record._id }, { $setOnInsert: {
             order_id: context.orderId, order_code: context.orderCode, user_id: context.buyerId,
-            gateway: manual ? 'MANUAL' : context.paymentMethod, gateway_transaction_id: record.gateway_response?.vnp_TransactionNo || record.gateway_response?.reference || record.gateway_response?.payoutId,
+            gateway: manual ? 'MANUAL' : context.paymentMethod, gateway_transaction_id: record.gateway_response?.reference || record.gateway_response?.payoutId,
             gateway_response_code: '00', amount: dec(record.amount), type: 'REFUND', status: 'SUCCESS',
             refund_request_id: record.business_key, refund_execution_id: record._id,
             callback_payload: record.gateway_response || {}, note: manual
                 ? `Người bán chuyển khoản hoàn ${record.amount}đ cho đơn ${context.orderCode} (mã GD ${record.gateway_response?.reference}).`
-                : `${context.paymentMethod === 'PAYOS' ? 'payOS' : 'VNPay'} xác nhận hoàn ${record.amount}đ cho đơn ${context.orderCode}.`,
+                : `${context.paymentMethod === 'PAYOS' ? 'payOS' : context.paymentMethod} xác nhận hoàn ${record.amount}đ cho đơn ${context.orderCode}.`,
         } }, { upsert: true, runValidators: true });
         const refunded = await this.refundedAmount(context.orderId);
         await Order.updateOne({ _id: context.orderId }, { $set: { refund_status: 'REFUNDED', ...(refunded >= context.paidAmount ? { payment_status: 'REFUNDED' } : {}) } });

@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import { Order } from '../infrastructure/models/order.model';
 import { ReturnRequest, RETURN_REQUEST_ACTIVE_STATUSES } from '../infrastructure/models/return-request.model';
-import { executeVnpayRefund, refundContextOf, settleRefundManually } from '../../payment/application/refund-runtime';
+import { executeRefund, refundContextOf, settleRefundManually } from '../../payment/application/refund-runtime';
 import { bankNameOf } from '../../payment/domain/bank-codes';
 import { RefundRequest, IRefundRequest, RefundRequestStatus } from '../infrastructure/models/refund-request.model';
 import { RefundStateMachine, RefundActor } from './refund-state-machine';
@@ -320,7 +320,7 @@ export class RefundRequestService {
         if (doc.status === 'REFUNDED' && doc.execution_status === 'SUCCEEDED') return;
         await RefundRequest.updateOne({ _id: doc._id }, { $set: { execution_status: 'PROCESSING' } });
         try {
-            const result = await executeVnpayRefund({ orderId: String(doc.order_id), businessKey: String(doc._id),
+            const result = await executeRefund({ orderId: String(doc.order_id), businessKey: String(doc._id),
                 amount: Number(doc.refund_amount), reason: `Hoan tien yeu cau ${doc._id}`, createdBy: 'VietCraft' });
             const succeeded = result.status === 'REFUNDED';
             const changed = await RefundRequest.updateOne({ _id: doc._id, execution_status: { $ne: 'SUCCEEDED' } }, { $set: {

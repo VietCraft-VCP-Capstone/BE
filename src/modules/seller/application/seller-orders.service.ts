@@ -304,7 +304,7 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
-        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
+        // Đơn trả trước (payOS) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
         if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
             throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
         }
@@ -368,7 +368,7 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
-        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
+        // Đơn trả trước (payOS) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
         if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
             throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
         }

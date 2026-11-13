@@ -191,7 +191,7 @@ router.post('/scan-cccd', authenticate, kycScanRateLimiter, async (req: Authenti
             });
         }
 
-        const result = await SellerKycService.scanCccd(filename, side);
+        const result = await SellerKycService.scanCccd(filename, side, req.user!.id);
         res.status(200).json(result);
     } catch (error: any) {
         logger.error(`[Seller KYC Scan CCCD Error] User ${req.user?.id}: ${error.message}`);

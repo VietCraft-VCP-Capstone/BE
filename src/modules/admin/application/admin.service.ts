@@ -221,6 +221,9 @@ class AdminService implements IAdminService {
             account_holder: app.bank_info?.account_holder,
             account_number_masked: maskBankAccount(decryptField(app.bank_info?.account_number_encrypted)),
             is_name_matched: app.bank_info?.is_name_matched,
+            ocr_check: app.ocr_check
+                ? { status: app.ocr_check.status, mismatches: app.ocr_check.mismatches || [] }
+                : null,
             created_at: app.created_at,
             updated_at: app.updated_at
         }));
