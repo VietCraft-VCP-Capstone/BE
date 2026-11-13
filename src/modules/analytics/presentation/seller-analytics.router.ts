@@ -200,18 +200,20 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
     data.shop_8_weeks_orders = shop8WeeksOrders;
 
     // Nếu shop thật có đơn hàng ngày thường, cá nhân hóa khoảng dao động expected_orders theo đúng số liệu shop
+    // Tính toán động dựa trên hệ số tăng trưởng mùa vụ AI từ Google Trends & Marketplace
     if (shop8WeeksOrders > 0 && Array.isArray(data.all_campaigns)) {
         const weeklyAvg = Math.max(1, Math.round(shop8WeeksOrders / 8));
+        const generalGrowthPct = Number(data.occasion_traits?.orders_growth_pct ?? 35);
         for (const camp of data.all_campaigns) {
-            let multMin = 2.0;
-            let multMax = 3.5;
-            if (camp.id === 'tet') { multMin = 4.5; multMax = 7.0; }
-            else if (camp.id === 'noel') { multMin = 3.0; multMax = 5.0; }
-            else if (camp.id === '12/12') { multMin = 2.5; multMax = 4.0; }
-            else if (camp.id === '11/11') { multMin = 2.0; multMax = 3.0; }
+            const daysToEvent = Number(camp.timing?.days_to_event ?? 60);
+            const isNear = daysToEvent <= 30;
+            const campGrowth = Number(camp.orders_growth_pct ?? (isNear ? generalGrowthPct * 1.2 : generalGrowthPct));
+            
+            const multMin = Math.max(1.5, Math.round((1.0 + (campGrowth * 0.5) / 100) * 10) / 10);
+            const multMax = Math.max(multMin + 0.8, Math.round((1.0 + (campGrowth * 1.4) / 100) * 10) / 10);
 
-            const low = Math.round(weeklyAvg * multMin);
-            const high = Math.round(weeklyAvg * multMax);
+            const low = Math.max(1, Math.round(weeklyAvg * multMin));
+            const high = Math.max(low + 1, Math.round(weeklyAvg * multMax));
             camp.expected_orders = `${low}–${high}`;
 
             // Nếu shop có trên 100 đơn trong 8 tuần và dịp gần (< 30 ngày) -> củng cố độ tin cậy Cao
@@ -278,38 +280,48 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
 
     // 2. Cá nhân hóa phễu chuyển đổi & đơn hàng thực tế theo ĐẶC THÙ CỦA TỪNG DỊP
     const campId = (data.active_campaign?.id || '').toLowerCase();
-
-    // Quy mô mục tiêu và hệ số mùa vụ riêng biệt của từng dịp
-    const OCCASION_SCALES: Record<string, { multiplier: number; targetOrders: number; defaultStart?: string; defaultEnd?: string }> = {
-        tet: { multiplier: 2.8, targetOrders: 12, defaultStart: '2026-12-05', defaultEnd: '2027-02-08' },
-        noel: { multiplier: 1.6, targetOrders: 6, defaultStart: '2026-11-16', defaultEnd: '2026-12-25' },
-        '12/12': { multiplier: 1.8, targetOrders: 7, defaultStart: '2026-11-14', defaultEnd: '2026-12-13' },
-        '11/11': { multiplier: 2.0, targetOrders: 8, defaultStart: '2026-10-25', defaultEnd: '2026-11-12' },
-        '20/11': { multiplier: 1.3, targetOrders: 4, defaultStart: '2026-10-25', defaultEnd: '2026-11-21' },
-        '20/10': { multiplier: 1.4, targetOrders: 4, defaultStart: '2026-09-25', defaultEnd: '2026-10-21' },
-        valentine: { multiplier: 1.4, targetOrders: 5, defaultStart: '2027-01-07', defaultEnd: '2027-02-15' },
-        '8/3': { multiplier: 1.5, targetOrders: 5, defaultStart: '2027-01-29', defaultEnd: '2027-03-09' },
-        '30/4': { multiplier: 1.6, targetOrders: 6, defaultStart: '2027-03-19', defaultEnd: '2027-05-01' },
-        '1/6': { multiplier: 1.3, targetOrders: 4, defaultStart: '2027-05-02', defaultEnd: '2027-06-02' },
-        he_dulich: { multiplier: 1.6, targetOrders: 6, defaultStart: '2027-05-15', defaultEnd: '2027-07-15' },
-        tuutuong_trungthu: { multiplier: 1.3, targetOrders: 4, defaultStart: '2027-08-04', defaultEnd: '2027-09-16' },
-        trung_thu: { multiplier: 1.3, targetOrders: 4, defaultStart: '2027-08-04', defaultEnd: '2027-09-16' },
-        halloween: { multiplier: 1.3, targetOrders: 4, defaultStart: '2026-10-01', defaultEnd: '2026-10-31' }
-    };
-
-    const scaleConfig = OCCASION_SCALES[campId] || { multiplier: 1.5, targetOrders: 5 };
-    const shopBaseVolume = Math.max(1, shopRealOrders.length);
-    const projectedOrders = Math.max(scaleConfig.targetOrders, Math.round(shopBaseVolume * scaleConfig.multiplier));
-
-    // Xác định cửa sổ thời gian Bắt đầu và Kết thúc của dịp đang chọn
     const activeCamp = data.active_campaign;
     const launchWin = activeCamp?.launch_window || {};
 
-    const startStr = launchWin.traction_start || launchWin.start || scaleConfig.defaultStart || '2026-11-14';
-    const endStr = launchWin.peak_date || launchWin.end || scaleConfig.defaultEnd || '2026-12-12';
+    // Cửa sổ thời gian được trích xuất hoàn toàn động từ AI Calendar Engine (đã tính theo lịch âm/dương thực tế từng năm)
+    // Tuyệt đối không fix cứng năm, tự động khớp với năm của sự kiện đang phân tích
+    let startStr = launchWin.traction_start || launchWin.start;
+    let endStr = launchWin.peak_date || launchWin.end;
+
+    // Fallback nếu thiếu (tìm từ danh sách all_campaigns của năm đang xét)
+    if (!startStr || !endStr) {
+        const matchedInAll = (data.all_campaigns || []).find((c: any) => c.id === campId);
+        if (matchedInAll?.launch_window) {
+            startStr = startStr || matchedInAll.launch_window.traction_start || matchedInAll.launch_window.start;
+            endStr = endStr || matchedInAll.launch_window.peak_date || matchedInAll.launch_window.end;
+        }
+    }
+
+    // Nếu vẫn không có, tính động theo năm hiện tại từ hệ thống
+    if (!startStr || !endStr) {
+        const currentYear = new Date().getFullYear();
+        startStr = startStr || `${currentYear}-11-14`;
+        endStr = endStr || `${currentYear}-12-12`;
+    }
 
     const winStart = new Date(startStr + 'T00:00:00');
     const winEnd = new Date(endStr + 'T23:59:59');
+
+    // 3. Hệ số mùa vụ và mục tiêu đơn hàng: ĐƯỢC TÍNH ĐỘNG 100% TỪ AI GOOGLE TRENDS & THỊ TRƯỜNG
+    // Trích xuất tỷ lệ tăng trưởng đơn hàng (orders_growth_pct) từ mô hình phân rã chuỗi mùa vụ STL Google Trends + Tiki
+    const marketOrdersGrowthPct = Number(data.occasion_traits?.orders_growth_pct ?? 35);
+
+    // Hệ số mùa vụ co giãn linh động theo biến động thị trường (ví dụ +65% -> 1.65x, +180% -> 2.8x)
+    const dynamicMultiplier = Math.max(1.2, Math.round((1.0 + marketOrdersGrowthPct / 100) * 10) / 10);
+
+    // Mục tiêu đơn hàng phễu: Sử dụng trực tiếp con số dự báo động của AI Analytics
+    // và điều chỉnh theo năng lực thực tế của shop nếu shop có dữ liệu đơn lịch sử
+    const aiForecastOrders = Number(data.campaign_funnel?.orders) || 6;
+    const shopBaseVolume = shopRealOrders.length;
+
+    const projectedOrders = shopBaseVolume > 0
+        ? Math.max(aiForecastOrders, Math.round(shopBaseVolume * dynamicMultiplier))
+        : aiForecastOrders;
 
     // Từ khóa đặc trưng của dịp để phát hiện đơn đặt sớm
     const OCCASION_KEYWORDS: Record<string, RegExp> = {
