@@ -79,7 +79,8 @@ export function decryptField(encryptedText: string): string {
             decrypted += decipher.final('utf8');
             return decrypted;
         } catch (err: any) {
-            throw new Error(`[CryptoSecurity] Giải mã dữ liệu thất bại hoặc dữ liệu bị sửa đổi: ${err.message}`);
+            console.warn(`[CryptoSecurity] GCM decrypt failed: ${err.message}`);
+            return '****';
         }
     }
 
@@ -95,7 +96,8 @@ export function decryptField(encryptedText: string): string {
             decrypted += decipher.final('utf8');
             return decrypted;
         } catch (err: any) {
-            throw new Error(`[CryptoSecurity] Giải mã dữ liệu legacy CBC thất bại: ${err.message}`);
+            console.warn(`[CryptoSecurity] Legacy CBC decrypt failed: ${err.message}`);
+            return '****';
         }
     }
 

@@ -26,8 +26,22 @@ export class UserService {
             throw new Error('ID người dùng không hợp lệ');
         }
 
-        const user = await User.findById(userId).select('-password_hash').lean();
+        let user: any = await User.findById(userId).select('-password_hash').lean();
         if (!user) {
+            // Dự phòng trường hợp _id được lưu dạng string trong Mongo
+            user = await User.collection.findOne({
+                $or: [
+                    { _id: new mongoose.Types.ObjectId(userId) },
+                    { _id: userId as any }
+                ]
+            });
+            if (user && user.password_hash) {
+                delete user.password_hash;
+            }
+        }
+
+        if (!user) {
+            logger.warn(`UserService.getProfile: Không tìm thấy user id "${userId}" trong database "${mongoose.connection.name}", collection "${User.collection.name}"`);
             throw new Error('Không tìm thấy người dùng');
         }
 
@@ -36,7 +50,7 @@ export class UserService {
             Wishlist.findOne({ user_id: userId }).lean(),
             ShopFollower.countDocuments({ buyer_ids: userId })
         ]);
-        const wishlistCount = wishlist ? wishlist.product_ids.length : 0;
+        const wishlistCount = Array.isArray(wishlist?.product_ids) ? wishlist.product_ids.length : 0;
 
         return {
             ...user,
