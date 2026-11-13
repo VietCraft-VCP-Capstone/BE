@@ -294,7 +294,10 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
     };
 
     const campScale = OCCASION_SCALES[campId] || { multiplier: 1.5, targetOrders: 5 };
-    const projectedOrders = campScale.targetOrders;
+    // Số đơn kỳ vọng co giãn động theo quy mô đơn hàng thật của từng shop:
+    // = max(mức sàn tối thiểu của dịp, số đơn nền của shop * hệ số bùng nổ dịp đó)
+    const shopBaseVolume = Math.max(1, shopRealOrders.length);
+    const projectedOrders = Math.max(campScale.targetOrders, Math.round(shopBaseVolume * campScale.multiplier));
 
     // Phân loại dịp theo tiến độ thời gian (mock date 13/11/2026):
     // - Dịp tương lai chưa tới ngày mở bán (Tết 05/12, Valentine 07/01...): Thực tế = 0 đơn
