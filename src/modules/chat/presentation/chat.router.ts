@@ -91,8 +91,10 @@ router.post('/conversations/:id/messages', async (req: AuthenticatedRequest, res
             customQuotation: custom_quotation
         });
 
-        // Người nhận lấy từ tin đã lưu (đã kiểm tra thuộc phòng), không lấy lại từ body
-        await ChatGateway.broadcastNewMessage(message, message.receiver_id, userId, message.conversation_id);
+        const targetReceiverId = receiver_id || conversationId.split('_').find(id => id !== userId);
+        if (targetReceiverId) {
+            await ChatGateway.broadcastNewMessage(message, targetReceiverId, userId, conversationId);
+        }
 
         res.status(201).json({ success: true, data: message });
     } catch (error: any) {

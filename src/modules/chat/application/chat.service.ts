@@ -3,8 +3,6 @@ import { ChatMessage, IChatMessage } from '../infrastructure/models/chat-message
 import { Conversation, IConversation } from '../infrastructure/models/conversation.model';
 import { User } from '../../user/infrastructure/models/user.model';
 import { Shop } from '../../product/infrastructure/models/shop.model';
-import { Product } from '../../product/infrastructure/models/product.model';
-import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
 import {
     ChatMessageDTO,
     ConversationItemDTO,
@@ -13,9 +11,6 @@ import {
     CustomQuotationDTO
 } from '../types/chat.dto';
 import { logger } from '../../../shared/utils/logger';
-
-const MAX_MESSAGE_LENGTH = 2000;
-const MAX_ATTACHMENTS = 10;
 
 export function buildConversationId(userA: string, userB: string): string {
     return [userA, userB].sort().join('_');
@@ -135,6 +130,7 @@ export class ChatService {
             avatar: (!isUserATheShopOwner && partnerShop?.logo)
                 ? partnerShop.logo
                 : (partnerUser?.avatar || ''),
+            email: partnerUser?.email || '',
             role: (!isUserATheShopOwner && partnerShop) ? 'SELLER' : (partnerUser?.role || 'BUYER'),
             shop: (!isUserATheShopOwner && partnerShop) ? {
                 id: partnerShop._id.toString(),
@@ -183,7 +179,7 @@ export class ChatService {
         }
 
         const [users, shops] = await Promise.all([
-            User.find({ _id: { $in: partnerIds } }).select('_id full_name avatar role').lean(),
+            User.find({ _id: { $in: partnerIds } }).select('_id full_name avatar email role').lean(),
             Shop.find({
                 $or: [
                     { _id: { $in: shopIds } },
@@ -218,6 +214,7 @@ export class ChatService {
                 id: pId,
                 full_name: partnerShop?.shop_name || u?.full_name || 'Khách hàng',
                 avatar: partnerShop?.logo || u?.avatar || '',
+                email: u?.email || '',
                 role: partnerShop ? 'SELLER' : (u?.role || 'BUYER'),
                 shop: partnerShop ? {
                     id: partnerShop._id.toString(),
@@ -261,10 +258,9 @@ export class ChatService {
             query.created_at = { $lt: before };
         }
 
-        const safeLimit = Math.min(100, Math.max(1, Number(limit) || 50));
         const rawMessages = await ChatMessage.find(query)
             .sort({ created_at: -1 })
-            .limit(safeLimit)
+            .limit(limit)
             .lean();
 
         // Đảo ngược để có thứ tự thời gian tăng dần
@@ -285,61 +281,34 @@ export class ChatService {
         productWidget?: ProductWidgetDTO;
         customQuotation?: CustomQuotationDTO;
     }): Promise<ChatMessageDTO> {
-        const receiverId = data.receiverId
-            || (data.roomId ? data.roomId.split('_').find(p => p !== data.senderId) : undefined);
-        if (!receiverId) {
+        let roomId = data.roomId;
+        let receiverId = data.receiverId;
+
+        if (roomId && !receiverId) {
+            const parts = roomId.split('_');
+            receiverId = parts.find(p => p !== data.senderId);
+        } else if (!roomId && receiverId) {
+            roomId = buildConversationId(data.senderId, receiverId);
+        }
+
+        if (!roomId || !receiverId) {
             throw new Error('Thiếu thông tin người nhận hoặc cuộc hội thoại');
         }
-        if (!mongoose.Types.ObjectId.isValid(data.senderId) || !mongoose.Types.ObjectId.isValid(receiverId)
-            || receiverId === data.senderId) {
-            throw new Error('Người nhận không hợp lệ');
-        }
-        // Phòng luôn là cặp (người gửi, người nhận): không cho chèn tin vào hội thoại của người khác
-        // hay gửi tới người nhận không thuộc phòng (cả REST lẫn socket đều đi qua đây).
-        const roomId = buildConversationId(data.senderId, receiverId);
-        if (data.roomId && data.roomId !== roomId) {
-            throw new Error('Bạn không thuộc cuộc hội thoại này');
-        }
 
-        const text = String(data.messageText || '').trim();
-        if (text.length > MAX_MESSAGE_LENGTH) {
-            throw new Error(`Tin nhắn tối đa ${MAX_MESSAGE_LENGTH} ký tự`);
-        }
-        const attachments = Array.isArray(data.attachments)
-            ? data.attachments.filter(a => typeof a === 'string' && a.trim()).slice(0, MAX_ATTACHMENTS)
-            : [];
-        if (!text && !attachments.length && !data.productWidget?.product_id && !data.customQuotation?.amount) {
-            throw new Error('Tin nhắn trống');
-        }
-
-        // Thẻ sản phẩm: chỉ tin product_id, tên/giá/ảnh lấy từ DB — client tự điền thì gửi được
-        // thẻ giả mang giá sai của một sản phẩm thật.
         let productWidgetDoc: any = undefined;
         if (data.productWidget && data.productWidget.product_id) {
-            const pid = String(data.productWidget.product_id);
-            if (!mongoose.Types.ObjectId.isValid(pid)) throw new Error('Sản phẩm đính kèm không hợp lệ');
-            const product = await Product.findById(pid).select('title images').lean();
-            if (!product) throw new Error('Sản phẩm đính kèm không tồn tại');
-            const cheapest = await ProductVariant.findOne({ product_id: product._id, is_active: { $ne: false } })
-                .sort({ retail_price: 1 }).select('retail_price').lean();
             productWidgetDoc = {
-                product_id: product._id,
-                title: product.title,
-                price: cheapest?.retail_price || mongoose.Types.Decimal128.fromString('0'),
-                image: product.images?.[0] || ''
+                product_id: new mongoose.Types.ObjectId(data.productWidget.product_id),
+                title: data.productWidget.title,
+                price: mongoose.Types.Decimal128.fromString(data.productWidget.price.toString()),
+                image: data.productWidget.image
             };
-            data.productWidget = { ...data.productWidget, title: product.title };
         }
 
         let customQuotationDoc: any = undefined;
         if (data.customQuotation && data.customQuotation.amount) {
-            // Báo giá là việc của người bán: buyer không được tự "báo giá" cho chính mình
-            const ownsShop = await Shop.exists({ owner_id: new mongoose.Types.ObjectId(data.senderId) });
-            if (!ownsShop) throw new Error('Chỉ người bán mới được gửi báo giá');
-            const amount = Number(data.customQuotation.amount);
-            if (!Number.isFinite(amount) || amount <= 0) throw new Error('Số tiền báo giá không hợp lệ');
             customQuotationDoc = {
-                amount: mongoose.Types.Decimal128.fromString(String(amount)),
+                amount: mongoose.Types.Decimal128.fromString(data.customQuotation.amount.toString()),
                 design_url: data.customQuotation.design_url,
                 status: data.customQuotation.status || 'OFFERED'
             };
@@ -349,8 +318,8 @@ export class ChatService {
             conversation_id: roomId,
             sender_id: new mongoose.Types.ObjectId(data.senderId),
             receiver_id: new mongoose.Types.ObjectId(receiverId),
-            message_text: text,
-            attachments,
+            message_text: data.messageText || '',
+            attachments: data.attachments || [],
             product_widget: productWidgetDoc,
             custom_quotation: customQuotationDoc,
             is_read: false,
@@ -358,11 +327,11 @@ export class ChatService {
         });
 
         // Snippet tin nhắn hiển thị cho last_message
-        let snippetText = text;
+        let snippetText = data.messageText || '';
         if (!snippetText && data.productWidget) {
             snippetText = `[Sản phẩm] ${data.productWidget.title}`;
-        } else if (!snippetText && attachments.length) {
-            snippetText = `[${attachments.length} hình ảnh]`;
+        } else if (!snippetText && data.attachments?.length) {
+            snippetText = `[${data.attachments.length} hình ảnh]`;
         } else if (!snippetText && data.customQuotation) {
             snippetText = `[Báo giá thiết kế]`;
         }

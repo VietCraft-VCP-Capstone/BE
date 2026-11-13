@@ -36,6 +36,8 @@ export interface IFinancialBreakdown {
     subtotal: mongoose.Types.Decimal128;
     shipping_fee: mongoose.Types.Decimal128;
     coupon_discount: mongoose.Types.Decimal128;
+    // Phần của coupon_discount trừ vào phí ship (mã vận chuyển); coupon_discount vẫn là tổng giảm.
+    shipping_discount?: mongoose.Types.Decimal128;
     platform_fee: mongoose.Types.Decimal128;
     seller_payout_amount: mongoose.Types.Decimal128;
     commission_rate?: number;
@@ -83,6 +85,7 @@ export interface IOrder extends Document {
     items: IOrderItem[];
     financial_breakdown: IFinancialBreakdown;
     coupon_code?: string;
+    shipping_coupon_code?: string;
     status_history: IStatusHistory[];
     order_hour_of_week: number;
     created_at: Date;
@@ -125,6 +128,7 @@ const FinancialBreakdownSchema = new Schema<IFinancialBreakdown>({
     subtotal: { type: Schema.Types.Decimal128, required: true },
     shipping_fee: { type: Schema.Types.Decimal128, required: true },
     coupon_discount: { type: Schema.Types.Decimal128, required: true, default: 0.0 },
+    shipping_discount: { type: Schema.Types.Decimal128, default: 0.0 },
     platform_fee: { type: Schema.Types.Decimal128, required: true },
     seller_payout_amount: { type: Schema.Types.Decimal128, required: true },
     commission_rate: { type: Number, default: 0.10 },
@@ -180,6 +184,7 @@ const OrderSchema = new Schema<IOrder>({
     items: { type: [OrderItemSchema], required: true },
     financial_breakdown: { type: FinancialBreakdownSchema, required: true },
     coupon_code: { type: String, default: null, index: true },
+    shipping_coupon_code: { type: String, default: null, index: true },
     status_history: { type: [StatusHistorySchema], default: [] },
     order_hour_of_week: { type: Number, required: true, index: true }
 }, {

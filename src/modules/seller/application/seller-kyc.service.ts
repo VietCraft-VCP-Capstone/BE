@@ -1,5 +1,4 @@
 import fs from 'fs';
-import crypto from 'crypto';
 import path from 'path';
 import mongoose from 'mongoose';
 import { User } from '../../user/infrastructure/models/user.model';
@@ -126,7 +125,7 @@ export class SellerKycService {
             throw new Error('Số điện thoại không đúng định dạng di động Việt Nam (ví dụ: 0912345678).');
         }
 
-        const otp = crypto.randomInt(100000, 1000000).toString(); // Math.random() đoán được, không dùng cho OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
         const expired_at = new Date(Date.now() + PHONE_OTP_TTL_MS);
 
         await OtpVerification.deleteMany({ phone, purpose: 'PHONE_VERIFY' });
@@ -141,24 +140,20 @@ export class SellerKycService {
         // Gửi SMS thật đến số điện thoại qua SpeedSMS
         const smsResult = await SmsService.sendOtp(phone, otp);
 
-        // Email dự phòng CHỈ dùng khi dev: mã xác minh SỐ ĐIỆN THOẠI mà gửi về email của chính người
-        // yêu cầu thì ai cũng "xác minh" được số của người khác. Production chỉ gửi qua SMS.
-        const isProd = config.nodeEnv === 'production';
+        // Gửi email dự phòng song song
         const user = await User.findById(userId);
-        if (!isProd && user && user.email) {
+        if (user && user.email) {
             await sendPhoneVerificationOtpEmail(user.email, phone, otp);
-            logger.info(`📧 [DEV] Đã gửi email dự phòng mã OTP tới: ${user.email}`);
+            logger.info(`📧 Đã gửi email dự phòng mã OTP tới: ${user.email}`);
         }
 
-        logger.info(isProd
-            ? `📱 SMS OTP -> ${phone} (SpeedSMS status: ${smsResult.success ? 'SENT' : smsResult.message})`
-            : `📱 [DEV] SMS OTP -> ${phone}: [ ${otp} ] (SpeedSMS status: ${smsResult.success ? 'SENT' : smsResult.message})`);
+        logger.info(`📱 SMS OTP -> ${phone}: [ ${otp} ] (SpeedSMS status: ${smsResult.success ? 'SENT' : smsResult.message})`);
 
         return {
             success: true,
             message: `Mã xác thực OTP đã được gửi tới số điện thoại ${phone}. Vui lòng kiểm tra tin nhắn trên điện thoại của bạn.`,
             smsSent: smsResult.success,
-            sentToEmail: !isProd ? (user?.email || null) : null
+            sentToEmail: user?.email || null
         };
     }
 
@@ -224,8 +219,7 @@ export class SellerKycService {
             throw new Error('Tài khoản này đã là Người bán trên hệ thống.');
         }
 
-        // Chỉ tin trạng thái đã xác minh lưu ở server (verifyPhoneOtp đặt), không tin cờ client gửi lên
-        if (!user.is_phone_verified || !user.phone) {
+        if (!user.is_phone_verified && !payload.phone_verified) {
             throw new Error('Vui lòng xác thực số điện thoại qua OTP trước khi nộp hồ sơ.');
         }
 
@@ -343,7 +337,7 @@ export class SellerKycService {
             user_id: user._id,
             seller_type: sellerType,
             status: 'PENDING_APPROVAL',
-            phone: user.phone,
+            phone: user.phone || payload.phone,
             is_phone_verified: true,
             email: user.email,
             is_email_verified: true,
@@ -372,7 +366,7 @@ export class SellerKycService {
                 main_category: shop.main_category,
                 pickup_address: {
                     recipient_name: String(pickup.recipient_name || fullName).trim(),
-                    phone: pickupPhone,
+                    phone: String(pickup.phone || user.phone || payload.phone || '').trim(),
                     province_id: String(pickup.province_id || '').trim(),
                     district_id: String(pickup.district_id || '').trim(),
                     ward_code: String(pickup.ward_code || '').trim(),
@@ -392,7 +386,7 @@ export class SellerKycService {
                 agreed_pdpd_policy: true,
                 electronic_signature: signature,
                 signed_at: new Date(),
-                ip_address: clientIp, // không có thì để trống, không ghi IP giả
+                ip_address: clientIp || '127.0.0.1',
             }
         };
 
