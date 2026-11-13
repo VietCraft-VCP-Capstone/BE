@@ -321,12 +321,11 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
             }
 
             const buyerSeen = new Map<string, number>();
-            const trueGiftRegex = /ghi thiệp|viết thiệp|gói quà|hộp quà tặng|làm quà|tặng bạn|tặng mẹ|quà sinh nhật|quà noel|quà tết|che giá|kèm thiệp/i;
 
             const categorized: Record<string, any[]> = {
                 repeat_buyers: [],
-                gift_combo: [],
-                craft_video: [],
+                campaign_promo: [],
+                direct_social: [],
                 organic_listing: []
             };
 
@@ -335,15 +334,10 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                 const countSeen = (buyerSeen.get(bKey) || 0) + 1;
                 buyerSeen.set(bKey, countSeen);
 
-                let hasTrueGiftNote = false;
-                for (const it of (o.items || [])) {
-                    const notes = (it.custom_notes || '').trim().toLowerCase();
-                    const title = (it.title || '').trim().toLowerCase();
-                    if (trueGiftRegex.test(notes) || /hộp quà tặng|set quà tặng|gift box/i.test(title)) {
-                        hasTrueGiftNote = true;
-                        break;
-                    }
-                }
+                const hasCoupon = Boolean(
+                    o.coupon_code || 
+                    (o.financial_breakdown?.coupon_discount && Number(o.financial_breakdown.coupon_discount.toString()) > 0)
+                );
 
                 if (countSeen > 1) {
                     // Người mua này đã từng có đơn trước đó tại shop -> Gán vào Khách quen
@@ -352,25 +346,25 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                         created_at: o.created_at ? new Date(o.created_at).toLocaleDateString('vi-VN') : '',
                         total_amount: getOrderAmount(o),
                         item_summary: (o.items || []).map((it: any) => `${it.quantity || 1}x ${it.title}`).join(', ') || 'Sản phẩm',
-                        attribution_reason: `Khách quen (${(o.shipping_address as any)?.recipient_name || 'Khách'}) đặt lần thứ ${countSeen} tại shop.`
+                        attribution_reason: `Khách quen (${(o.shipping_address as any)?.recipient_name || 'Khách'}) đã từng mua tại shop quay lại đặt lần thứ ${countSeen}.`
                     });
-                } else if (hasTrueGiftNote) {
-                    // CHỈ GÁN KHI THẬT SỰ CÓ GHI CHÚ LÀM QUÀ HOẶC HỘP QUÀ TẶNG
-                    categorized.gift_combo.push({
+                } else if (hasCoupon) {
+                    // Đơn áp dụng mã ưu đãi chiến dịch hoặc sự kiện mùa lễ của sàn
+                    categorized.campaign_promo.push({
                         order_code: o.order_code || `ORD-${o._id.toString().slice(-6).toUpperCase()}`,
                         created_at: o.created_at ? new Date(o.created_at).toLocaleDateString('vi-VN') : '',
                         total_amount: getOrderAmount(o),
-                        item_summary: (o.items || []).map((it: any) => `${it.quantity || 1}x ${it.title}`).join(', ') || 'Hộp quà tặng',
-                        attribution_reason: `Đơn có ghi chú làm quà tặng hoặc sản phẩm hộp quà.`
+                        item_summary: (o.items || []).map((it: any) => `${it.quantity || 1}x ${it.title}`).join(', ') || 'Sản phẩm',
+                        attribution_reason: `Đơn áp dụng mã ưu đãi chiến dịch (${o.coupon_code || 'Voucher sự kiện'}).`
                     });
                 } else {
-                    // Đơn tìm kiếm tự nhiên trên catalog của sàn (bao gồm cả đơn mua nhiều váy/áo và set thời trang)
+                    // Đơn tìm kiếm tự nhiên trên catalog hoặc thanh tìm kiếm của sàn
                     categorized.organic_listing.push({
                         order_code: o.order_code || `ORD-${o._id.toString().slice(-6).toUpperCase()}`,
                         created_at: o.created_at ? new Date(o.created_at).toLocaleDateString('vi-VN') : '',
                         total_amount: getOrderAmount(o),
                         item_summary: (o.items || []).map((it: any) => `${it.quantity || 1}x ${it.title}`).join(', ') || 'Sản phẩm',
-                        attribution_reason: `Đơn hàng tự mua qua tìm kiếm SEO / catalog tự nhiên (${(o.items || []).length} món). Người nhận: ${(o.shipping_address as any)?.recipient_name || 'Khách'}`
+                        attribution_reason: `Đơn tự mua qua tìm kiếm SEO / duyệt danh mục sàn (${(o.items || []).length} món). Người nhận: ${(o.shipping_address as any)?.recipient_name || 'Khách'}`
                     });
                 }
             }
@@ -397,34 +391,34 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
 
             const criteriaMap: Record<string, { rule: string; checklist: string[] }> = {
                 organic_listing: {
-                    rule: 'Hệ thống nhận diện khi người mua tìm kiếm từ khóa trên thanh tìm kiếm và bấm vào sản phẩm.',
+                    rule: 'Hệ thống nhận diện khi người mua tìm kiếm từ khóa hoặc duyệt danh mục trên sàn và bấm vào sản phẩm.',
                     checklist: [
                         'Gắn đủ 5 thẻ tag ngách điểm cao vào tiêu đề và mô tả.',
                         'Tối ưu ảnh bìa vuông tỷ lệ 1:1 theo concept mùa lễ.',
                         'Đồng bộ từ khóa ngách vào tên phân loại sản phẩm.'
                     ]
                 },
-                craft_video: {
-                    rule: 'Hệ thống nhận diện khi đơn hàng phát sinh từ sản phẩm có gắn video hoặc qua trang showcase xưởng.',
+                campaign_promo: {
+                    rule: 'Hệ thống nhận diện khi đơn hàng phát sinh từ trang sự kiện mùa lễ của sàn hoặc có áp dụng mã ưu đãi chiến dịch.',
                     checklist: [
-                        'Đăng video cận cảnh công đoạn làm tay và khắc tên sản phẩm.',
-                        'Chèn khung thời gian giao hàng đảm bảo trước ngày lễ.',
-                        'Tận dụng hiệu ứng âm thanh ASMR đóng hộp quà thủ công.'
+                        'Đăng ký sản phẩm chủ lực vào cổng sự kiện lễ hội của sàn trước hạn chốt.',
+                        'Thiết lập voucher giảm giá riêng cho dịp cao điểm để tăng tỷ lệ chốt đơn.',
+                        'Cài đặt mức chiết khấu combo hoặc flash sale theo khung giờ vàng.'
                     ]
                 },
-                gift_combo: {
-                    rule: 'Hệ thống nhận diện khi đơn có từ 2 sản phẩm trở lên hoặc có ghi chú kèm thiệp/hộp quà.',
+                direct_social: {
+                    rule: 'Hệ thống nhận diện khi người mua truy cập qua liên kết chia sẻ từ mạng xã hội (Facebook, TikTok, Zalo, Instagram) của shop.',
                     checklist: [
-                        'Tạo biến thể phân loại: "Kèm hộp quà nơ + thiệp viết tay (+35.000đ)".',
-                        'Ghép 2 món bán chạy thành 1 Combo tiết kiệm 10%.',
-                        'Mặc định sẵn mẫu thiệp chúc mừng thiết kế sẵn trong đơn.'
+                        'Chia sẻ link bộ sưu tập dịp lễ lên các trang mạng xã hội của shop.',
+                        'Đính kèm link gian hàng VietCraft trong bài đăng và bio trang cá nhân/fanpage.',
+                        'Gắn mã giới thiệu hoặc link sản phẩm trong các bài viết review, feedback.'
                     ]
                 },
                 repeat_buyers: {
                     rule: 'Hệ thống nhận diện khi người mua cùng ID/số điện thoại quay lại đặt đơn thứ 2 trở lên.',
                     checklist: [
                         'Gửi mã voucher tri ân 15% cho khách hàng từng mua trong 6 tháng qua.',
-                        'Nhắn tin thông báo bộ sưu tập quà tặng giới hạn dịp lễ.',
+                        'Nhắn tin thông báo bộ sưu tập và ưu đãi giới hạn dịp lễ.',
                         'Ưu tiên đóng gói và tặng kèm quà nhỏ tri ân khách quen.'
                     ]
                 }
@@ -482,13 +476,17 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
             data.motivation_breakdown.source_type = 'shop_actual';
             data.motivation_breakdown.sample_size = totalReal;
             if (giftSignalsCount === 0) {
-                data.motivation_breakdown.source_description = `Toàn bộ ${totalReal} đơn hàng thực tế của shop bạn là khách tự mua dùng cho bản thân (không có ghi chú yêu cầu viết thiệp hay gói quà).`;
+                data.motivation_breakdown.source_description = `Toàn bộ ${totalReal} đơn hàng thực tế của shop bạn là khách tự mua sắm sử dụng cho bản thân (không có ghi chú yêu cầu viết thiệp hay gói quà).`;
                 data.motivation_breakdown.top_reasons = [
-                    { reason: 'Tự mua sắm thời trang cho bản thân', pct: 100 },
+                    { reason: 'Tự mua sắm sử dụng cho bản thân', pct: 100 },
                     { reason: 'Mua làm quà biếu tặng', pct: 0 }
                 ];
             } else {
                 data.motivation_breakdown.source_description = `Phân tích từ ${totalReal} đơn hàng thực tế của shop bạn (${giftSignalsCount} đơn có ghi chú làm quà tặng hoặc viết thiệp).`;
+                data.motivation_breakdown.top_reasons = [
+                    { reason: 'Tự mua sắm sử dụng cho bản thân', pct: 100 - giftRate },
+                    { reason: 'Mua làm quà biếu tặng', pct: giftRate }
+                ];
             }
         } else {
             data.motivation_breakdown.source_type = 'industry_benchmark';
