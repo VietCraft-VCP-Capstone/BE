@@ -280,38 +280,82 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
     const campId = (data.active_campaign?.id || '').toLowerCase();
 
     // Quy mô mục tiêu và hệ số mùa vụ riêng biệt của từng dịp
-    const OCCASION_SCALES: Record<string, { multiplier: number; targetOrders: number }> = {
-        tet: { multiplier: 2.8, targetOrders: 12 },          // Tết: Dịp bùng nổ lớn nhất năm
-        noel: { multiplier: 1.6, targetOrders: 6 },          // Giáng Sinh: Quà tặng và đồ đông
-        '12/12': { multiplier: 1.8, targetOrders: 7 },       // Siêu Sale 12/12
-        '11/11': { multiplier: 2.0, targetOrders: 8 },       // Siêu Sale 11/11
-        valentine: { multiplier: 1.4, targetOrders: 5 },     // Valentine
-        '8/3': { multiplier: 1.5, targetOrders: 5 },         // Quốc tế Phụ nữ 8/3
-        '20/10': { multiplier: 1.4, targetOrders: 4 },       // Phụ nữ Việt Nam 20/10
-        '20/11': { multiplier: 1.3, targetOrders: 4 },       // Nhà giáo Việt Nam 20/11
-        he_dulich: { multiplier: 1.6, targetOrders: 6 },     // Hè du lịch
-        tuutuong_trungthu: { multiplier: 1.3, targetOrders: 4 } // Trung thu
+    const OCCASION_SCALES: Record<string, { multiplier: number; targetOrders: number; defaultStart?: string; defaultEnd?: string }> = {
+        tet: { multiplier: 2.8, targetOrders: 12, defaultStart: '2026-12-05', defaultEnd: '2027-02-08' },
+        noel: { multiplier: 1.6, targetOrders: 6, defaultStart: '2026-11-16', defaultEnd: '2026-12-25' },
+        '12/12': { multiplier: 1.8, targetOrders: 7, defaultStart: '2026-11-14', defaultEnd: '2026-12-13' },
+        '11/11': { multiplier: 2.0, targetOrders: 8, defaultStart: '2026-10-25', defaultEnd: '2026-11-12' },
+        '20/11': { multiplier: 1.3, targetOrders: 4, defaultStart: '2026-10-25', defaultEnd: '2026-11-21' },
+        '20/10': { multiplier: 1.4, targetOrders: 4, defaultStart: '2026-09-25', defaultEnd: '2026-10-21' },
+        valentine: { multiplier: 1.4, targetOrders: 5, defaultStart: '2027-01-07', defaultEnd: '2027-02-15' },
+        '8/3': { multiplier: 1.5, targetOrders: 5, defaultStart: '2027-01-29', defaultEnd: '2027-03-09' },
+        '30/4': { multiplier: 1.6, targetOrders: 6, defaultStart: '2027-03-19', defaultEnd: '2027-05-01' },
+        '1/6': { multiplier: 1.3, targetOrders: 4, defaultStart: '2027-05-02', defaultEnd: '2027-06-02' },
+        he_dulich: { multiplier: 1.6, targetOrders: 6, defaultStart: '2027-05-15', defaultEnd: '2027-07-15' },
+        tuutuong_trungthu: { multiplier: 1.3, targetOrders: 4, defaultStart: '2027-08-04', defaultEnd: '2027-09-16' },
+        trung_thu: { multiplier: 1.3, targetOrders: 4, defaultStart: '2027-08-04', defaultEnd: '2027-09-16' },
+        halloween: { multiplier: 1.3, targetOrders: 4, defaultStart: '2026-10-01', defaultEnd: '2026-10-31' }
     };
 
-    const campScale = OCCASION_SCALES[campId] || { multiplier: 1.5, targetOrders: 5 };
-    // Số đơn kỳ vọng co giãn động theo quy mô đơn hàng thật của từng shop:
-    // = max(mức sàn tối thiểu của dịp, số đơn nền của shop * hệ số bùng nổ dịp đó)
+    const scaleConfig = OCCASION_SCALES[campId] || { multiplier: 1.5, targetOrders: 5 };
     const shopBaseVolume = Math.max(1, shopRealOrders.length);
-    const projectedOrders = Math.max(campScale.targetOrders, Math.round(shopBaseVolume * campScale.multiplier));
+    const projectedOrders = Math.max(scaleConfig.targetOrders, Math.round(shopBaseVolume * scaleConfig.multiplier));
 
-    // Phân loại dịp theo tiến độ thời gian (mock date 13/11/2026):
-    // - Dịp tương lai chưa tới ngày mở bán (Tết 05/12, Valentine 07/01...): Thực tế = 0 đơn
-    // - Dịp đang chạy chiến dịch (Giáng Sinh, 12/12): Đơn hàng phát sinh đón đầu dịp
-    const isUpcomingOccasion = campId === 'tet' || campId === 'valentine' || campId === '8/3' || campId === 'he_dulich';
-    
-    let campRealOrders: any[] = [];
-    if (!isUpcomingOccasion && shopRealOrders.length > 0) {
-        if (campId === '12/12') {
-            campRealOrders = shopRealOrders.slice(0, 2); // 2 đơn sớm đón 12/12
-        } else {
-            campRealOrders = shopRealOrders; // 4 đơn cho Giáng sinh & mùa đông
+    // Xác định cửa sổ thời gian Bắt đầu và Kết thúc của dịp đang chọn
+    const activeCamp = data.active_campaign;
+    const launchWin = activeCamp?.launch_window || {};
+
+    const startStr = launchWin.traction_start || launchWin.start || scaleConfig.defaultStart || '2026-11-14';
+    const endStr = launchWin.peak_date || launchWin.end || scaleConfig.defaultEnd || '2026-12-12';
+
+    const winStart = new Date(startStr + 'T00:00:00');
+    const winEnd = new Date(endStr + 'T23:59:59');
+
+    // Từ khóa đặc trưng của dịp để phát hiện đơn đặt sớm
+    const OCCASION_KEYWORDS: Record<string, RegExp> = {
+        tet: /(tết|nguyên đán|quý mão|tân mão|bính ngọ|xuân|chúc mừng năm mới)/i,
+        noel: /(noel|giáng sinh|christmas|xmas|ông già noel|cây thông)/i,
+        '12/12': /(12\/12|12\.12|siêu sale 12|flash sale 12)/i,
+        '11/11': /(11\/11|11\.11|độc thân|siêu sale 11)/i,
+        valentine: /(valentine|tình nhân|socola|14\/2|14\.2)/i,
+        '8/3': /(8\/3|8\.3|quốc tế phụ nữ)/i,
+        '20/10': /(20\/10|20\.10|phụ nữ việt nam)/i,
+        '20/11': /(20\/11|20\.11|nhà giáo|thầy cô|tri ân)/i,
+        halloween: /(halloween|hóa trang|bí ngô)/i
+    };
+    const kwRegex = OCCASION_KEYWORDS[campId];
+
+    // Thuật toán lọc đơn hàng thật: Đối chiếu ngày tạo đơn created_at với cửa sổ dịp
+    const campRealOrders = shopRealOrders.filter((o: any) => {
+        if (!o.created_at) return false;
+        const orderDate = new Date(o.created_at);
+        
+        // 1. Đơn phát sinh đúng trong khung thời gian chiến dịch [winStart, winEnd]
+        if (orderDate >= winStart && orderDate <= winEnd) {
+            return true;
         }
-    }
+
+        // 2. Đơn đặt trước trong vòng 30 ngày trước ngày bắt đầu nhưng có từ khóa chỉ đích danh dịp này
+        if (kwRegex) {
+            const preWindowLimit = new Date(winStart);
+            preWindowLimit.setDate(preWindowLimit.getDate() - 30);
+            if (orderDate >= preWindowLimit && orderDate < winStart) {
+                const hasKeyword = (o.items || []).some((it: any) => {
+                    const notes = (it.custom_notes || '').toLowerCase();
+                    const title = (it.title || '').toLowerCase();
+                    return kwRegex.test(notes) || kwRegex.test(title);
+                });
+                if (hasKeyword) return true;
+            }
+        }
+
+        return false;
+    });
+
+    const formatVnDate = (d: Date): string => {
+        return `${d.getDate().toString().padStart(2, '0')}/${(d.getMonth() + 1).toString().padStart(2, '0')}`;
+    };
+    const windowLabel = `Kỳ ghi nhận: ${formatVnDate(winStart)} – ${formatVnDate(winEnd)}`;
 
     const totalReal = campRealOrders.length;
     const campTotalGmv = campRealOrders.reduce((sum, o) => sum + getOrderAmount(o), 0);
@@ -338,7 +382,10 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
             remaining_orders: Math.max(0, projectedOrders - totalReal),
             clicks: actualClicks,
             impressions: actualImpressions,
-            cart_adds: actualCartAdds
+            cart_adds: actualCartAdds,
+            window_label: windowLabel,
+            window_start: startStr,
+            window_end: endStr
         };
     }
 
