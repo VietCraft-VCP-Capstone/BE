@@ -451,11 +451,12 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
         }
     }
 
-    // 4. Phân tích hành vi mua làm quà vs tự dùng từ đơn hàng THẬT của gian hàng
+    // 4. Phân tích mục đích mua sắm: Tự mua dùng vs Mua tặng từ đơn hàng THẬT
     if (data.motivation_breakdown) {
         if (totalReal >= 1) {
             let giftSignalsCount = 0;
-            const trueGiftRegex = /ghi thiệp|viết thiệp|gói quà|hộp quà tặng|làm quà|tặng bạn|tặng mẹ|quà sinh nhật|quà noel|quà tết|che giá|kèm thiệp/i;
+            // Chỉ bắt các từ khóa quà tặng thật sự, không bắt nhầm ghi chú giao hàng (giao giờ HC, gọi trước, bọc kỹ...)
+            const trueGiftRegex = /(viết|ghi|kèm)\s*thiệp|gói\s*quà|hộp\s*quà|làm\s*quà|tặng\s*(bạn|mẹ|bố|người yêu|crush|vợ|chồng|bé|sếp)|quà\s*(sinh nhật|noel|tết|giáng sinh|kỷ niệm|tặng)|(che|giấu|bỏ|xé)\s*(giá|hóa đơn)/i;
 
             for (const o of shopRealOrders) {
                 let hasGiftSignal = false;
@@ -475,23 +476,19 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
             data.motivation_breakdown.self_purchases_pct = 100 - giftRate;
             data.motivation_breakdown.source_type = 'shop_actual';
             data.motivation_breakdown.sample_size = totalReal;
-            if (giftSignalsCount === 0) {
-                data.motivation_breakdown.source_description = `Toàn bộ ${totalReal} đơn hàng thực tế của shop bạn là khách tự mua sắm sử dụng cho bản thân (không có ghi chú yêu cầu viết thiệp hay gói quà).`;
-                data.motivation_breakdown.top_reasons = [
-                    { reason: 'Tự mua sắm sử dụng cho bản thân', pct: 100 },
-                    { reason: 'Mua làm quà biếu tặng', pct: 0 }
-                ];
-            } else {
-                data.motivation_breakdown.source_description = `Phân tích từ ${totalReal} đơn hàng thực tế của shop bạn (${giftSignalsCount} đơn có ghi chú làm quà tặng hoặc viết thiệp).`;
-                data.motivation_breakdown.top_reasons = [
-                    { reason: 'Tự mua sắm sử dụng cho bản thân', pct: 100 - giftRate },
-                    { reason: 'Mua làm quà biếu tặng', pct: giftRate }
-                ];
-            }
+            data.motivation_breakdown.source_description = `Bóc tách từ ${totalReal} đơn thực tế (${giftSignalsCount} đơn có ghi chú quà tặng).`;
+            data.motivation_breakdown.top_reasons = [
+                { reason: 'Tự mua dùng', pct: 100 - giftRate },
+                { reason: 'Mua tặng', pct: giftRate }
+            ];
         } else {
             data.motivation_breakdown.source_type = 'industry_benchmark';
             data.motivation_breakdown.sample_size = 1420;
-            data.motivation_breakdown.source_description = `Ước tính từ 1.420 đơn hàng mùa Giáng sinh toàn sàn ngành ${data.seller_category?.name || 'thời trang & thủ công'} (do gian hàng bạn chưa có đơn đối soát mùa trước).`;
+            data.motivation_breakdown.source_description = `Ước tính chuẩn ngành mùa ${data.seller_category?.name || 'cao điểm'}.`;
+            data.motivation_breakdown.top_reasons = [
+                { reason: 'Tự mua dùng', pct: data.motivation_breakdown.self_purchases_pct || 75 },
+                { reason: 'Mua tặng', pct: data.motivation_breakdown.gift_purchases_pct || 25 }
+            ];
         }
     }
 
