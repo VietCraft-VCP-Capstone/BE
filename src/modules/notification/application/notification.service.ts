@@ -2,7 +2,6 @@ import mongoose from 'mongoose';
 import { Notification, INotification } from '../infrastructure/models/notification.model';
 import { NotificationGateway } from '../presentation/notification.gateway';
 import { logger } from '../../../shared/utils/logger';
-import { User } from '../../user/infrastructure/models/user.model';
 
 export interface CreateNotificationInput {
     user_id: string | mongoose.Types.ObjectId;
@@ -24,14 +23,8 @@ export class NotificationService {
     /**
      * Tạo mới một thông báo, lưu vào DB và phát realtime qua Socket.IO tới người dùng
      */
-    async createNotification(input: CreateNotificationInput): Promise<INotification | null> {
+    async createNotification(input: CreateNotificationInput): Promise<INotification> {
         const userId = typeof input.user_id === 'string' ? new mongoose.Types.ObjectId(input.user_id) : input.user_id;
-
-        // Người dùng đã tắt "Thông báo trong ứng dụng" ở trang hồ sơ: trước đây cài đặt này không có tác dụng
-        const owner = await User.findById(userId).select('notification_settings').lean();
-        if (owner?.notification_settings?.in_app === false) {
-            return null;
-        }
 
         const doc = await Notification.create({
             user_id: userId,

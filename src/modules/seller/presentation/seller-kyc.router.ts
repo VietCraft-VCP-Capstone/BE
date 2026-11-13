@@ -12,29 +12,24 @@ const router = Router();
 // In-memory rate limiter cho các tác vụ tốn CPU như quét OCR CCCD / kiểm tra chân dung
 const scanTimestamps = new Map<string, number[]>();
 
-function makeKycRateLimiter(store: Map<string, number[]>, maxHits: number, windowMs: number, error: string) {
-    return (req: AuthenticatedRequest, res: Response, next: any) => {
-        const userId = req.user?.id || req.ip || 'unknown';
-        const now = Date.now();
-        const timestamps = (store.get(userId) || []).filter(t => now - t < windowMs);
-        if (timestamps.length >= maxHits) {
-            return res.status(429).json({ success: false, error });
-        }
-        timestamps.push(now);
-        store.set(userId, timestamps);
-        next();
-    };
+function kycScanRateLimiter(req: AuthenticatedRequest, res: Response, next: any) {
+    const userId = req.user?.id || req.ip || 'unknown';
+    const now = Date.now();
+    const windowMs = 10 * 60 * 1000; // 10 phút
+    const maxScans = 10; // Tối đa 10 lượt quét / 10 phút
+
+    const timestamps = (scanTimestamps.get(userId) || []).filter(t => now - t < windowMs);
+    if (timestamps.length >= maxScans) {
+        return res.status(429).json({
+            success: false,
+            error: 'Bạn đã thực hiện quét quá nhiều lần liên tiếp. Vui lòng thử lại sau vài phút để bảo vệ tài nguyên hệ thống.'
+        });
+    }
+
+    timestamps.push(now);
+    scanTimestamps.set(userId, timestamps);
+    next();
 }
-
-// Tối đa 10 lượt quét / 10 phút
-const kycScanRateLimiter = makeKycRateLimiter(scanTimestamps, 10, 10 * 60 * 1000,
-    'Bạn đã thực hiện quét quá nhiều lần liên tiếp. Vui lòng thử lại sau vài phút để bảo vệ tài nguyên hệ thống.');
-
-// Mỗi lần gửi là một tin SMS tính phí; chặn spam SMS tới số người khác và dò mã OTP
-const otpSendRateLimiter = makeKycRateLimiter(new Map(), 5, 15 * 60 * 1000,
-    'Bạn đã yêu cầu mã OTP quá nhiều lần. Vui lòng thử lại sau 15 phút.');
-const otpVerifyRateLimiter = makeKycRateLimiter(new Map(), 15, 15 * 60 * 1000,
-    'Bạn đã nhập mã OTP quá nhiều lần. Vui lòng thử lại sau 15 phút.');
 
 /**
  * 1. Lấy trạng thái KYC và thông tin hồ sơ của người dùng hiện tại
@@ -51,7 +46,7 @@ router.get('/status', authenticate, async (req: AuthenticatedRequest, res: Respo
 /**
  * 2. Gửi mã OTP đến số điện thoại (Bước 1)
  */
-router.post('/phone-otp/send', authenticate, otpSendRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/phone-otp/send', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { phone } = req.body;
         const result = await SellerKycService.sendPhoneOtp(req.user!.id, phone);
@@ -64,7 +59,7 @@ router.post('/phone-otp/send', authenticate, otpSendRateLimiter, async (req: Aut
 /**
  * 3. Xác thực mã OTP số điện thoại (Bước 1)
  */
-router.post('/phone-otp/verify', authenticate, otpVerifyRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/phone-otp/verify', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { phone, code } = req.body;
         const result = await SellerKycService.verifyPhoneOtp(req.user!.id, phone, code);
@@ -107,7 +102,7 @@ router.post('/upload-doc', authenticate, uploadKycDocument.single('file'), async
  */
 router.post('/apply', authenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
-        const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || undefined;
+        const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
         const result = await SellerKycService.submitApplication(req.user!.id, req.body, clientIp);
         res.status(200).json(result);
     } catch (error: any) {

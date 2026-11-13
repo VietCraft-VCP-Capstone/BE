@@ -41,6 +41,9 @@ export interface OrderResponse {
     shippingFee?: number;
     discount?: number;
     couponCode?: string | null;
+    shippingCouponCode?: string | null;
+    /** Phần của `discount` trừ vào phí vận chuyển. */
+    shippingDiscount?: number;
     paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
     /** Thời điểm cổng thanh toán xác nhận tiền về; null với đơn chưa trả hoặc dữ liệu cũ. */
     paidAt?: Date | null;
@@ -68,8 +71,6 @@ export interface OrderResponse {
 export const DEFAULT_SHIPPING_FEE = 30000;
 export const PAYMENT_METHODS = ['PAYOS', 'COD'];
 export const SHIPPING_CARRIERS = ['ghn', 'ghtk'];
-// Shop chưa có logo: để trống cho FE hiện chữ cái đầu, không dùng ảnh Unsplash không liên quan
-export const PLACEHOLDER_SHOP_LOGO = '';
-// Đường dẫn tương đối tới ảnh trong FE/public — trước đây gắn cứng http://localhost:5173 nên hỏng khi deploy
-export const PLACEHOLDER_ITEM_IMAGE = '/image-not-found.jpg';
+export const PLACEHOLDER_SHOP_LOGO = 'https://images.unsplash.com/photo-1513519245088-0e12902e5a38?auto=format&fit=crop&w=80';
+export const PLACEHOLDER_ITEM_IMAGE = 'http://localhost:5173/image-not-found.jpg';
 
