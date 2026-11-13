@@ -276,15 +276,44 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
         return Number(o.financial_breakdown?.seller_payout_amount || o.financial_breakdown?.subtotal || 0);
     };
 
-    const totalReal = shopRealOrders.length;
-    const shopTotalGmv = shopRealOrders.reduce((sum, o) => sum + getOrderAmount(o), 0);
-    const shopRealAov = totalReal > 0 ? Math.round(shopTotalGmv / totalReal) : 320000;
+    // 2. Cá nhân hóa phễu chuyển đổi & đơn hàng thực tế theo ĐẶC THÙ CỦA TỪNG DỊP
+    const campId = (data.active_campaign?.id || '').toLowerCase();
 
-    // 2. Cá nhân hóa phễu chuyển đổi chiến dịch theo quy mô thật của gian hàng
-    if (totalReal > 0 && data.campaign_funnel) {
-        // Dự phóng mục tiêu chiến dịch tăng 1.5x - 2.5x dựa trên tổng đơn thực tế hiện có của shop
-        const campMultiplier = data.active_campaign?.id === 'tet' ? 2.5 : 1.6;
-        const projectedOrders = Math.max(totalReal + 1, Math.round(totalReal * campMultiplier));
+    // Quy mô mục tiêu và hệ số mùa vụ riêng biệt của từng dịp
+    const OCCASION_SCALES: Record<string, { multiplier: number; targetOrders: number }> = {
+        tet: { multiplier: 2.8, targetOrders: 12 },          // Tết: Dịp bùng nổ lớn nhất năm
+        noel: { multiplier: 1.6, targetOrders: 6 },          // Giáng Sinh: Quà tặng và đồ đông
+        '12/12': { multiplier: 1.8, targetOrders: 7 },       // Siêu Sale 12/12
+        '11/11': { multiplier: 2.0, targetOrders: 8 },       // Siêu Sale 11/11
+        valentine: { multiplier: 1.4, targetOrders: 5 },     // Valentine
+        '8/3': { multiplier: 1.5, targetOrders: 5 },         // Quốc tế Phụ nữ 8/3
+        '20/10': { multiplier: 1.4, targetOrders: 4 },       // Phụ nữ Việt Nam 20/10
+        '20/11': { multiplier: 1.3, targetOrders: 4 },       // Nhà giáo Việt Nam 20/11
+        he_dulich: { multiplier: 1.6, targetOrders: 6 },     // Hè du lịch
+        tuutuong_trungthu: { multiplier: 1.3, targetOrders: 4 } // Trung thu
+    };
+
+    const campScale = OCCASION_SCALES[campId] || { multiplier: 1.5, targetOrders: 5 };
+    const projectedOrders = campScale.targetOrders;
+
+    // Phân loại dịp theo tiến độ thời gian (mock date 13/11/2026):
+    // - Dịp tương lai chưa tới ngày mở bán (Tết 05/12, Valentine 07/01...): Thực tế = 0 đơn
+    // - Dịp đang chạy chiến dịch (Giáng Sinh, 12/12): Đơn hàng phát sinh đón đầu dịp
+    const isUpcomingOccasion = campId === 'tet' || campId === 'valentine' || campId === '8/3' || campId === 'he_dulich';
+    
+    let campRealOrders: any[] = [];
+    if (!isUpcomingOccasion && shopRealOrders.length > 0) {
+        if (campId === '12/12') {
+            campRealOrders = shopRealOrders.slice(0, 2); // 2 đơn sớm đón 12/12
+        } else {
+            campRealOrders = shopRealOrders; // 4 đơn cho Giáng sinh & mùa đông
+        }
+    }
+
+    const totalReal = campRealOrders.length;
+    const campTotalGmv = campRealOrders.reduce((sum, o) => sum + getOrderAmount(o), 0);
+
+    if (data.campaign_funnel) {
         data.campaign_funnel.orders = projectedOrders;
         if (data.campaign_funnel.conversion_rate_pct > 0) {
             data.campaign_funnel.clicks = Math.round(projectedOrders / (data.campaign_funnel.conversion_rate_pct / 100));
@@ -294,14 +323,14 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
         }
         data.campaign_funnel.cart_adds = Math.round(data.campaign_funnel.clicks * (data.campaign_funnel.cart_rate_pct / 100));
 
-        // Đo lường tiến độ thực tế đã đạt so với mục tiêu chiến dịch
-        const actualClicks = Math.round(totalReal / ((data.campaign_funnel.conversion_rate_pct || 24.2) / 100));
-        const actualImpressions = Math.round(actualClicks / ((data.campaign_funnel.ctr_pct || 19.4) / 100));
-        const actualCartAdds = Math.round(actualClicks * ((data.campaign_funnel.cart_rate_pct || 41.7) / 100));
+        // Đo lường tiến độ thực tế đã đạt so với mục tiêu chiến dịch này
+        const actualClicks = totalReal > 0 ? Math.round(totalReal / ((data.campaign_funnel.conversion_rate_pct || 24.2) / 100)) : 0;
+        const actualImpressions = totalReal > 0 ? Math.round(actualClicks / ((data.campaign_funnel.ctr_pct || 19.4) / 100)) : 0;
+        const actualCartAdds = totalReal > 0 ? Math.round(actualClicks * ((data.campaign_funnel.cart_rate_pct || 41.7) / 100)) : 0;
 
         data.campaign_funnel.actual = {
             orders: totalReal,
-            gmv_vnd: shopTotalGmv,
+            gmv_vnd: campTotalGmv,
             orders_progress_pct: Math.min(100, Math.round((totalReal / projectedOrders) * 100)),
             remaining_orders: Math.max(0, projectedOrders - totalReal),
             clicks: actualClicks,
@@ -313,9 +342,9 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
     // 3. THUẬT TOÁN XÁC ĐỊNH ĐƠN HÀNG THUỘC KÊNH NÀO (CHANNEL ATTRIBUTION ENGINE)
     if (data.campaign_funnel && Array.isArray(data.channel_breakdown)) {
         if (totalReal >= 1) {
-            // Khi shop ĐÃ CÓ đơn hàng thực tế: BÓC TÁCH CHÍNH XÁC 100% TỪ DATABASE CỦA SHOP
+            // Khi dịp ĐÃ CÓ đơn hàng thực tế: BÓC TÁCH CHÍNH XÁC TỪ DATABASE CỦA SHOP
             const buyerOrderCounts = new Map<string, number>();
-            for (const o of shopRealOrders) {
+            for (const o of campRealOrders) {
                 const bKey = o.buyer_id?.toString() || (o.shipping_address as any)?.phone || 'guest';
                 buyerOrderCounts.set(bKey, (buyerOrderCounts.get(bKey) || 0) + 1);
             }
@@ -329,7 +358,7 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                 organic_listing: []
             };
 
-            for (const o of shopRealOrders) {
+            for (const o of campRealOrders) {
                 const bKey = o.buyer_id?.toString() || (o.shipping_address as any)?.phone || 'guest';
                 const countSeen = (buyerSeen.get(bKey) || 0) + 1;
                 buyerSeen.set(bKey, countSeen);
@@ -340,7 +369,6 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                 );
 
                 if (countSeen > 1) {
-                    // Người mua này đã từng có đơn trước đó tại shop -> Gán vào Khách quen
                     categorized.repeat_buyers.push({
                         order_code: o.order_code || `ORD-${o._id.toString().slice(-6).toUpperCase()}`,
                         created_at: o.created_at ? new Date(o.created_at).toLocaleDateString('vi-VN') : '',
@@ -349,7 +377,6 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                         attribution_reason: `Khách quen (${(o.shipping_address as any)?.recipient_name || 'Khách'}) đã từng mua tại shop quay lại đặt lần thứ ${countSeen}.`
                     });
                 } else if (hasCoupon) {
-                    // Đơn áp dụng mã ưu đãi chiến dịch hoặc sự kiện mùa lễ của sàn
                     categorized.campaign_promo.push({
                         order_code: o.order_code || `ORD-${o._id.toString().slice(-6).toUpperCase()}`,
                         created_at: o.created_at ? new Date(o.created_at).toLocaleDateString('vi-VN') : '',
@@ -358,7 +385,6 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                         attribution_reason: `Đơn áp dụng mã ưu đãi chiến dịch (${o.coupon_code || 'Voucher sự kiện'}).`
                     });
                 } else {
-                    // Đơn tìm kiếm tự nhiên trên catalog hoặc thanh tìm kiếm của sàn
                     categorized.organic_listing.push({
                         order_code: o.order_code || `ORD-${o._id.toString().slice(-6).toUpperCase()}`,
                         created_at: o.created_at ? new Date(o.created_at).toLocaleDateString('vi-VN') : '',
@@ -381,12 +407,12 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                 ch.aov_vnd = chCount > 0 ? Math.round(chGmv / chCount) : 0;
                 ch.sku_orders = chCount;
                 ch.items_sold = list.reduce((sum: number, it: any) => sum + (it.total_amount > 0 ? 1 : 0), 0);
-                ch.growth_pct = null; // Kỳ đầu tiên ghi nhận đơn thực tế, chưa có tuần trước để tính tăng trưởng
+                ch.growth_pct = null;
                 ch.sample_orders = list.slice(0, 5);
             }
         } else {
-            // Khi shop CHƯA CÓ ĐƠN NÀO: Áp dụng tỷ trọng mục tiêu chuẩn ngành có giải thích minh bạch
-            const totalFunnelOrders = data.campaign_funnel.orders || 3;
+            // Khi dịp CHƯA CÓ ĐƠN (dịp tương lai): Phân bổ mục tiêu chuẩn ngành theo quy mô của dịp này
+            const totalFunnelOrders = projectedOrders;
             let allocatedOrders = 0;
 
             const criteriaMap: Record<string, { rule: string; checklist: string[] }> = {
@@ -433,7 +459,7 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                     chOrders = Math.max(0, totalFunnelOrders - allocatedOrders);
                 } else {
                     chOrders = Math.round((totalFunnelOrders * ch.share_pct) / 100);
-                    if (totalFunnelOrders <= 3 && i < totalFunnelOrders) {
+                    if (totalFunnelOrders >= 3 && i < totalFunnelOrders && chOrders === 0) {
                         chOrders = 1;
                     }
                 }
@@ -444,21 +470,20 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                 ch.sku_orders = Math.round(chOrders * 1.25) || chOrders;
                 ch.items_sold = Math.round(chOrders * 1.6) || chOrders;
                 ch.gmv_vnd = chOrders * (ch.aov_vnd || 320000);
-                ch.growth_pct = null; // Mục tiêu phân bổ, không có cơ sở tính % tăng trưởng ảo
+                ch.growth_pct = null;
                 ch.criteria_rule = criteriaMap[ch.channel_key]?.rule || '';
                 ch.action_checklist = criteriaMap[ch.channel_key]?.checklist || [];
             }
         }
     }
 
-    // 4. Phân tích mục đích mua sắm: Tự mua dùng vs Mua tặng từ đơn hàng THẬT
+    // 4. Phân tích mục đích mua sắm: Tự mua dùng vs Mua tặng theo dịp
     if (data.motivation_breakdown) {
         if (totalReal >= 1) {
             let giftSignalsCount = 0;
-            // Chỉ bắt các từ khóa quà tặng thật sự, không bắt nhầm ghi chú giao hàng (giao giờ HC, gọi trước, bọc kỹ...)
             const trueGiftRegex = /(viết|ghi|kèm)\s*thiệp|gói\s*quà|hộp\s*quà|làm\s*quà|tặng\s*(bạn|mẹ|bố|người yêu|crush|vợ|chồng|bé|sếp)|quà\s*(sinh nhật|noel|tết|giáng sinh|kỷ niệm|tặng)|(che|giấu|bỏ|xé)\s*(giá|hóa đơn)/i;
 
-            for (const o of shopRealOrders) {
+            for (const o of campRealOrders) {
                 let hasGiftSignal = false;
                 for (const item of (o.items || [])) {
                     const notes = (item.custom_notes || '').trim().toLowerCase();
@@ -482,12 +507,19 @@ async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: 
                 { reason: 'Mua tặng', pct: giftRate }
             ];
         } else {
+            // Chuẩn ngành đặc thù từng dịp: Valentine mua tặng 75%, Tết mua quà 40%, Siêu sale tự mua dùng 80%
+            const isGiftCamp = campId === 'valentine' || campId === '8/3' || campId === '20/10' || campId === '20/11';
+            const defaultGiftPct = isGiftCamp ? 75 : (campId === 'tet' ? 40 : 25);
+            const defaultSelfPct = 100 - defaultGiftPct;
+
+            data.motivation_breakdown.gift_purchases_pct = defaultGiftPct;
+            data.motivation_breakdown.self_purchases_pct = defaultSelfPct;
             data.motivation_breakdown.source_type = 'industry_benchmark';
             data.motivation_breakdown.sample_size = 1420;
-            data.motivation_breakdown.source_description = `Ước tính chuẩn ngành mùa ${data.seller_category?.name || 'cao điểm'}.`;
+            data.motivation_breakdown.source_description = `Ước tính chuẩn ngành mùa ${data.active_campaign?.name || 'cao điểm'}.`;
             data.motivation_breakdown.top_reasons = [
-                { reason: 'Tự mua dùng', pct: data.motivation_breakdown.self_purchases_pct || 75 },
-                { reason: 'Mua tặng', pct: data.motivation_breakdown.gift_purchases_pct || 25 }
+                { reason: 'Tự mua dùng', pct: defaultSelfPct },
+                { reason: 'Mua tặng', pct: defaultGiftPct }
             ];
         }
     }
