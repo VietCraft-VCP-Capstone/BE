@@ -259,12 +259,10 @@ export class OrdersService {
       await PromotionService.claimUsage(cleanCouponCode, buyerId);
     }
 
-    let commissionRate = 0.10;
     let minOrderFee = 10000;
     try {
       const financeConfig = await platformFinanceService.getConfig();
       if (financeConfig?.policies) {
-        commissionRate = financeConfig.policies.default_commission_rate ?? 0.10;
         minOrderFee = financeConfig.policies.min_order_fee ?? 10000;
       }
     } catch {
@@ -272,7 +270,11 @@ export class OrdersService {
 
     platformFee = Math.max(platformFee, minOrderFee);
 
-    const totalPrintingCost = orderItems.reduce((acc, it) => acc + (num(it.base_cost) * it.quantity), 0);
+    const effectiveCommissionRate = subtotal > 0 ? Number((platformFee / subtotal).toFixed(4)) : 0.05;
+
+    const totalPrintingCost = hasPodItem
+      ? orderItems.reduce((acc, it) => acc + (num(it.base_cost) * it.quantity), 0)
+      : 0;
 
     const sellerPayoutAmount = isPlatformCoupon
       ? Math.max(0, subtotal - platformFee)
@@ -333,7 +335,7 @@ export class OrdersService {
         coupon_discount: dec(discount),
         platform_fee: dec(platformFee),
         seller_payout_amount: dec(sellerPayoutAmount),
-        commission_rate: commissionRate,
+        commission_rate: effectiveCommissionRate,
         total_printing_cost: dec(totalPrintingCost),
       },
       coupon_code: cleanCouponCode || null,
