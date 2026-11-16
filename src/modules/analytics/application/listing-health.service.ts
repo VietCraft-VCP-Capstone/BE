@@ -4,11 +4,13 @@ import { Tag } from '../../tags/infrastructure/models/tag.model';
 import { ListingHealthScore, IAxis, ITodo, IConversionDetail } from '../../product/infrastructure/models/listing-health-score.model';
 import { buildMeta, ok, insufficient, Envelope } from './envelope';
 import { EMPTY_SALES, HealthInputs, ListingProductInfo, ListingSales, healthInputs, salesByProduct } from './listing-sales';
+import { AiGatewayService } from './ai-gateway.service';
 
 
 const COLLECTION = 'listing_health_scores';
-export const HEALTH_VERSION = 'health-2.2';
+export const HEALTH_VERSION = 'health-2.5';
 const MODEL_VERSION_FALLBACK = HEALTH_VERSION;
+const STALE_REFRESH_LIMIT = 20;
 
 export type HealthStatus = 'good' | 'needs_improvement' | 'poor';
 
@@ -247,9 +249,9 @@ export class ListingHealthService {
 
         const latestByProduct = new Map<string, { score: number | null; status: HealthStatus | null; axes: IAxis; axes_missing: string[]; computed_at: Date | string | null; model_version?: string; todos: ITodo[] }>();
 
-        if (productIds.length > 0) {
+        const loadLatest = async (ids: typeof productIds) => {
             const rows = await ListingHealthScore.aggregate([
-                { $match: { product_id: { $in: productIds } } },
+                { $match: { product_id: { $in: ids } } },
                 { $sort: { date: -1, computed_at: -1 } },
                 {
                     $group: {
@@ -275,11 +277,25 @@ export class ListingHealthService {
                     todos: Array.isArray(row.todos) ? row.todos : [],
                 });
             }
+        };
+
+        if (productIds.length > 0) {
+            await loadLatest(productIds);
+            const stale = productIds
+                .filter(pid => latestByProduct.get(String(pid))?.model_version !== HEALTH_VERSION)
+                .slice(0, STALE_REFRESH_LIMIT);
+            if (stale.length > 0) {
+                await Promise.all(stale.map(pid => AiGatewayService.call({ method: 'GET', path: `/api/analytics/listings/${pid}/health`, shopId })));
+                await loadLatest(stale);
+            }
+            for (const [pid, row] of latestByProduct) {
+                if (row.model_version !== HEALTH_VERSION) latestByProduct.delete(pid);
+            }
         }
 
         const tagIds = products.flatMap(p => p.tag_ids ?? []);
-        const tagDocs = tagIds.length ? await Tag.find({ _id: { $in: tagIds } }).select('_id name status').lean() : [];
-        const tagById = new Map(tagDocs.map(t => [String(t._id), { name: t.name, pending: t.status === 'pending' }]));
+        const tagDocs = tagIds.length ? await Tag.find({ _id: { $in: tagIds } }).select('_id name status review_status').lean() : [];
+        const tagById = new Map(tagDocs.map(t => [String(t._id), { name: t.name, pending: t.status === 'pending' || t.review_status === 'pending' }]));
         const tagsOf = (p: (typeof products)[number]) =>
             p.tag_ids?.length
                 ? p.tag_ids.map(id => tagById.get(String(id))).filter((t): t is { name: string; pending: boolean } => Boolean(t))
