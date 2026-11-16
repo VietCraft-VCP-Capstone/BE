@@ -31,6 +31,9 @@ export function classifyRefundResponse(data: Record<string, any>, context: Refun
 export class VNPayRefundGateway implements RefundGateway {
     constructor(private readonly request: typeof fetch = fetch) {}
     private async send(body: Record<string, any>, context: RefundContext, record: PaymentRefundRecord, query = false): Promise<RefundGatewayResult> {
+        if (!config.vnpay.hashSecret || !config.vnpay.tmnCode) {
+            throw new Error('Cổng thanh toán VNPay chưa được cấu hình đầy đủ (thiếu VNP_TMNCODE hoặc VNP_HASHSECRET trong biến môi trường).');
+        }
         const response = await this.request(config.vnpay.apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
         if (!response.ok) throw new Error('Cổng thanh toán chưa trả kết quả; yêu cầu cần được xác minh.');
         const data = await response.json() as Record<string, any>;

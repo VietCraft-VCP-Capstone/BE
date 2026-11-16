@@ -4,16 +4,16 @@ import { validateReturnEvidence, type ReturnEvidenceItem } from './return-eviden
 import { calculateFixedDeadline, evaluateAnchoredWindow, evaluateP16EvidenceWindow, evaluatePodEligibility, inferDefaultFaultParty, type R06TrackingEvidence, type VerifiedDeliveredEvent } from './return-policy';
 import { ReturnStateMachine, type ReturnAction, type ReturnActor, type ReturnState } from './return-state-machine';
 import { validateRequestedQuantity } from './return-quantity-policy';
-import type { ReturnRequestV3Data, ReturnRequestV3Patch, ReturnRequestV3Repository, ReturnRequestLogV3Data, ReturnEvidenceV3Data, ReturnRequestV3ListQuery, ReturnRequestV3Detail } from '../infrastructure/repositories/return-request-v3.repository';
-import type { ReturnV3FaultParty, ReturnV3Resolution, ReturnV3DeadlineType } from '../infrastructure/models/return-request-v3.model';
+import type { ReturnRequestData, ReturnRequestPatch, ReturnRequestRepository, ReturnRequestLogData, ReturnEvidenceData, ReturnRequestListQuery, ReturnRequestDetail } from '../infrastructure/repositories/return-request.repository';
+import type { ReturnRequestFaultParty, ReturnRequestResolution, ReturnRequestDeadlineType } from '../infrastructure/models/return-request.model';
 import { Order } from '../infrastructure/models/order.model';
 import { ReputationService } from '../../seller/application/reputation.service';
 
-export interface DeliveredEventSourceV3 { getVerifiedDeliveredEvent(orderId: string, itemId: string): Promise<VerifiedDeliveredEvent | null>; getVerifiedTracking?(orderId:string,itemId:string):Promise<(R06TrackingEvidence & { faultParty?:'CARRIER'|'PRINTER' })|null> }
+export interface ReturnDeliveredEventSource { getVerifiedDeliveredEvent(orderId: string, itemId: string): Promise<VerifiedDeliveredEvent | null>; getVerifiedTracking?(orderId:string,itemId:string):Promise<(R06TrackingEvidence & { faultParty?:'CARRIER'|'PRINTER' })|null> }
 export interface OrderReturnSnapshotSource {
     getSnapshot(orderId: string, itemId: string): Promise<{ orderId:string; orderItemId:string; buyerId:string; sellerId:string; printerId:string; cohort:'POD'|'NORMAL'; itemStatus:'DELIVERED'|'SHIPPING'|'OTHER'; itemSnapshot:Record<string,unknown>; valid:boolean; orderedQuantity:number; replacedQuantity:number; refundedQuantity:number; activeReservedQuantity:number; policyVersion:string; schemaVersion:string; is_simulated?:boolean } | null>;
 }
-export interface ReturnRequestRefundBridge { /** Must be idempotent on requestId because retry may follow a timeout after remote create. */ createLinkedRefund(input: {requestId:string;orderItemId:string;orderId:string;resolution:'REFUND';faultParty:ReturnV3FaultParty;amountMinor:number;currency:string;adminDecisionId:string;finalizedByAdmin:true}): Promise<{ id:string; status:string }> }
+export interface ReturnRequestRefundBridge { /** Must be idempotent on requestId because retry may follow a timeout after remote create. */ createLinkedRefund(input: {requestId:string;orderItemId:string;orderId:string;resolution:'REFUND';faultParty:ReturnRequestFaultParty;amountMinor:number;currency:string;adminDecisionId:string;finalizedByAdmin:true}): Promise<{ id:string; status:string }> }
 export interface ReturnRequestClock { now(): Date }
 export interface ReturnEligibilityItemSource {
     getItems(orderId: string): Promise<Array<{ orderItemId?: string | null; buyerId:string; cohort:'POD'|'NORMAL'; itemStatus:'DELIVERED'|'SHIPPING'|'OTHER'; orderedQuantity:number; replacedQuantity:number; refundedQuantity:number; activeReservedQuantity:number }>>;
@@ -23,10 +23,10 @@ export interface ReturnEligibilityItem {
     deadline: Date | null; remainingQuantity:number; activeRequestId?:string;
 }
 export interface ReturnRequestServiceDependencies {
-    repository: ReturnRequestV3Repository; snapshotSource: OrderReturnSnapshotSource; deliveredEventSource: DeliveredEventSourceV3;
+    repository: ReturnRequestRepository; snapshotSource: OrderReturnSnapshotSource; deliveredEventSource: ReturnDeliveredEventSource;
     eligibilityItemSource?: ReturnEligibilityItemSource;
     resolveBuyerOrderId: (orderId: unknown, buyerId: string) => Promise<string>;
-    bridge: ReturnRequestRefundBridge; executeRefund?: (request: ReturnRequestV3Data) => Promise<{ id: string; status: string }>; clock: ReturnRequestClock; id: () => string; r06DeliveredWindowHours?: number;
+    bridge: ReturnRequestRefundBridge; executeRefund?: (request: ReturnRequestData) => Promise<{ id: string; status: string }>; clock: ReturnRequestClock; id: () => string; r06DeliveredWindowHours?: number;
 }
 export type PrinterDecisionAction = 'APPROVE'|'REJECT'|'REQUEST_EVIDENCE'|'PROPOSE_FAULT_CHANGE';
 export type DeadlineOutcome = { kind:'REMIND_ADMIN'|'ADMIN_REVIEW'; requestId:string };
@@ -34,19 +34,19 @@ export type DeadlineOutcome = { kind:'REMIND_ADMIN'|'ADMIN_REVIEW'; requestId:st
 export class ReturnRequestApplicationService {
     constructor(private readonly deps: ReturnRequestServiceDependencies) {}
     private now(): Date { return this.deps.clock.now(); }
-    private authorize(action: 'BUYER_VIEW'|'BUYER_SUBMIT'|'BUYER_ADD_EVIDENCE'|'BUYER_DISPUTE'|'SELLER_VIEW'|'SELLER_ADD_EVIDENCE'|'SELLER_APPEAL'|'PRINTER_VIEW'|'PRINTER_ADD_EVIDENCE'|'PRINTER_APPROVE'|'PRINTER_REJECT'|'PRINTER_REQUEST_EVIDENCE'|'PRINTER_PROPOSE_FAULT_CHANGE'|'ADMIN_FINALIZE'|'ADMIN_CORRECT', request: Pick<ReturnRequestV3Data, 'buyer_id'|'seller_id'|'printer_id'|'fault_party'|'seller_appeal_used'|'correction_used'|'side_effect_started'>, actorId: string, role: ReturnActor): void {
+    private authorize(action: 'BUYER_VIEW'|'BUYER_SUBMIT'|'BUYER_ADD_EVIDENCE'|'BUYER_DISPUTE'|'SELLER_VIEW'|'SELLER_ADD_EVIDENCE'|'SELLER_APPEAL'|'PRINTER_VIEW'|'PRINTER_ADD_EVIDENCE'|'PRINTER_APPROVE'|'PRINTER_REJECT'|'PRINTER_REQUEST_EVIDENCE'|'PRINTER_PROPOSE_FAULT_CHANGE'|'ADMIN_FINALIZE'|'ADMIN_CORRECT', request: Pick<ReturnRequestData, 'buyer_id'|'seller_id'|'printer_id'|'fault_party'|'seller_appeal_used'|'correction_used'|'side_effect_started'>, actorId: string, role: ReturnActor): void {
         const decision = canReturnActorPerform(action, { actor:role, userId:actorId, orderOwnedByBuyer:role === 'BUYER' && actorId === request.buyer_id, sellerOwnsRequest:role === 'SELLER' && actorId === request.seller_id, assignedPrinter:role === 'PRINTER' && actorId === request.printer_id, faultSellerId:request.fault_party === 'SELLER' ? request.seller_id : null, appealUsed:request.seller_appeal_used, correctionCount:request.correction_used ? 1 : 0, sideEffectStarted:request.side_effect_started, scope:'POD' });
         if (!decision.allowed) throw new Error(decision.reason);
     }
-    private async requireRequest(id: string): Promise<ReturnRequestV3Data> {
+    private async requireRequest(id: string): Promise<ReturnRequestData> {
         const request = await this.deps.repository.findById(id); if (!request) throw new Error('Return request not found.'); return request;
     }
-    private async commit(current: ReturnRequestV3Data, actorId: string, role: ReturnActor, action: ReturnAction, to: ReturnState, reason: string, patch: ReturnRequestV3Patch = {}, eventId: string | null = null, deadlineOverride?: Date, evidence:ReturnEvidenceV3Data[] = [], auditRole: ReturnRequestLogV3Data['actor_role'] = role, actingAs?: 'PRINTER'): Promise<ReturnRequestV3Data> {
+    private async commit(current: ReturnRequestData, actorId: string, role: ReturnActor, action: ReturnAction, to: ReturnState, reason: string, patch: ReturnRequestPatch = {}, eventId: string | null = null, deadlineOverride?: Date, evidence:ReturnEvidenceData[] = [], auditRole: ReturnRequestLogData['actor_role'] = role, actingAs?: 'PRINTER'): Promise<ReturnRequestData> {
         ReturnStateMachine.assertTransition(current.status as ReturnState, action, to, { scope:'POD', actor:role, disputeCount:current.buyer_dispute_count, now:this.now(), deadline:deadlineOverride ?? current.deadline_at ?? undefined, sideEffectStarted:current.side_effect_started });
-        const log: ReturnRequestLogV3Data = { request_id:current.id, actor_id:actorId, actor_role:auditRole, ...(actingAs ? { acting_as:actingAs } : {}), from_status:current.status, to_status:to, reason, event_id:eventId, created_at:this.now() };
-        return this.deps.repository.transitionWithAudit(current.id, current.version, { ...patch, updated_at:this.now(), status:to as ReturnRequestV3Data['status'] }, log, evidence);
+        const log: ReturnRequestLogData = { request_id:current.id, actor_id:actorId, actor_role:auditRole, ...(actingAs ? { acting_as:actingAs } : {}), from_status:current.status, to_status:to, reason, event_id:eventId, created_at:this.now() };
+        return this.deps.repository.transitionWithAudit(current.id, current.version, { ...patch, updated_at:this.now(), status:to as ReturnRequestData['status'] }, log, evidence);
     }
-    private async createBridge(request: ReturnRequestV3Data): Promise<ReturnRequestV3Data> {
+    private async createBridge(request: ReturnRequestData): Promise<ReturnRequestData> {
         const faultParty=request.fault_party, amountMinor=request.refund_amount_minor, currency=request.refund_currency, adminDecisionId=request.admin_decision_id;
         if (request.final_resolution !== 'REFUND' || !request.refund_admin_confirmed || !faultParty || !adminDecisionId || amountMinor == null || !currency) throw new Error('Refund requires an Admin-confirmed decision before bridge execution.');
         if (request.linked_refund_id) return request.linked_refund_status === 'REFUNDED' ? request : this.executeLinkedRefund(request);
@@ -58,12 +58,12 @@ export class ReturnRequestApplicationService {
         return this.executeLinkedRefund(linkedRequest);
     }
     /** Money moves only through the idempotent VNPay execution; the result is re-read so callers see the real status. */
-    private async executeLinkedRefund(request: ReturnRequestV3Data): Promise<ReturnRequestV3Data> {
+    private async executeLinkedRefund(request: ReturnRequestData): Promise<ReturnRequestData> {
         if (!this.deps.executeRefund) return request;
         await this.deps.executeRefund(request);
         return (await this.deps.repository.findById(request.id)) ?? request;
     }
-    async createBuyerRequest(input: { actorId:string; orderId:string; orderItemId:string; quantity:number; reasonCode:string; description:string; resolution:ReturnV3Resolution; evidence:readonly ReturnEvidenceItem[] }): Promise<ReturnRequestV3Data> {
+    async createBuyerRequest(input: { actorId:string; orderId:string; orderItemId:string; quantity:number; reasonCode:string; description:string; resolution:ReturnRequestResolution; evidence:readonly ReturnEvidenceItem[] }): Promise<ReturnRequestData> {
         const orderId = await this.deps.resolveBuyerOrderId(input.orderId, input.actorId);
         let snapshot = await this.deps.snapshotSource.getSnapshot(orderId, input.orderItemId);
         if (!snapshot || snapshot.orderId !== orderId || snapshot.orderItemId !== input.orderItemId || snapshot.buyerId !== input.actorId) throw Object.assign(new Error('Không tìm thấy đơn hàng.'),{statusCode:404});
@@ -112,11 +112,11 @@ export class ReturnRequestApplicationService {
         const defaultFault = needsAdminReview || needsAdminFault ? null : inferDefaultFaultParty(evidenceCheck.normalizedReason,{r06Source:r06Tracking?.faultParty ?? null,sourceVerified:r06Tracking?.verified && r06Tracking.sourceAssigned === true && r06Tracking.conflicting !== true});
         const deadline = eligibility.kind === 'ELIGIBLE' ? eligibility.deadline : evidenceCheck.normalizedReason === 'R06' || !deliveredEvidenceValid ? null : calculateFixedDeadline('P01',delivered!.occurredAt);
         const deadlineType = eligibility.kind === 'ELIGIBLE' ? eligibility.policyId : evidenceCheck.normalizedReason === 'R06' || !deliveredEvidenceValid ? null : 'P01';
-        const request: ReturnRequestV3Data = {
+        const request: ReturnRequestData = {
             id, order_id:orderId, order_item_id:input.orderItemId, buyer_id:snapshot.buyerId, seller_id:snapshot.sellerId, printer_id:snapshot.printerId, item_snapshot:structuredClone(snapshot.itemSnapshot),
             quantity:input.quantity, reason_code:evidenceCheck.normalizedReason, reason_description:evidenceCheck.normalizedDescription,
             requested_resolution:input.resolution, final_resolution:null, fault_party:defaultFault, fault_source:defaultFault ? 'SYSTEM' : null, status, version:0,
-            deadline_at:deadline, deadline_type:deadlineType as ReturnV3DeadlineType, policy_version:snapshot.policyVersion, schema_version:snapshot.schemaVersion,
+            deadline_at:deadline, deadline_type:deadlineType as ReturnRequestDeadlineType, policy_version:snapshot.policyVersion, schema_version:snapshot.schemaVersion,
             delivered_event_id:delivered?.eventId ?? null, delivered_at:delivered?.occurredAt ?? null, refund_admin_confirmed:false,
             refund_admin_confirmed_by:null, refund_admin_confirmed_at:null, correction_used:false, printer_evidence_request_used:false,
             buyer_dispute_count:0, seller_appeal_used:false, side_effect_started:false, exchange_quota_consumed:false,
@@ -124,11 +124,11 @@ export class ReturnRequestApplicationService {
             is_simulated:snapshot.is_simulated === true,
             created_at:now, updated_at:now,
         };
-        const evidenceRows: ReturnEvidenceV3Data[] = input.evidence.map(item => ({ request_id:id, evidence_id:item.id, kind:item.kind === 'IMAGE' ? 'PHOTO' : 'VIDEO', storage_ref:item.uri, uploaded_by:input.actorId, created_at:now }));
-        const log: ReturnRequestLogV3Data = { request_id:id, actor_id:input.actorId, actor_role:'BUYER', from_status:null, to_status:status, reason:'Buyer submitted POD return request.', event_id:null, created_at:now };
+        const evidenceRows: ReturnEvidenceData[] = input.evidence.map(item => ({ request_id:id, evidence_id:item.id, kind:item.kind === 'IMAGE' ? 'PHOTO' : 'VIDEO', storage_ref:item.uri, uploaded_by:input.actorId, created_at:now }));
+        const log: ReturnRequestLogData = { request_id:id, actor_id:input.actorId, actor_role:'BUYER', from_status:null, to_status:status, reason:'Buyer submitted POD return request.', event_id:null, created_at:now };
         return this.deps.repository.createWithAudit(request, evidenceRows, log);
     }
-    async printerDecision(input: { actorId:string; requestId:string; action:PrinterDecisionAction; reason:string; proposedFault?:ReturnV3FaultParty; proposedClassification?:string; evidence?:readonly ReturnEvidenceItem[]; devAdminActorId?:string }): Promise<ReturnRequestV3Data> {
+    async printerDecision(input: { actorId:string; requestId:string; action:PrinterDecisionAction; reason:string; proposedFault?:ReturnRequestFaultParty; proposedClassification?:string; evidence?:readonly ReturnEvidenceItem[]; devAdminActorId?:string }): Promise<ReturnRequestData> {
         const current = await this.requireRequest(input.requestId);
         const actorAction = input.action === 'APPROVE' ? 'PRINTER_APPROVE' : input.action === 'REJECT' ? 'PRINTER_REJECT' : input.action === 'REQUEST_EVIDENCE' ? 'PRINTER_REQUEST_EVIDENCE' : 'PRINTER_PROPOSE_FAULT_CHANGE';
         const devAdminActingAsPrinter = !!input.devAdminActorId && input.devAdminActorId === input.actorId && process.env.NODE_ENV === 'development' && process.env.ENABLE_DEV_ORDER_SIMULATION === 'true';
@@ -138,7 +138,7 @@ export class ReturnRequestApplicationService {
         if (!input.reason.trim()) throw new Error('Decision reason is required.');
         if (!current.fault_party && current.reason_code === 'R06' && input.action === 'APPROVE') throw new Error('R06 fault assignment requires verified tracking evidence or Admin review.');
         if (current.reason_code === 'R01A' || current.reason_code === 'R07') { /* DPI evidence never sets fault; Admin resolves these cases. */ }
-        const auditRole: ReturnRequestLogV3Data['actor_role'] = devAdminActingAsPrinter ? 'ADMIN' : 'PRINTER';
+        const auditRole: ReturnRequestLogData['actor_role'] = devAdminActingAsPrinter ? 'ADMIN' : 'PRINTER';
         const actingAs = devAdminActingAsPrinter ? 'PRINTER' as const : undefined;
         if (input.action === 'REQUEST_EVIDENCE') {
             if (current.printer_evidence_request_used || current.status !== 'PENDING_PRINTER') throw new Error('Printer may request evidence only once while pending.');
@@ -165,7 +165,7 @@ export class ReturnRequestApplicationService {
         }));
         return this.commit(current, input.actorId, 'PRINTER', approve ? 'PRINTER_APPROVE' : 'PRINTER_REJECT', to, input.reason, { final_resolution: current.requested_resolution }, null, undefined, evidenceRows, auditRole, actingAs);
     }
-    async addEvidence(input:{actorId:string;requestId:string;role:'SELLER'|'PRINTER';evidence:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestV3Data>{
+    async addEvidence(input:{actorId:string;requestId:string;role:'SELLER'|'PRINTER';evidence:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestData>{
         const current=await this.requireRequest(input.requestId); const action=input.role==='SELLER'?'SELLER_ADD_EVIDENCE':'PRINTER_ADD_EVIDENCE'; this.authorize(action,current,input.actorId,input.role);
         const existing=await this.deps.repository.listEvidence(current.id);
         const all=[...existing.map(item=>({id:item.evidence_id,kind:item.kind==='PHOTO'?'IMAGE' as const:'VIDEO' as const,uri:item.storage_ref})),...input.evidence];
@@ -173,7 +173,7 @@ export class ReturnRequestApplicationService {
         const rows=input.evidence.map(item=>({request_id:current.id,evidence_id:item.id,kind:item.kind==='IMAGE'?'PHOTO' as const:'VIDEO' as const,storage_ref:item.uri,uploaded_by:input.actorId,created_at:this.now()}));
         return this.deps.repository.transitionWithAudit(current.id,current.version,{updated_at:this.now()},{request_id:current.id,actor_id:input.actorId,actor_role:input.role,from_status:current.status,to_status:current.status,reason:`${input.role} added evidence references.`,event_id:null,created_at:this.now()},rows);
     }
-    async buyerAddEvidence(input:{actorId:string;requestId:string;evidence:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestV3Data>{
+    async buyerAddEvidence(input:{actorId:string;requestId:string;evidence:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestData>{
         const current=await this.requireRequest(input.requestId); this.authorize('BUYER_ADD_EVIDENCE',current,input.actorId,'BUYER');
         if(current.status!=='PENDING_PRINTER'||!current.evidence_requested_at||!current.evidence_deadline_at||current.buyer_evidence_submitted_at) throw new Error('No open one-time P16 evidence request.');
         const window=evaluateP16EvidenceWindow({requestedAt:current.evidence_requested_at,requestsAlreadyUsed:0,now:this.now()});
@@ -185,7 +185,7 @@ export class ReturnRequestApplicationService {
         const at=this.now(); const rows=input.evidence.map(item=>({request_id:current.id,evidence_id:item.id,kind:item.kind==='IMAGE'?'PHOTO' as const:'VIDEO' as const,storage_ref:item.uri,uploaded_by:input.actorId,created_at:at}));
         return this.deps.repository.transitionWithAudit(current.id,current.version,{buyer_evidence_submitted_at:at,updated_at:at},{request_id:current.id,actor_id:input.actorId,actor_role:'BUYER',from_status:current.status,to_status:current.status,reason:'Buyer submitted evidence requested under P16.',event_id:null,created_at:at},rows);
     }
-    async buyerDispute(input:{actorId:string;requestId:string;reason:string;evidence?:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestV3Data> {
+    async buyerDispute(input:{actorId:string;requestId:string;reason:string;evidence?:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestData> {
         const current=await this.requireRequest(input.requestId); this.authorize('BUYER_DISPUTE',current,input.actorId,'BUYER');
         if(!input.reason.trim()) throw new Error('Buyer dispute reason is required.');
         if(current.status!=='REJECTED') throw new Error('Buyer may dispute only a Printer-rejected request.');
@@ -193,7 +193,7 @@ export class ReturnRequestApplicationService {
         const rows=(input.evidence ?? []).map(item=>({request_id:current.id,evidence_id:item.id,kind:item.kind==='IMAGE'?'PHOTO' as const:'VIDEO' as const,storage_ref:item.uri,uploaded_by:input.actorId,created_at:this.now()}));
         return this.commit(current,input.actorId,'BUYER','BUYER_DISPUTE','DISPUTED',input.reason,{buyer_dispute_count:current.buyer_dispute_count+1,deadline_at:window.deadline,deadline_type:'P04'},null,window.deadline,rows);
     }
-    async sellerAppeal(input:{actorId:string;requestId:string;reason:string;evidence?:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestV3Data>{
+    async sellerAppeal(input:{actorId:string;requestId:string;reason:string;evidence?:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestData>{
         const current=await this.requireRequest(input.requestId); this.authorize('SELLER_APPEAL',current,input.actorId,'SELLER');
         if(current.fault_party!=='SELLER') throw new Error('Only the assigned-fault Seller may appeal.');
         let appealDeadline=current.seller_appeal_deadline_at ?? null;
@@ -203,7 +203,7 @@ export class ReturnRequestApplicationService {
         const rows=(input.evidence ?? []).map(item=>({request_id:current.id,evidence_id:item.id,kind:item.kind==='IMAGE'?'PHOTO' as const:'VIDEO' as const,storage_ref:item.uri,uploaded_by:input.actorId,created_at:this.now()}));
         return this.deps.repository.transitionWithAudit(current.id,current.version,{seller_appeal_used:true,updated_at:this.now()},{request_id:current.id,actor_id:input.actorId,actor_role:'SELLER',from_status:current.status,to_status:current.status,reason:input.reason,event_id:null,created_at:this.now()},rows);
     }
-    async adminDecide(input:{actorId:string;requestId:string;resolution:ReturnV3Resolution|null;faultParty:ReturnV3FaultParty|null;reason:string;amountMinor?:number;currency?:string}):Promise<ReturnRequestV3Data>{
+    async adminDecide(input:{actorId:string;requestId:string;resolution:ReturnRequestResolution|null;faultParty:ReturnRequestFaultParty|null;reason:string;amountMinor?:number;currency?:string}):Promise<ReturnRequestData>{
         const current=await this.requireRequest(input.requestId); if(!input.reason.trim()) throw new Error('Admin decision reason is required.');
         if(input.resolution && !input.faultParty) throw new Error('Admin must decide a fault party alongside any resolution.');
         if(input.resolution==='REFUND'&&(!Number.isSafeInteger(input.amountMinor)||input.amountMinor!<0||!input.currency)) throw new Error('Refund decision requires a valid amount/currency.');
@@ -219,7 +219,7 @@ export class ReturnRequestApplicationService {
         }
         if(input.resolution==='REFUND') return this.createBridge(saved); return saved;
     }
-    async adminConfirmRefund(input:{actorId:string;requestId:string;amountMinor:number;currency:string;faultParty:ReturnV3FaultParty}):Promise<ReturnRequestV3Data>{
+    async adminConfirmRefund(input:{actorId:string;requestId:string;amountMinor:number;currency:string;faultParty:ReturnRequestFaultParty}):Promise<ReturnRequestData>{
         const current=await this.requireRequest(input.requestId);
         this.authorize('ADMIN_FINALIZE',current,input.actorId,'ADMIN');
         if(current.refund_admin_confirmed) return this.createBridge(current);
@@ -232,7 +232,7 @@ export class ReturnRequestApplicationService {
         }
         return this.createBridge(saved);
     }
-    async adminCorrect(input:{actorId:string;requestId:string;reason:string;resolution:ReturnV3Resolution;faultParty:ReturnV3FaultParty|null;amountMinor?:number;currency?:string}):Promise<ReturnRequestV3Data>{
+    async adminCorrect(input:{actorId:string;requestId:string;reason:string;resolution:ReturnRequestResolution;faultParty:ReturnRequestFaultParty|null;amountMinor?:number;currency?:string}):Promise<ReturnRequestData>{
         const current=await this.requireRequest(input.requestId); this.authorize('ADMIN_CORRECT',current,input.actorId,'ADMIN');
         if(current.correction_used||current.side_effect_started) throw new Error('Correction is limited to once before side effect.');
         if(!input.reason.trim()||!input.faultParty) throw new Error('Admin correction requires a reason and fault party.');
@@ -272,8 +272,8 @@ export class ReturnRequestApplicationService {
             return {orderItemId:itemId,eligible:!reasonIfNot,reasonIfNot,deadline:deadline&&Number.isFinite(deadline.getTime())?deadline:null,remainingQuantity:remaining,...(active?{activeRequestId:active.id}:{})};
         }));
     }
-    async listRequests(query: ReturnRequestV3ListQuery) { return this.deps.repository.listByRole(query); }
-    async getRequestDetail(actorId: string, role: ReturnActor, requestId: string): Promise<ReturnRequestV3Detail | null> {
+    async listRequests(query: ReturnRequestListQuery) { return this.deps.repository.listByRole(query); }
+    async getRequestDetail(actorId: string, role: ReturnActor, requestId: string): Promise<ReturnRequestDetail | null> {
         const detail = await this.deps.repository.findDetail(requestId); if (!detail) return null;
         const request = detail.request;
         const allowed = role === 'ADMIN' || role === 'BUYER' && request.buyer_id === actorId || role === 'SELLER' && request.seller_id === actorId || role === 'PRINTER' && request.printer_id === actorId;

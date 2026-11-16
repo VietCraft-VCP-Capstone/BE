@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { Order } from '../infrastructure/models/order.model';
-import { ReturnRequestV3, RETURN_REQUEST_V3_ACTIVE_STATUSES } from '../infrastructure/models/return-request-v3.model';
+import { ReturnRequest, RETURN_REQUEST_ACTIVE_STATUSES } from '../infrastructure/models/return-request.model';
 import { executeVnpayRefund, refundContextOf, settleRefundManually } from '../../payment/application/refund-runtime';
 import { bankNameOf } from '../../payment/domain/bank-codes';
 import { RefundRequest, IRefundRequest, RefundRequestStatus } from '../infrastructure/models/refund-request.model';
@@ -74,7 +74,7 @@ export class RefundRequestService {
         if (!deliveredAt) throw new Error('Không xác định được thời điểm giao hàng của đơn');
         if (now.getTime() > deliveredAt.getTime() + 7 * DAY) throw new Error('Đã quá thời hạn yêu cầu hoàn tiền 7 ngày');
         if (order.refund_status !== 'NONE') throw new Error('Đơn hàng đã có yêu cầu hoàn tiền hoặc đã được xử lý');
-        if (await ReturnRequestV3.exists({ order_id: String(order._id), status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES, 'COMPLETED', 'REPLACEMENT_CREATED'] } })) throw new Error('Đơn đã có yêu cầu đổi/hoàn tiền theo món; hãy xử lý trong yêu cầu đó.');
+        if (await ReturnRequest.exists({ order_id: String(order._id), status: { $in: [...RETURN_REQUEST_ACTIVE_STATUSES, 'COMPLETED', 'REPLACEMENT_CREATED'] } })) throw new Error('Đơn đã có yêu cầu đổi/hoàn tiền theo món; hãy xử lý trong yêu cầu đó.');
 
         const products = await Product.find({ _id: { $in: order.items.map(item => item.product_id) } }).select('product_type shop_id').lean();
         if (!products.length) throw new Error('Không xác định được sản phẩm trong đơn hàng');

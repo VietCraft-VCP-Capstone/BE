@@ -1,4 +1,4 @@
-import { ReturnRequestV3, RETURN_REQUEST_V3_ACTIVE_STATUSES } from '../infrastructure/models/return-request-v3.model';
+import { ReturnRequest, RETURN_REQUEST_ACTIVE_STATUSES } from '../infrastructure/models/return-request.model';
 import { User } from '../../user/infrastructure/models/user.model';
 import { notificationService } from '../../notification/application/notification.service';
 import { logger } from '../../../shared/utils/logger';
@@ -34,15 +34,15 @@ function defaultDependencies(): ReturnDeadlineJobDependencies {
     return {
         now: () => new Date(),
         async listExpired(now) {
-            const docs = await ReturnRequestV3.find({ status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES] }, deadline_at: { $lt: now }, $expr: { $ne: ['$deadline_reminded_for', '$deadline_at'] } }).select('_id deadline_at').limit(100).lean();
+            const docs = await ReturnRequest.find({ status: { $in: [...RETURN_REQUEST_ACTIVE_STATUSES] }, deadline_at: { $lt: now }, $expr: { $ne: ['$deadline_reminded_for', '$deadline_at'] } }).select('_id deadline_at').limit(100).lean();
             return docs.map((doc: any) => ({ id: String(doc._id), deadline: doc.deadline_at }));
         },
         async claim(id, deadline) {
-            const result = await ReturnRequestV3.updateOne({ _id: id, status: { $in: [...RETURN_REQUEST_V3_ACTIVE_STATUSES] }, deadline_at: deadline, deadline_reminded_for: { $ne: deadline } }, { $set: { deadline_reminded_for: deadline } }, { timestamps: false });
+            const result = await ReturnRequest.updateOne({ _id: id, status: { $in: [...RETURN_REQUEST_ACTIVE_STATUSES] }, deadline_at: deadline, deadline_reminded_for: { $ne: deadline } }, { $set: { deadline_reminded_for: deadline } }, { timestamps: false });
             return result.modifiedCount === 1;
         },
         async release(id, deadline) {
-            await ReturnRequestV3.updateOne({ _id: id, deadline_reminded_for: deadline }, { $set: { deadline_reminded_for: null } }, { timestamps: false });
+            await ReturnRequest.updateOne({ _id: id, deadline_reminded_for: deadline }, { $set: { deadline_reminded_for: null } }, { timestamps: false });
         },
         async remind(id, deadline) {
             const outcome = await service.processDeadline(id);

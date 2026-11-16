@@ -135,3 +135,77 @@ export async function sendSellerRejectionEmail(to: string, shopName: string, sel
     });
 }
 
+// Tên và tiêu đề sản phẩm do shop khác tự đặt: phải escape trước khi chèn vào HTML email.
+function escapeHtml(text: string): string {
+    return text.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]!));
+}
+
+export async function sendCompetitorAlertEmail(to: string, items: { title: string; content: string }[], link: string) {
+    const rows = items.map(item => `
+                <li style="margin:0 0 12px">
+                    <strong style="color:#111827">${escapeHtml(item.title)}</strong><br>
+                    <span style="color:#4b5563">${escapeHtml(item.content)}</span>
+                </li>`).join('');
+    await transporter.sendMail({
+        from: `"VietCraft" <${config.mailUser}>`,
+        to,
+        subject: `VietCraft: ${items.length} sản phẩm mới của đối thủ bạn đang theo dõi`,
+        html: `
+            <div style="font-family:sans-serif;max-width:520px;margin:auto;padding:32px;border:1px solid #e5e7eb;border-radius:12px">
+                <h2 style="color:#007700;margin:0 0 8px">VietCraft</h2>
+                <h3 style="color:#330033;margin:0 0 16px">Đối thủ vừa ra hàng mới trong nhóm hàng của bạn</h3>
+                <ul style="padding-left:18px;margin:0 0 24px;line-height:1.5">${rows}
+                </ul>
+                <a href="${link}" style="display:inline-block;background:#007700;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:bold;font-size:14px">
+                    Xem trong trang Phân tích đối thủ
+                </a>
+                <p style="color:#9ca3af;font-size:12px;margin:24px 0 0">Bạn nhận email này vì đang theo dõi các shop trên. Tắt email thông báo trong phần cài đặt tài khoản.</p>
+            </div>
+        `,
+    });
+}
+function escapeHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+export async function sendPerformanceAlertEmail(
+    to: string,
+    p: { shopName: string; title: string; content: string; link: string },
+) {
+    const shopName = escapeHtml(p.shopName);
+    const title = escapeHtml(p.title);
+    const content = escapeHtml(p.content);
+    const href = escapeHtml(`${config.frontendUrl}${p.link}`);
+    try {
+        await transporter.sendMail({
+            from: `"VietCraft" <${config.mailUser}>`,
+            to,
+            subject: `[VietCraft] Cảnh báo hiệu suất: ${p.title}`,
+            html: `
+                <div style="font-family:sans-serif;max-width:520px;margin:auto;padding:32px;border:1px solid #e5e7eb;border-radius:12px;background:#ffffff">
+                    <div style="text-align:center;margin-bottom:20px">
+                        <h1 style="color:#007700;margin:0;font-size:26px">Viet<span style="color:#330033">Craft</span></h1>
+                        <span style="display:inline-block;margin-top:8px;padding:4px 12px;background:#fffbeb;color:#b45309;border-radius:20px;font-size:12px;font-weight:bold">CẢNH BÁO HIỆU SUẤT</span>
+                    </div>
+                    <h3 style="color:#111827;margin:0 0 12px">${title}</h3>
+                    <p style="color:#4b5563;line-height:1.6;margin:0 0 16px">Gian hàng <strong>${shopName}</strong> ghi nhận biến động bất thường:</p>
+                    <div style="background:#f9fafb;border:1px solid #f3f4f6;border-radius:8px;padding:16px;margin-bottom:24px;font-size:14px;color:#374151;line-height:1.6">${content}</div>
+                    <div style="text-align:center;margin-bottom:24px">
+                        <a href="${href}" style="display:inline-block;background:#007700;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:bold;font-size:14px">
+                            Xem chi tiết
+                        </a>
+                    </div>
+                    <p style="color:#9ca3af;font-size:12px;margin:0;text-align:center">Bạn nhận email này vì đã bật "Cảnh báo hiệu suất" trong cài đặt thông báo.</p>
+                </div>
+            `,
+        });
+    } catch (err: any) {
+        console.warn('⚠️ Lỗi gửi email cảnh báo hiệu suất:', err?.message);
+    }
+}
+

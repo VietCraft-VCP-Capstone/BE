@@ -1,15 +1,12 @@
+import mongoose from 'mongoose';
 import { SELLER_FOLLOW_LIMIT, ShopService } from '../../product/application/shop.service';
+import { Shop } from '../../product/infrastructure/models/shop.model';
+import { ShopFollower } from '../../product/infrastructure/models/shop-follower.model';
+import { escapeRegex, normalizeVi } from '../../../shared/utils/vietnamese-search.util';
 
-/**
- * "Theo dõi đối thủ" (F36) của gian hàng THẬT.
- *
- * Danh sách theo dõi là follow của sàn (`shop_followers`): theo dõi ở khu Phân tích hay bấm
- * "Theo dõi" trên trang gian hàng là MỘT danh sách, tối đa 10 gian hàng (BR-201). Service AI
- * chỉ đọc danh sách này, không ghi. Chế độ shop mẫu (AI_DEMO_SHOP_ID / AI_SHOP_MAP) vẫn đi
- * đường cũ sang service AI.
- *
- * Lỗi trả đúng hình dạng service AI đang trả cho F36, để FE dùng chung một bộ thông báo.
- */
+// F36 gian hàng thật: danh sách theo dõi là follow của sàn (tối đa 10, BR-201), AI chỉ đọc.
+
+const SEARCH_LIMIT = 8;
 
 export class TrackingError extends Error {
     constructor(readonly status: number, readonly body: Record<string, unknown>) {
@@ -61,11 +58,28 @@ export class CompetitorTrackingService {
         return {
             tracked_shop_id: String(shop._id),
             active: false,
-            // AI tính cảnh báo tại chỗ từ follow của sàn, nên bỏ theo dõi là mất luôn cảnh báo của shop đó.
-            note: 'Đã bỏ theo dõi. Cảnh báo của gian hàng này sẽ không còn hiện.',
+            // BR-204: job cảnh báo chỉ đọc follow hiện tại; thông báo đã gửi nằm trong notifications, không bị xoá.
+            note: 'Đã bỏ theo dõi. Bạn sẽ không nhận cảnh báo mới về gian hàng này; cảnh báo đã gửi vẫn còn trong mục Thông báo.',
             slots_used: await ShopService.countFollowing(userId),
             slots_limit: SELLER_FOLLOW_LIMIT,
         };
+    }
+
+    /** SRS 3.9.5: hộp thêm shop tìm theo tên. Bỏ shop của chính mình, kèm cờ đã theo dõi. */
+    static async searchShops(userId: string, query: string) {
+        const me = new mongoose.Types.ObjectId(userId);
+        const shops = await Shop.find({
+            status: { $in: ['ACTIVE', null] },      // shop tạo trước khi có trường status coi như đang hoạt động
+            owner_id: { $ne: me },
+            // shop cũ có thể chưa có shop_name_norm nên tìm thêm trên tên gốc
+            $or: [
+                { shop_name_norm: { $regex: escapeRegex(normalizeVi(query)) } },
+                { shop_name: { $regex: escapeRegex(query), $options: 'i' } },
+            ],
+        }).select('_id shop_name').limit(SEARCH_LIMIT).lean();
+        const followed = await ShopFollower.find({ shop_id: { $in: shops.map(s => s._id) }, buyer_ids: me }).select('shop_id').lean();
+        const tracked = new Set(followed.map(f => String(f.shop_id)));
+        return shops.map(s => ({ shop_id: String(s._id), shop_name: s.shop_name, is_tracked: tracked.has(String(s._id)) }));
     }
 
     /** Khối meta theo hợp đồng phân tích, để phản hồi ghi có cùng vỏ với mọi phản hồi khác. */
