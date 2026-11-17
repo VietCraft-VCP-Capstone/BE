@@ -37,7 +37,7 @@ import { normalizeVi, nfcLower, escapeRegex, accentInsensitive, extractSearchTer
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
-import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
+import { withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
 import { contentModerationService } from '../../../shared/services/content-moderation.service';
 import { normalizeMaterials } from '../../../shared/utils/materials';
@@ -332,12 +332,19 @@ export class ProductsService {
                 if (!Number.isFinite(markup) || markup < 0) errors.push(`variant[${i}].markup phải là số >= 0`);
                 const stock = Number(v.stock ?? 100);
                 if (!Number.isFinite(stock) || stock < 0) errors.push(`variant[${i}].stock phải là số >= 0`);
+                // Giá vốn là giá xưởng in khai báo cho biến thể của phôi — không lấy số client gửi lên
+                // (tự hạ giá vốn được) và không gán bừa 50.000đ khi phôi thiếu giá.
+                if (blank && !vari) errors.push(`variant[${i}] (${sku}) không thuộc phôi đã chọn`);
+                const baseCost = Number(vari?.base_cost);
+                if (vari && (!Number.isFinite(baseCost) || baseCost <= 0)) {
+                    errors.push(`variant[${i}] (${sku}): xưởng in chưa khai báo giá vốn cho biến thể này`);
+                }
                 podVariants!.push({
                     sku,
                     color: v.color || vari?.color || 'Màu mặc định',
                     size: v.size || vari?.size || 'Freesize',
-                    material: v.material || vari?.material || (blank as any)?.material || 'Cotton',
-                    base_cost: Number(v.base_cost ?? vari?.base_cost ?? 50000),
+                    material: v.material || vari?.material || (blank as any)?.material || undefined,
+                    base_cost: baseCost,
                     markup,
                     stock
                 });
@@ -450,7 +457,7 @@ export class ProductsService {
             size: v.size,
             material: v.material,
             mockup_image: v.mockup_image,
-            base_cost: mongoose.Types.Decimal128.fromString(((v.base_cost ?? (v.price! * 0.6)) || 0).toString()),
+            base_cost: mongoose.Types.Decimal128.fromString((Number(v.base_cost) || 0).toString()), // không suy 60% giá bán
             retail_price: mongoose.Types.Decimal128.fromString((v.price || 0).toString()),
             stock_quantity: v.stock ?? 100,
             is_active: true,
@@ -1112,7 +1119,24 @@ export class ProductsService {
     }
 
 
+    /** Trường của form đơn giản không qua validate(): chặn giá trị lạ trước khi ghi DB. */
+    private static assertSimpleFields(payload: Partial<ProductFormDataDTO>): void {
+        const errors: string[] = [];
+        if (payload.status !== undefined && !['ACTIVE', 'INACTIVE', 'OUT_OF_STOCK'].includes(payload.status as any)) {
+            errors.push('Trạng thái sản phẩm không hợp lệ');
+        }
+        if (payload.title !== undefined && !String(payload.title || '').trim()) {
+            errors.push('Tên sản phẩm là bắt buộc');
+        }
+        if (payload.originalPrice !== undefined && payload.originalPrice !== null) {
+            const op = Number(payload.originalPrice);
+            if (!Number.isFinite(op) || op < 0) errors.push('Giá gốc phải là số không âm');
+        }
+        if (errors.length) throw new ValidationError(errors);
+    }
+
     private static async createSimple(sellerId: string, payload: ProductFormDataDTO): Promise<ProductItemResponseDTO> {
+        ProductsService.assertSimpleFields(payload);
         const title = String(payload.title || '').trim();
         if (!title) throw new ValidationError(['Tên sản phẩm là bắt buộc']);
 
@@ -1169,7 +1193,7 @@ export class ProductsService {
         );
         await ProductsService.writeVariants(
             mp._id,
-            ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
+            ProductsService.colorsToVariants(payload.colors, baseSku, totalStock, listPrice, payload.sizes)
         );
         if (tags.length) {
             await Tag.updateMany({ _id: { $in: tags.map(t => t._id) } }, { $inc: { product_count: 1 } });
@@ -1182,20 +1206,19 @@ export class ProductsService {
 
 
     /**
-     * `basePrice` là giá người bán nhận (dùng để suy ra giá vốn), `listPrice` là giá niêm yết
-     * đã cộng hoa hồng sàn. Hai số khác nhau nên phải truyền riêng — lấy listPrice tính giá vốn
-     * thì giá vốn bị thổi theo hoa hồng.
+     * `listPrice` là giá niêm yết đã cộng hoa hồng sàn. Hàng có sẵn không có giá vốn khai báo nên
+     * base_cost = 0 (không suy từ giá bán).
      * Hỗ trợ tạo biến thể theo bảng size cho sản phẩm áo quần/thời trang.
      */
     private static colorsToVariants(
         colors: ProductColorVariantDTO[] | undefined,
         baseSku: string,
-        basePrice: number,
         totalStock: number,
         listPrice: number,
         sizes?: string[]
     ): VariantInput[] {
-        const baseCost = Math.round(basePrice * 0.7);
+        // Không bịa giá vốn = 70% giá bán: số đó bị ghi thành "chi phí in" của đơn và bị AI coi là giá vốn thật
+        const baseCost = 0;
         const validSizes = (sizes || []).map(s => String(s || '').trim()).filter(Boolean);
         const validColors = (colors || []).filter(c => c && c.name && c.name.trim());
 
@@ -1349,12 +1372,12 @@ export class ProductsService {
         const commissionPercent = await CommissionSetting.resolvePercent(categoryId, 'POD_TEMPLATE');
         const variants: VariantInput[] = podVariants.map(pv => {
             const vari = blank.variations?.find(v => v.sku === pv.sku);
-            const baseCost = pv.base_cost ?? vari?.base_cost ?? 50000;
+            const baseCost = Number(pv.base_cost); // validate() đã bắt buộc giá vốn thật từ phôi
             return {
                 sku: pv.sku,
                 color: pv.color || vari?.color || 'Màu mặc định',
                 size: pv.size || vari?.size || 'Freesize',
-                material: pv.material || vari?.material || (blank as any)?.material || 'Cotton',
+                material: pv.material || vari?.material || (blank as any)?.material || undefined, // không bịa "Cotton"
                 base_cost: baseCost,
                 price: withCommission(baseCost + pv.markup, commissionPercent),
                 stock: pv.stock,
@@ -1514,6 +1537,7 @@ export class ProductsService {
     }
 
     private static async updateSimple(mp: any, actor: ProductActor, payload: Partial<ProductFormDataDTO>): Promise<ProductItemResponseDTO> {
+        ProductsService.assertSimpleFields(payload);
         if (payload.price !== undefined) {
             const basePrice = Number(payload.price);
             if (isNaN(basePrice) || basePrice <= 0) {
@@ -1545,8 +1569,8 @@ export class ProductsService {
         }
 
         if (payload.title !== undefined) {
-            mp.title = payload.title;
-            mp.slug = await ProductsService.uniqueSlug(payload.title, mp._id.toString());
+            mp.title = String(payload.title).trim();
+            mp.slug = await ProductsService.uniqueSlug(mp.title, mp._id.toString());
         }
         if (payload.description !== undefined) mp.description = payload.description;
         if (payload.materials !== undefined) mp.materials = normalizeMaterials(payload.materials);
@@ -1581,19 +1605,14 @@ export class ProductsService {
                 : existing.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
 
             // `payload.price` là giá người bán NHẬN, còn giá trong DB là giá NIÊM YẾT (đã gồm
-            // hoa hồng). Sửa màu/size mà không nhập giá thì giữ nguyên giá niêm yết từng đồng, đồng
-            // thời bóc hoa hồng ra để giá vốn vẫn tính trên cùng cơ sở như lúc tạo sản phẩm.
+            // hoa hồng). Sửa màu/size mà không nhập giá thì giữ nguyên giá niêm yết từng đồng.
             const dbPrice = parseFloat(existing[0]?.retail_price?.toString() || '0');
-            const commissionPercent = await ProductsService.resolveProductCommission(mp);
-            const basePrice = payload.price !== undefined
-                ? Number(payload.price)
-                : dbPrice - commissionFromGross(dbPrice, commissionPercent);
             const listPrice = payload.price !== undefined
-                ? withCommission(basePrice, commissionPercent)
+                ? withCommission(Number(payload.price), await ProductsService.resolveProductCommission(mp))
                 : dbPrice;
             await ProductsService.writeVariants(
                 mp._id, 
-                ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
+                ProductsService.colorsToVariants(payload.colors, baseSku, totalStock, listPrice, payload.sizes)
             );
         } else {
             const updates: any = {};
@@ -1601,7 +1620,8 @@ export class ProductsService {
                 const netPrice = Number(payload.price);
                 const grossPrice = withCommission(netPrice, await ProductsService.resolveProductCommission(mp));
                 updates.retail_price = mongoose.Types.Decimal128.fromString(grossPrice.toString());
-                updates.base_cost = mongoose.Types.Decimal128.fromString((netPrice * 0.7).toFixed(0));
+                // Hàng có sẵn không có chi phí in; 0 = "chưa biết giá vốn" (AI chỉ coi base_cost > 0 là giá vốn thật)
+                updates.base_cost = mongoose.Types.Decimal128.fromString('0');
             }
             if (payload.stock !== undefined) updates.stock_quantity = Number(payload.stock);
             if (payload.sku !== undefined) updates.sku = payload.sku;
@@ -1645,13 +1665,14 @@ export class ProductsService {
         const mp = await MongoProduct.findById(id);
         if (!mp) throw new Error('Không tìm thấy sản phẩm cần xóa.');
         await ProductsService.assertOwnership(mp, actor);
+        const wasVisible = !mp.is_hidden; // xoá lại lần 2 không được trừ listing_count thêm lần nữa
 
         mp.is_hidden = true;
         mp.status = 'UNPUBLISHED';
         mp.listing_status = 'INACTIVE';
         await mp.save();
         await MongoVariant.updateMany({ product_id: mp._id }, { $set: { is_active: false } });
-        await Shop.updateOne({ _id: mp.shop_id }, { $inc: { listing_count: -1 } });
+        if (wasVisible) await Shop.updateOne({ _id: mp.shop_id }, { $inc: { listing_count: -1 } });
 
         await ProductsService.invalidateProductCache(id);
         logger.info(`Soft deleted product: ${id} by ${actor.id}`);
@@ -1662,10 +1683,21 @@ export class ProductsService {
         const scoped = await ProductsService.scopeIdsToActor(ids, actor);
         if (scoped.length === 0) return { success: true, count: 0 };
 
+        // Xoá đơn lẻ có trừ listing_count, xoá hàng loạt cũng phải trừ (chỉ tính sản phẩm còn hiện)
+        const visible = await MongoProduct.find({ _id: { $in: scoped }, is_hidden: { $ne: true } }).select('shop_id').lean();
+        const perShop = new Map<string, number>();
+        for (const p of visible) {
+            const k = String(p.shop_id);
+            perShop.set(k, (perShop.get(k) || 0) + 1);
+        }
+
         const result = await MongoProduct.updateMany(
             { _id: { $in: scoped } },
             { $set: { is_hidden: true, status: 'UNPUBLISHED', listing_status: 'INACTIVE' } }
         );
+        for (const [shopId, n] of perShop) {
+            await Shop.updateOne({ _id: shopId }, { $inc: { listing_count: -n } });
+        }
         await MongoVariant.updateMany({ product_id: { $in: scoped } }, { $set: { is_active: false } });
 
         await ProductsService.invalidateProductCache();

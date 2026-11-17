@@ -20,6 +20,12 @@ import { payosService } from "../../payment/application/payos.service";
 import { logger } from "../../../shared/utils/logger";
 
 
+/** Phí lưu trong cài đặt cũ có thể âm / không phải số: không để nó trừ vào tổng đơn. */
+function safeFee(v: any, fallback: number): number {
+  const n = Number(v ?? fallback);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 export class OrdersService {
 
 
@@ -47,21 +53,25 @@ export class OrdersService {
           shopProvince = shipSettings.province || '';
 
           if (pricingType === 'FLAT_RATE') {
-            shippingFee = Math.max(0, Number(shipSettings.flatRateFee ?? 0));
+            shippingFee = safeFee(shipSettings.flatRateFee, 0);
             zoneType = 'flatRate';
             zoneLabel = shippingFee === 0 ? 'Miễn phí vận chuyển' : 'Đồng giá toàn quốc';
             return { shippingFee, pricingType, zoneType, zoneLabel, shopProvince, destProvince };
           }
 
           if (pricingType === 'ZONE_BASED') {
-            const rawDest = (address?.province || address?.city || address?.address_detail || '').toLowerCase();
+            // Địa chỉ lưu dạng "số nhà, phường, quận, tỉnh" và không có trường province riêng: chỉ lấy
+            // phần CUỐI. Dò cả chuỗi thì tên đường bị coi là tỉnh ("Xa lộ Hà Nội, TP Thủ Đức, TP HCM"
+            // bị tính là miền Bắc, "Phố Huế, Hai Bà Trưng, Hà Nội" thành nội tỉnh với shop ở Huế).
+            const lastPart = String(address?.address_detail || '').split(',').map((x: string) => x.trim()).filter(Boolean).pop() || '';
+            const rawDest = String(address?.province || address?.city || lastPart).toLowerCase();
             destProvince = rawDest;
             const normShop = shopProvince.toLowerCase().replace(/^(thành phố|tỉnh|tp\.|tp)\s+/i, '').trim();
             const normDest = rawDest.replace(/^(thành phố|tỉnh|tp\.|tp)\s+/i, '').trim();
             const zoneRates = shipSettings.zoneRates || { intraProvince: 22000, intraRegion: 30000, interRegion: 38000 };
 
             if (normShop && normDest && (normDest.includes(normShop) || normShop.includes(normDest))) {
-              shippingFee = Number(zoneRates.intraProvince ?? 22000);
+              shippingFee = safeFee(zoneRates.intraProvince, 22000);
               zoneType = 'intraProvince';
               zoneLabel = 'Nội tỉnh';
             } else {
@@ -77,11 +87,11 @@ export class OrdersService {
               const destRegion = isDestNorth ? 'NORTH' : (isDestCentral ? 'CENTRAL' : 'SOUTH');
 
               if (shopRegion === destRegion) {
-                shippingFee = Number(zoneRates.intraRegion ?? 30000);
+                shippingFee = safeFee(zoneRates.intraRegion, 30000);
                 zoneType = 'intraRegion';
                 zoneLabel = 'Nội vùng';
               } else {
-                shippingFee = Number(zoneRates.interRegion ?? 38000);
+                shippingFee = safeFee(zoneRates.interRegion, 38000);
                 zoneType = 'interRegion';
                 zoneLabel = 'Liên vùng';
               }
@@ -289,7 +299,7 @@ export class OrdersService {
         await PromotionService.releaseUsage(cleanCouponCode).catch(() => { });
       }
       throw new Error(
-        "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc PAYOS.",
+        "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn payOS.",
       );
     }
 
@@ -482,9 +492,9 @@ export class OrdersService {
     // Hoàn lại kho và voucher
     await OrdersService.restoreOrderStockAndCoupon(order);
 
-    // Tự động kích hoạt lệnh hoàn tiền qua PayOS Payout / VNPay Refund
+    // Tự động kích hoạt lệnh hoàn tiền qua PayOS Payout
     let refundMessageSuffix = '';
-    if (wasPaid && ['PAYOS', 'VNPAY'].includes(order.payment_method)) {
+    if (wasPaid && order.payment_method === 'PAYOS') {
       const refundAmount = Math.max(0,
         num(order.financial_breakdown?.subtotal) +
         num(order.financial_breakdown?.shipping_fee) -

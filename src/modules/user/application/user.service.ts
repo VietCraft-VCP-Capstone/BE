@@ -40,7 +40,6 @@ export class UserService {
 
         return {
             ...user,
-            rank: 'Thành viên Bạc',
             stats: {
                 ordersCount,
                 collectionsCount: wishlistCount,
@@ -65,8 +64,31 @@ export class UserService {
                     });
                     safePayload.avatar = asset.url;
                 } catch (e: any) {
+                    // Không lưu cả chuỗi base64 (tới ~15MB) vào document user khi upload hỏng
                     logger.warn('Failed to upload base64 avatar to Cloudinary in updateProfile: ' + e.message);
+                    throw new Error('Tải ảnh đại diện thất bại, vui lòng thử lại.');
                 }
+            }
+        }
+
+        // $set cả object notification_settings thì mục không gửi lên bị đặt lại mặc định (true):
+        // tắt "push" là "email" tự bật lại. Chỉ ghi đúng các mục boolean được gửi.
+        if (safePayload.notification_settings !== undefined) {
+            const ns = safePayload.notification_settings;
+            delete safePayload.notification_settings;
+            if (!ns || typeof ns !== 'object') throw new Error('Cài đặt thông báo không hợp lệ');
+            for (const key of ['in_app', 'push', 'email']) {
+                if (ns[key] === undefined) continue;
+                if (typeof ns[key] !== 'boolean') throw new Error('Cài đặt thông báo không hợp lệ');
+                safePayload[`notification_settings.${key}`] = ns[key];
+            }
+        }
+
+        // Đổi số điện thoại thì số mới chưa được xác minh OTP (đăng ký Người bán đòi số đã xác minh)
+        if (safePayload.phone !== undefined) {
+            const current = await User.findById(userId).select('phone').lean();
+            if (String(safePayload.phone || '').trim() !== String(current?.phone || '').trim()) {
+                safePayload.is_phone_verified = false;
             }
         }
 
@@ -88,7 +110,6 @@ export class UserService {
         const userObj = user.toObject();
         return {
             ...userObj,
-            rank: 'Thành viên Bạc',
             stats: {
                 ordersCount: ordersCount,
                 collectionsCount: wishlistCount,

@@ -97,7 +97,7 @@ export class ReplacementOrderService {
             buyer_id: buyerId,
             shop_id: shopId,
             order_code: replacementOrderCode,
-            payment_method: parentOrder?.payment_method || 'VNPAY',
+            payment_method: parentOrder?.payment_method || 'PAYOS',
             payment_status: 'PAID',
             refund_status: 'NONE',
             order_status: 'PROCESSING',

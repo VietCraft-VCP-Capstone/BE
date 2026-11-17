@@ -30,7 +30,7 @@ export interface OrderResponse {
     items: OrderItem[];
     totalAmount: number;
     status: 'pending' | 'paid' | 'shipping' | 'completed' | 'cancelled';
-    paymentGateway: 'vnpay' | 'payos';
+    paymentGateway: 'payos' | 'cod';
     paymentMethod?: string;
     shippingProvider: 'ghn' | 'ghtk';
     shippingCode?: string;
@@ -66,8 +66,10 @@ export interface OrderResponse {
 
 
 export const DEFAULT_SHIPPING_FEE = 30000;
-export const PAYMENT_METHODS = ['VNPAY', 'PAYOS'];
+export const PAYMENT_METHODS = ['PAYOS', 'COD'];
 export const SHIPPING_CARRIERS = ['ghn', 'ghtk'];
-export const PLACEHOLDER_SHOP_LOGO = 'https://images.unsplash.com/photo-1513519245088-0e12902e5a38?auto=format&fit=crop&w=80';
-export const PLACEHOLDER_ITEM_IMAGE = 'http://localhost:5173/image-not-found.jpg';
+// Shop chưa có logo: để trống cho FE hiện chữ cái đầu, không dùng ảnh Unsplash không liên quan
+export const PLACEHOLDER_SHOP_LOGO = '';
+// Đường dẫn tương đối tới ảnh trong FE/public — trước đây gắn cứng http://localhost:5173 nên hỏng khi deploy
+export const PLACEHOLDER_ITEM_IMAGE = '/image-not-found.jpg';
 

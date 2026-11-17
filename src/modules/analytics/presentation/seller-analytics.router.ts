@@ -56,7 +56,7 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/forecast/radar', ai: () => '/api/analytics/forecast/radar' },
     { method: 'get', path: '/forecast/recommendations', ai: () => '/api/analytics/forecast/recommendations' },
     // Gợi ý sản phẩm thông minh (F42)
-    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'productType', 'keywords', 'blankCost', 'material'] },
+    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'categoryName', 'productType', 'keywords', 'title', 'blankCost', 'targetMargin', 'material'] },
     { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion' },
 ];
 
