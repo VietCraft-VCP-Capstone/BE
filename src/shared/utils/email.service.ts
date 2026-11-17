@@ -164,6 +164,7 @@ export async function sendCompetitorAlertEmail(to: string, items: { title: strin
         `,
     });
 }
+
 export async function sendPerformanceAlertEmail(
     to: string,
     p: { shopName: string; title: string; content: string; link: string },

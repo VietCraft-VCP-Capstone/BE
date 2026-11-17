@@ -30,7 +30,7 @@ export interface OrderResponse {
     items: OrderItem[];
     totalAmount: number;
     status: 'pending' | 'paid' | 'shipping' | 'completed' | 'cancelled';
-    paymentGateway: 'vnpay' | 'payos';
+    paymentGateway: 'payos' | 'cod';
     paymentMethod?: string;
     shippingProvider: 'ghn' | 'ghtk';
     shippingCode?: string;
@@ -41,6 +41,9 @@ export interface OrderResponse {
     shippingFee?: number;
     discount?: number;
     couponCode?: string | null;
+    shippingCouponCode?: string | null;
+    /** Phần của `discount` trừ vào phí vận chuyển. */
+    shippingDiscount?: number;
     paymentStatus?: 'PENDING' | 'PAID' | 'REFUNDED';
     /** Thời điểm cổng thanh toán xác nhận tiền về; null với đơn chưa trả hoặc dữ liệu cũ. */
     paidAt?: Date | null;
@@ -66,7 +69,7 @@ export interface OrderResponse {
 
 
 export const DEFAULT_SHIPPING_FEE = 30000;
-export const PAYMENT_METHODS = ['VNPAY', 'PAYOS'];
+export const PAYMENT_METHODS = ['PAYOS', 'COD'];
 export const SHIPPING_CARRIERS = ['ghn', 'ghtk'];
 export const PLACEHOLDER_SHOP_LOGO = 'https://images.unsplash.com/photo-1513519245088-0e12902e5a38?auto=format&fit=crop&w=80';
 export const PLACEHOLDER_ITEM_IMAGE = 'http://localhost:5173/image-not-found.jpg';
