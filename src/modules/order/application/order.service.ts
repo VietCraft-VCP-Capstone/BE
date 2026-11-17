@@ -296,54 +296,12 @@ export class OrdersService {
 
     const now = new Date();
     const isPodOrder = Boolean(hasPodItem);
-    const order = await OrderModel.create({
-      buyer_id: buyerObjectId,
-      shop_id: shopId,
-      order_code: `VC-${Date.now()}-${Math.floor(Math.random() * 9000 + 1000)}`,
-      payment_method: paymentMethod,
-      payment_status: "PENDING",
-      order_status: "ORDERED",
-      is_pod: isPodOrder,
-      order_type: isPodOrder ? "POD" : "READY_TO_SHIP",
-      seller_approval_status: "PENDING_APPROVAL",
-      fulfillment_status: isPodOrder ? "PENDING_APPROVAL" : "UNFULFILLED",
-      shipping_address: {
-        recipient_name: address.recipient_name,
-        phone: address.phone,
-        address_detail: address.address_detail,
-        province_id: address.province_id || "79",
-        district_id: address.district_id || "760",
-        ward_code: address.ward_code || "26734",
-      },
-      shipping_details: {
-        carrier,
-        tracking_number: "",
-        shipping_fee: dec(shippingFee),
-      },
-      items: orderItems,
-      financial_breakdown: {
-        subtotal: dec(subtotal),
-        shipping_fee: dec(shippingFee),
-        coupon_discount: dec(discount),
-        platform_fee: dec(platformFee),
-        seller_payout_amount: dec(sellerPayoutAmount),
-        commission_rate: effectiveCommissionRate,
-        total_printing_cost: dec(totalPrintingCost),
-      },
-      coupon_code: cleanCouponCode || null,
-      status_history: [
-        { status: "ORDERED", changed_at: now, note: "Đơn được tạo" },
-      ],
-      order_hour_of_week: now.getDay() * 24 + now.getHours(),
-    });
-
-    // Trừ tồn kho biến thể tương ứng
-    for (const it of orderItems) {
-      if (it.variant_id) {
-        await ProductVariant.updateOne(
-          { _id: it.variant_id },
-          { $inc: { stock_quantity: -it.quantity } }
-        ).catch(err => console.error('[STOCK] Lỗi trừ tồn kho khi tạo đơn:', err?.message || err));
+    let order;
+    try {
+      for (const c of [productCoupon, shippingCoupon]) {
+        if (!c) continue;
+        await PromotionService.claimUsage(c.code, buyerId);
+        claimed.push(c.code);
       }
       order = await OrderModel.create({
         buyer_id: buyerObjectId,
@@ -377,7 +335,7 @@ export class OrdersService {
           shipping_discount: dec(totals.shippingDiscount),
           platform_fee: dec(platformFee),
           seller_payout_amount: dec(sellerPayoutAmount),
-          commission_rate: commissionRate,
+          commission_rate: effectiveCommissionRate,
           total_printing_cost: dec(totalPrintingCost),
         },
         coupon_code: productCoupon?.code || null,
