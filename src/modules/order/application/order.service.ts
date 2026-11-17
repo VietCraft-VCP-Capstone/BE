@@ -259,16 +259,9 @@ export class OrdersService {
       await PromotionService.claimUsage(cleanCouponCode, buyerId);
     }
 
-    let minOrderFee = 10000;
-    try {
-      const financeConfig = await platformFinanceService.getConfig();
-      if (financeConfig?.policies) {
-        minOrderFee = financeConfig.policies.min_order_fee ?? 10000;
-      }
-    } catch {
-    }
-
-    platformFee = Math.max(platformFee, minOrderFee);
+    // Phí sàn tính thuần theo % hoa hồng do admin cấu hình (chuẩn theo mô hình Shopee),
+    // không áp mức sàn tối thiểu cứng (min_order_fee) để tránh trừ sạch tiền đơn hàng giá trị nhỏ.
+    platformFee = Math.round(platformFee);
 
     const effectiveCommissionRate = subtotal > 0 ? Number((platformFee / subtotal).toFixed(4)) : 0.05;
 

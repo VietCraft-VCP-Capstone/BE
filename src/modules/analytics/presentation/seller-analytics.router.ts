@@ -5,6 +5,11 @@ import { AiGatewayService, AnalyticsViewer } from '../application/ai-gateway.ser
 import { CompetitorTrackingService, TrackingError } from '../application/competitor-tracking.service';
 import { SeasonalAnalyticsService } from '../application/seasonal-analytics.service';
 import { Shop } from '../../product/infrastructure/models/shop.model';
+import { Product } from '../../product/infrastructure/models/product.model';
+import ProductsService from '../../product/application/product.service';
+import { Tag } from '../../tags';
+import { cacheService } from '../../../shared/services/cache.service';
+import { generateSlug } from '../../../shared/utils/slug';
 import { ListingHealthService, HealthStatus } from '../application/listing-health.service';
 import { healthSummary } from '../application/listing-health-summary.service';
 import { listingRanking } from '../application/listing-ranking.service';
@@ -205,6 +210,58 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
 
 router.post('/listings/intel/preview', userRateLimit(20, 60_000, 'Bạn thử quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 
+// Gắn thẻ từ khóa cơ hội vào các sản phẩm phù hợp của gian hàng
+router.post('/forecast/seasonal/attach-tag', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const cleanTag = typeof req.body?.tag === 'string' ? req.body.tag.trim() : '';
+        const rawIds = Array.isArray(req.body?.product_ids) ? req.body.product_ids : [];
+        if (!cleanTag) {
+            return res.status(400).json({ error: 'invalid_param', field: 'tag' });
+        }
+        const validIds = rawIds
+            .filter((id: unknown) => typeof id === 'string' && mongoose.Types.ObjectId.isValid(id))
+            .map((id: string) => new mongoose.Types.ObjectId(id));
+        if (viewer.live_shop_id && mongoose.Types.ObjectId.isValid(viewer.live_shop_id) && validIds.length > 0) {
+            const slug = generateSlug(cleanTag) || cleanTag.toLowerCase().replace(/\s+/g, '-');
+            let tagDoc = await Tag.findOne({ $or: [{ slug }, { name: cleanTag }] });
+            if (!tagDoc) {
+                tagDoc = await Tag.create({
+                    name: cleanTag,
+                    slug,
+                    status: 'active',
+                    review_status: 'approved',
+                    product_count: 0,
+                });
+            }
+            const shopOid = new mongoose.Types.ObjectId(viewer.live_shop_id);
+            const needCountUpdate = await Product.countDocuments({
+                _id: { $in: validIds },
+                shop_id: shopOid,
+                tag_ids: { $ne: tagDoc._id },
+            });
+            const result = await Product.updateMany(
+                { _id: { $in: validIds }, shop_id: shopOid },
+                { $addToSet: { tags: cleanTag, tag_ids: tagDoc._id } }
+            );
+            if (needCountUpdate > 0) {
+                await Tag.updateOne({ _id: tagDoc._id }, { $inc: { product_count: needCountUpdate } });
+            }
+            await Promise.all([
+                ...validIds.map((id: mongoose.Types.ObjectId) => ProductsService.invalidateProductCache(id.toString())),
+                cacheService.del('vietcraft:tags:approved'),
+                cacheService.del('vietcraft:tags:stats'),
+                cacheService.delByPattern('vietcraft:tags:*'),
+            ]);
+            return res.json({ success: true, modified_count: result.modifiedCount ?? result.matchedCount ?? 0 });
+        }
+        return res.json({ success: true, modified_count: 0 });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi gắn thẻ vào sản phẩm.' });
+    }
+});
+
 // Lưu/Bỏ lưu ý tưởng sản phẩm theo dịp (lưu trực tiếp vào settings gian hàng)
 router.post('/forecast/seasonal/save-idea', async (req: AuthenticatedRequest, res: Response) => {
     try {
@@ -235,6 +292,77 @@ router.post('/forecast/seasonal/save-idea', async (req: AuthenticatedRequest, re
         return res.json({ success: true, saved_ideas: [idea_id] });
     } catch (error: any) {
         return res.status(500).json({ error: error?.message || 'Lỗi khi lưu ý tưởng theo dịp.' });
+    }
+});
+
+// Lưu bản chỉnh sửa trực tiếp của seller cho 1 ý tưởng mùa vụ
+router.post('/forecast/seasonal/idea-draft', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { idea_id, title, concept, price_vnd, tags } = req.body || {};
+        if (!idea_id || typeof idea_id !== 'string') {
+            return res.status(400).json({ error: 'invalid_param', field: 'idea_id' });
+        }
+        if (viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            const shopDoc = await Shop.findById(viewer.analysed_shop_id);
+            if (shopDoc) {
+                shopDoc.settings = shopDoc.settings || {};
+                shopDoc.settings.seasonal_preferences = shopDoc.settings.seasonal_preferences || {};
+                const drafts = shopDoc.settings.seasonal_preferences.idea_drafts || {};
+                drafts[idea_id] = {
+                    title: typeof title === 'string' ? title.trim() : '',
+                    concept: typeof concept === 'string' ? concept.trim() : '',
+                    price_vnd: Number(price_vnd) > 0 ? Number(price_vnd) : undefined,
+                    tags: Array.isArray(tags) ? tags.map((t: unknown) => String(t).trim()).filter(Boolean) : [],
+                    updated_at: new Date().toISOString(),
+                };
+                shopDoc.settings.seasonal_preferences.idea_drafts = drafts;
+                const saved: string[] = shopDoc.settings.seasonal_preferences.saved_ideas || [];
+                if (!saved.includes(idea_id)) {
+                    saved.push(idea_id);
+                    shopDoc.settings.seasonal_preferences.saved_ideas = saved;
+                }
+                shopDoc.markModified('settings');
+                await shopDoc.save();
+                return res.json({ success: true, idea_drafts: drafts, saved_ideas: saved });
+            }
+        }
+        return res.json({ success: true, idea_drafts: {} });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi lưu bản chỉnh sửa ý tưởng.' });
+    }
+});
+
+// Lưu đánh giá thành quả sau dịp của seller
+router.post('/forecast/seasonal/review', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { camp_id, rating, note } = req.body || {};
+        if (!camp_id || typeof camp_id !== 'string') {
+            return res.status(400).json({ error: 'invalid_param', field: 'camp_id' });
+        }
+        if (viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            const shopDoc = await Shop.findById(viewer.analysed_shop_id);
+            if (shopDoc) {
+                shopDoc.settings = shopDoc.settings || {};
+                shopDoc.settings.seasonal_preferences = shopDoc.settings.seasonal_preferences || {};
+                const reviews = shopDoc.settings.seasonal_preferences.occasion_reviews || {};
+                reviews[camp_id] = {
+                    rating: typeof rating === 'string' ? rating : 'neutral',
+                    note: typeof note === 'string' ? note.trim() : '',
+                    updated_at: new Date().toISOString(),
+                };
+                shopDoc.settings.seasonal_preferences.occasion_reviews = reviews;
+                shopDoc.markModified('settings');
+                await shopDoc.save();
+                return res.json({ success: true, occasion_reviews: reviews });
+            }
+        }
+        return res.json({ success: true, occasion_reviews: {} });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi lưu đánh giá thành quả.' });
     }
 });
 

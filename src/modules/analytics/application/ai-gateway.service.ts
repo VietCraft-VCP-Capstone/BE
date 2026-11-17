@@ -114,7 +114,7 @@ export class AiGatewayService {
     static async ping(): Promise<boolean> {
         try {
             const response = await fetch(new URL('/health', config.aiAnalyticsUrl), {
-                signal: AbortSignal.timeout(1500),
+                signal: AbortSignal.timeout(5000),
             });
             return response.ok;
         } catch {
