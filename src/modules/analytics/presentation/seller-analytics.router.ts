@@ -26,6 +26,22 @@ interface GatewayRoute {
     query?: string[];
     forwardShopIdBody?: boolean;
     parseBody?: (raw: unknown) => PreviewBodyResult<Record<string, unknown>>;
+    timeoutMs?: number;
+}
+
+/**
+  Chỉ chuyển tiếp ảnh: `images` (tối đa 6 ảnh cùng sản phẩm, các màu khác nhau) hoặc `image_base64` (1 ảnh,
+  client cũ). Tổng base64 ≤ ~12MB để dưới giới hạn 15MB của express.json; AI kiểm tra lại là ảnh thật.
+ */
+function parseRecognizeImage(raw: unknown): PreviewBodyResult<Record<string, unknown>> {
+    const b = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const images = Array.isArray(b.images) ? b.images : (typeof b.image_base64 === 'string' ? [b.image_base64] : []);
+    if (images.length === 0 || images.length > 6 || images.some(x => typeof x !== 'string' || !x)) {
+        return { invalid: 'images' };
+    }
+    if ((images as string[]).reduce((n, x) => n + x.length, 0) > 12_000_000) return { invalid: 'images' };
+    const mime = typeof b.mime_type === 'string' ? b.mime_type.slice(0, 40) : undefined;
+    return { body: { images, ...(mime ? { mime_type: mime } : {}) } };
 }
 
 const ROUTES: GatewayRoute[] = [
@@ -52,7 +68,6 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking' },
     { method: 'post', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
     { method: 'delete', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
-    // Đúng dạng SRS 3.9.5; bản nhận body ở trên giữ cho client cũ.
     { method: 'delete', path: '/competitor-tracking/:shopId', ai: p => `/api/analytics/competitor-tracking/${p.shopId}`, forwardShopIdBody: true },
     // Dự báo (SRS 3.10)
     { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window', 'targetId'] },
@@ -61,8 +76,11 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/forecast/radar', ai: () => '/api/analytics/forecast/radar' },
     { method: 'get', path: '/forecast/recommendations', ai: () => '/api/analytics/forecast/recommendations' },
     // Gợi ý sản phẩm thông minh (F42)
-    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'productType', 'keywords', 'blankCost', 'material'] },
-    { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion' },
+    // timeoutMs cao hơn mặc định: lần gọi đầu tiên sau khi AI service khởi động lại phải fit TF-IDF ~45k dòng, có thể chậm hơn bình thường
+    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'categoryName', 'productType', 'keywords', 'title', 'blankCost', 'targetMargin', 'material'], timeoutMs: 45_000 },
+    { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', timeoutMs: 45_000 },
+    // Nhận diện sản phẩm từ ảnh (F42): ảnh base64 do FE đã thu nhỏ
+    { method: 'post', path: '/product/recognize-image', ai: () => '/api/v1/product/recognize-image', parseBody: parseRecognizeImage, timeoutMs: 45_000 },   // đọc ảnh có thể ~40s khi phải đổi model
 ];
 
 const MAX_QUERY_LENGTH = 120;
@@ -119,17 +137,30 @@ router.get('/context', async (req: AuthenticatedRequest, res: Response) => {
 
 const SHOP_SEARCH_MAX = 60;
 
+router.get('/competitor-tracking/categories', async (_req: AuthenticatedRequest, res: Response) => {
+    try {
+        return res.json({ data: await CompetitorTrackingService.rootCategories() });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc danh mục.' });
+    }
+});
+
 router.get('/competitor-tracking/search', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
-        if (!q || q.length > SHOP_SEARCH_MAX) {
+        const categoryId = typeof req.query.categoryId === 'string' ? req.query.categoryId : '';
+        // Tìm theo tên, theo danh mục, hoặc cả hai; phải có ít nhất một.
+        if (q.length > SHOP_SEARCH_MAX || (!q && !categoryId)) {
             return res.status(400).json({ error: 'invalid_param', field: 'q', expected: `1-${SHOP_SEARCH_MAX} ký tự` });
+        }
+        if (categoryId && !/^[a-f0-9]{24}$/i.test(categoryId)) {
+            return res.status(400).json({ error: 'invalid_param', field: 'categoryId' });
         }
         const viewer = await viewerOrReply(req, res);
         if (!viewer) return;
         // Shop mẫu theo dõi bằng mã shp_* của dữ liệu mồi, không tìm trên sàn.
         if (viewer.demo) return res.json({ data: [], viewer });
-        const data = await CompetitorTrackingService.searchShops(req.user!.id, q);
+        const data = await CompetitorTrackingService.searchShops(req.user!.id, q, categoryId || undefined);
         return res.json({ data, viewer });
     } catch (error: any) {
         return res.status(500).json({ error: error?.message || 'Lỗi khi tìm gian hàng.' });
@@ -209,6 +240,8 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
 });
 
 router.post('/listings/intel/preview', userRateLimit(20, 60_000, 'Bạn thử quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
+// Mỗi lần nhận diện ảnh tốn hạn mức Gemini
+router.post('/product/recognize-image', userRateLimit(10, 60_000, 'Bạn nhận diện ảnh quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 
 // Gắn thẻ từ khóa cơ hội vào các sản phẩm phù hợp của gian hàng
 router.post('/forecast/seasonal/attach-tag', async (req: AuthenticatedRequest, res: Response) => {
@@ -438,6 +471,7 @@ for (const route of ROUTES) {
                 shopId: viewer.analysed_shop_id!,
                 query,
                 body,
+                timeoutMs: route.timeoutMs,
             });
 
             if (result.status === 401) {
