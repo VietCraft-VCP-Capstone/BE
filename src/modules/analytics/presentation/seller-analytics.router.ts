@@ -25,8 +25,8 @@ interface GatewayRoute {
 }
 
 /**
- * Chỉ chuyển tiếp ảnh: `images` (tối đa 6 ảnh cùng sản phẩm, các màu khác nhau) hoặc `image_base64` (1 ảnh,
- * client cũ). Tổng base64 ≤ ~12MB để dưới giới hạn 15MB của express.json; AI kiểm tra lại là ảnh thật.
+  Chỉ chuyển tiếp ảnh: `images` (tối đa 6 ảnh cùng sản phẩm, các màu khác nhau) hoặc `image_base64` (1 ảnh,
+  client cũ). Tổng base64 ≤ ~12MB để dưới giới hạn 15MB của express.json; AI kiểm tra lại là ảnh thật.
  */
 function parseRecognizeImage(raw: unknown): PreviewBodyResult<Record<string, unknown>> {
     const b = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
@@ -63,17 +63,16 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking' },
     { method: 'post', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
     { method: 'delete', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
-    // Đúng dạng SRS 3.9.5; bản nhận body ở trên giữ cho client cũ.
     { method: 'delete', path: '/competitor-tracking/:shopId', ai: p => `/api/analytics/competitor-tracking/${p.shopId}`, forwardShopIdBody: true },
-    // Dự báo (SRS 3.10)
     { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window'] },
     { method: 'get', path: '/forecast/seasonal', ai: () => '/api/analytics/forecast/seasonal', query: ['categoryId', 'category_slug', 'campaign_id', 'campaignId', 'keyword'] },
     { method: 'get', path: '/forecast/niches', ai: () => '/api/analytics/forecast/niches', query: ['categoryId'] },
     { method: 'get', path: '/forecast/radar', ai: () => '/api/analytics/forecast/radar' },
     { method: 'get', path: '/forecast/recommendations', ai: () => '/api/analytics/forecast/recommendations' },
     // Gợi ý sản phẩm thông minh (F42)
-    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'categoryName', 'productType', 'keywords', 'title', 'blankCost', 'targetMargin', 'material'] },
-    { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion' },
+    // timeoutMs cao hơn mặc định: lần gọi đầu tiên sau khi AI service khởi động lại phải fit TF-IDF ~45k dòng, có thể chậm hơn bình thường
+    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'categoryName', 'productType', 'keywords', 'title', 'blankCost', 'targetMargin', 'material'], timeoutMs: 45_000 },
+    { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', timeoutMs: 45_000 },
     // Nhận diện sản phẩm từ ảnh (F42): ảnh base64 do FE đã thu nhỏ
     { method: 'post', path: '/product/recognize-image', ai: () => '/api/v1/product/recognize-image', parseBody: parseRecognizeImage, timeoutMs: 45_000 },   // đọc ảnh có thể ~40s khi phải đổi model
 ];
