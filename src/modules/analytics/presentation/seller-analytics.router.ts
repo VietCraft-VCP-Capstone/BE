@@ -3,8 +3,13 @@ import { Router, Response } from 'express';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { AiGatewayService, AnalyticsViewer } from '../application/ai-gateway.service';
 import { CompetitorTrackingService, TrackingError } from '../application/competitor-tracking.service';
+import { SeasonalAnalyticsService } from '../application/seasonal-analytics.service';
+import { Shop } from '../../product/infrastructure/models/shop.model';
 import { Product } from '../../product/infrastructure/models/product.model';
-import { BlankClient, Blank } from '../../product/application/blank-client.service';
+import ProductsService from '../../product/application/product.service';
+import { Tag } from '../../tags';
+import { cacheService } from '../../../shared/services/cache.service';
+import { generateSlug } from '../../../shared/utils/slug';
 import { ListingHealthService, HealthStatus } from '../application/listing-health.service';
 import { healthSummary } from '../application/listing-health-summary.service';
 import { listingRanking } from '../application/listing-ranking.service';
@@ -64,7 +69,8 @@ const ROUTES: GatewayRoute[] = [
     { method: 'post', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
     { method: 'delete', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
     { method: 'delete', path: '/competitor-tracking/:shopId', ai: p => `/api/analytics/competitor-tracking/${p.shopId}`, forwardShopIdBody: true },
-    { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window'] },
+    // Dự báo (SRS 3.10)
+    { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window', 'targetId'] },
     { method: 'get', path: '/forecast/seasonal', ai: () => '/api/analytics/forecast/seasonal', query: ['categoryId', 'category_slug', 'campaign_id', 'campaignId', 'keyword'] },
     { method: 'get', path: '/forecast/niches', ai: () => '/api/analytics/forecast/niches', query: ['categoryId'] },
     { method: 'get', path: '/forecast/radar', ai: () => '/api/analytics/forecast/radar' },
@@ -90,82 +96,7 @@ function pickQuery(source: AuthenticatedRequest['query'], allowed: string[] = []
     return picked;
 }
 
-async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: AnalyticsViewer) {
-    if (!data) return data;
-
-    data.seller_shop_name = viewer.shop_name || 'SNOWKAT';
-    data.seller_category = { slug: 'thoi-trang', name: 'Thời trang Nữ & Set may mặc' };
-    data.is_live_shop = Boolean(viewer.live_shop_id);
-
-    if (!data.events || !Array.isArray(data.events)) return data;
-
-    let sellerBlanks: Blank[] = [];
-    try {
-        sellerBlanks = await BlankClient.listBlanks(req.user?.id);
-    } catch {
-        sellerBlanks = [];
-    }
-
-    let shopProducts: any[] = [];
-    if (viewer.live_shop_id && mongoose.Types.ObjectId.isValid(viewer.live_shop_id)) {
-        try {
-            shopProducts = await Product.find({
-                shop_id: new mongoose.Types.ObjectId(viewer.live_shop_id),
-                listing_status: { $ne: 'EXPIRED' }
-            }).select('_id title slug images categories tags product_type original_price stock_alert_threshold').lean();
-        } catch {
-            shopProducts = [];
-        }
-    }
-
-    for (const event of data.events) {
-        if (event.pod_blanks && Array.isArray(event.pod_blanks)) {
-            for (const pb of event.pod_blanks) {
-                const bt = (pb.blank_type || '').toLowerCase();
-                const matched = sellerBlanks.find(b => {
-                    const bId = (b._id || '').toLowerCase();
-                    const bCat = (b.category || '').toLowerCase();
-                    if (bt.includes('tshirt') || bt.includes('áo')) return bId.includes('tshirt') || bCat.includes('thời trang');
-                    if (bt.includes('mug') || bt.includes('cốc') || bt.includes('ly')) return bId.includes('mug') || bCat.includes('gia dụng') || bCat.includes('quà');
-                    if (bt.includes('tote') || bt.includes('túi')) return bId.includes('tote') || bCat.includes('phụ kiện');
-                    if (bt.includes('canvas') || bt.includes('tranh') || bt.includes('khung')) return bId.includes('frame') || bCat.includes('trang trí');
-                    return false;
-                });
-                if (matched) {
-                    pb.matched_blank = {
-                        _id: matched._id,
-                        title: matched.title,
-                        category: matched.category,
-                        default_image: matched.default_image,
-                        base_cost: matched.variations?.[0]?.base_cost || 0,
-                        printer_name: matched.printer_name || 'Xưởng in liên kết',
-                        is_connected: true
-                    };
-                }
-            }
-        }
-
-        const evName = (event.name || '').toLowerCase();
-        const evWords: string[] = evName.split(/\s+/).filter(Boolean);
-        event.matching_shop_products = shopProducts.filter((p: any) => {
-            const pTitle = (p.title || '').toLowerCase();
-            const pTags: string[] = (p.tags || []).map((t: string) => t.toLowerCase());
-            const pCats: string[] = (p.categories || []).map((c: string) => c.toLowerCase());
-            return evWords.some((w: string) => w.length > 2 && (pTitle.includes(w) || pTags.some((t: string) => t.includes(w)) || pCats.some((c: string) => c.includes(w))));
-        }).slice(0, 4);
-    }
-
-    data.all_seller_blanks = sellerBlanks.map(b => ({
-        _id: b._id,
-        title: b.title,
-        category: b.category,
-        default_image: b.default_image,
-        base_cost: b.variations?.[0]?.base_cost || 0,
-        printer_name: b.printer_name
-    }));
-
-    return data;
-}
+// Toàn bộ nghiệp vụ Seasonal & Gemini AI Advisory đã được tách thành SeasonalAnalyticsService
 
 async function viewerOrReply(req: AuthenticatedRequest, res: Response): Promise<AnalyticsViewer | null> {
     const viewer = await AiGatewayService.resolveViewer(req.user!);
@@ -312,6 +243,191 @@ router.post('/listings/intel/preview', userRateLimit(20, 60_000, 'Bạn thử qu
 // Mỗi lần nhận diện ảnh tốn hạn mức Gemini
 router.post('/product/recognize-image', userRateLimit(10, 60_000, 'Bạn nhận diện ảnh quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 
+// Gắn thẻ từ khóa cơ hội vào các sản phẩm phù hợp của gian hàng
+router.post('/forecast/seasonal/attach-tag', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const cleanTag = typeof req.body?.tag === 'string' ? req.body.tag.trim() : '';
+        const rawIds = Array.isArray(req.body?.product_ids) ? req.body.product_ids : [];
+        if (!cleanTag) {
+            return res.status(400).json({ error: 'invalid_param', field: 'tag' });
+        }
+        const validIds = rawIds
+            .filter((id: unknown) => typeof id === 'string' && mongoose.Types.ObjectId.isValid(id))
+            .map((id: string) => new mongoose.Types.ObjectId(id));
+        if (viewer.live_shop_id && mongoose.Types.ObjectId.isValid(viewer.live_shop_id) && validIds.length > 0) {
+            const slug = generateSlug(cleanTag) || cleanTag.toLowerCase().replace(/\s+/g, '-');
+            let tagDoc = await Tag.findOne({ $or: [{ slug }, { name: cleanTag }] });
+            if (!tagDoc) {
+                tagDoc = await Tag.create({
+                    name: cleanTag,
+                    slug,
+                    status: 'active',
+                    review_status: 'approved',
+                    product_count: 0,
+                });
+            }
+            const shopOid = new mongoose.Types.ObjectId(viewer.live_shop_id);
+            const needCountUpdate = await Product.countDocuments({
+                _id: { $in: validIds },
+                shop_id: shopOid,
+                tag_ids: { $ne: tagDoc._id },
+            });
+            const result = await Product.updateMany(
+                { _id: { $in: validIds }, shop_id: shopOid },
+                { $addToSet: { tags: cleanTag, tag_ids: tagDoc._id } }
+            );
+            if (needCountUpdate > 0) {
+                await Tag.updateOne({ _id: tagDoc._id }, { $inc: { product_count: needCountUpdate } });
+            }
+            await Promise.all([
+                ...validIds.map((id: mongoose.Types.ObjectId) => ProductsService.invalidateProductCache(id.toString())),
+                cacheService.del('vietcraft:tags:approved'),
+                cacheService.del('vietcraft:tags:stats'),
+                cacheService.delByPattern('vietcraft:tags:*'),
+            ]);
+            return res.json({ success: true, modified_count: result.modifiedCount ?? result.matchedCount ?? 0 });
+        }
+        return res.json({ success: true, modified_count: 0 });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi gắn thẻ vào sản phẩm.' });
+    }
+});
+
+// Lưu/Bỏ lưu ý tưởng sản phẩm theo dịp (lưu trực tiếp vào settings gian hàng)
+router.post('/forecast/seasonal/save-idea', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { idea_id } = req.body;
+        if (!idea_id || typeof idea_id !== 'string') {
+            return res.status(400).json({ error: 'invalid_param', field: 'idea_id' });
+        }
+        if (viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            const shopDoc = await Shop.findById(viewer.analysed_shop_id);
+            if (shopDoc) {
+                shopDoc.settings = shopDoc.settings || {};
+                shopDoc.settings.seasonal_preferences = shopDoc.settings.seasonal_preferences || {};
+                const current: string[] = shopDoc.settings.seasonal_preferences.saved_ideas || [];
+                const idx = current.indexOf(idea_id);
+                if (idx > -1) {
+                    current.splice(idx, 1);
+                } else {
+                    current.push(idea_id);
+                }
+                shopDoc.settings.seasonal_preferences.saved_ideas = current;
+                shopDoc.markModified('settings');
+                await shopDoc.save();
+                return res.json({ success: true, saved_ideas: current });
+            }
+        }
+        return res.json({ success: true, saved_ideas: [idea_id] });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi lưu ý tưởng theo dịp.' });
+    }
+});
+
+// Lưu bản chỉnh sửa trực tiếp của seller cho 1 ý tưởng mùa vụ
+router.post('/forecast/seasonal/idea-draft', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { idea_id, title, concept, price_vnd, tags } = req.body || {};
+        if (!idea_id || typeof idea_id !== 'string') {
+            return res.status(400).json({ error: 'invalid_param', field: 'idea_id' });
+        }
+        if (viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            const shopDoc = await Shop.findById(viewer.analysed_shop_id);
+            if (shopDoc) {
+                shopDoc.settings = shopDoc.settings || {};
+                shopDoc.settings.seasonal_preferences = shopDoc.settings.seasonal_preferences || {};
+                const drafts = shopDoc.settings.seasonal_preferences.idea_drafts || {};
+                drafts[idea_id] = {
+                    title: typeof title === 'string' ? title.trim() : '',
+                    concept: typeof concept === 'string' ? concept.trim() : '',
+                    price_vnd: Number(price_vnd) > 0 ? Number(price_vnd) : undefined,
+                    tags: Array.isArray(tags) ? tags.map((t: unknown) => String(t).trim()).filter(Boolean) : [],
+                    updated_at: new Date().toISOString(),
+                };
+                shopDoc.settings.seasonal_preferences.idea_drafts = drafts;
+                const saved: string[] = shopDoc.settings.seasonal_preferences.saved_ideas || [];
+                if (!saved.includes(idea_id)) {
+                    saved.push(idea_id);
+                    shopDoc.settings.seasonal_preferences.saved_ideas = saved;
+                }
+                shopDoc.markModified('settings');
+                await shopDoc.save();
+                return res.json({ success: true, idea_drafts: drafts, saved_ideas: saved });
+            }
+        }
+        return res.json({ success: true, idea_drafts: {} });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi lưu bản chỉnh sửa ý tưởng.' });
+    }
+});
+
+// Lưu đánh giá thành quả sau dịp của seller
+router.post('/forecast/seasonal/review', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { camp_id, rating, note } = req.body || {};
+        if (!camp_id || typeof camp_id !== 'string') {
+            return res.status(400).json({ error: 'invalid_param', field: 'camp_id' });
+        }
+        if (viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            const shopDoc = await Shop.findById(viewer.analysed_shop_id);
+            if (shopDoc) {
+                shopDoc.settings = shopDoc.settings || {};
+                shopDoc.settings.seasonal_preferences = shopDoc.settings.seasonal_preferences || {};
+                const reviews = shopDoc.settings.seasonal_preferences.occasion_reviews || {};
+                reviews[camp_id] = {
+                    rating: typeof rating === 'string' ? rating : 'neutral',
+                    note: typeof note === 'string' ? note.trim() : '',
+                    updated_at: new Date().toISOString(),
+                };
+                shopDoc.settings.seasonal_preferences.occasion_reviews = reviews;
+                shopDoc.markModified('settings');
+                await shopDoc.save();
+                return res.json({ success: true, occasion_reviews: reviews });
+            }
+        }
+        return res.json({ success: true, occasion_reviews: {} });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi lưu đánh giá thành quả.' });
+    }
+});
+
+// Cập nhật tiến độ checklist mốc thời gian (lưu trực tiếp vào settings gian hàng)
+router.post('/forecast/seasonal/milestone', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { milestone_idx, is_done, camp_id } = req.body;
+        if (typeof milestone_idx !== 'number') {
+            return res.status(400).json({ error: 'invalid_param', field: 'milestone_idx' });
+        }
+        if (viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            const shopDoc = await Shop.findById(viewer.analysed_shop_id);
+            if (shopDoc) {
+                shopDoc.settings = shopDoc.settings || {};
+                shopDoc.settings.seasonal_preferences = shopDoc.settings.seasonal_preferences || {};
+                const currentMilestones = shopDoc.settings.seasonal_preferences.checked_milestones || {};
+                const key = camp_id ? `${camp_id}_${milestone_idx}` : String(milestone_idx);
+                currentMilestones[key] = Boolean(is_done);
+                shopDoc.settings.seasonal_preferences.checked_milestones = currentMilestones;
+                shopDoc.markModified('settings');
+                await shopDoc.save();
+                return res.json({ success: true, checked_milestones: currentMilestones });
+            }
+        }
+        return res.json({ success: true, checked_milestones: { [milestone_idx]: Boolean(is_done) } });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi cập nhật tiến độ mốc.' });
+    }
+});
+
 for (const route of ROUTES) {
     router[route.method](route.path, async (req: AuthenticatedRequest, res: Response) => {
         try {
@@ -365,7 +481,7 @@ for (const route of ROUTES) {
             // Phản hồi thành công giữ nguyên vỏ {data, meta, error} của hợp đồng AI và gắn thêm
             // `viewer`, để mọi màn hình biết đang xem shop thật hay shop mẫu.
             if (result.status < 400 && result.body && result.body.data && route.path === '/forecast/seasonal') {
-                await enrichSeasonalData(result.body.data, req, viewer);
+                await SeasonalAnalyticsService.enrichSeasonalData(result.body.data, req, viewer);
             }
 
             const payload = result.status < 400 && result.body && typeof result.body === 'object'

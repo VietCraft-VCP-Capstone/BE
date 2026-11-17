@@ -50,15 +50,15 @@ export interface IShop extends Document {
 }
 
 const BankInfoSchema = new Schema<IBankInfo>({
-    bank_code: { type: String, required: true },
-    account_number: { type: String, required: true },
-    account_holder: { type: String, required: true }
+    bank_code: { type: String, required: false },
+    account_number: { type: String, required: false },
+    account_holder: { type: String, required: false }
 }, { _id: false });
 
 const PrinterPartnerSchema = new Schema<IPrinterPartner>({
     printer_id: { type: String },
-    printer_name: { type: String, required: true },
-    api_url: { type: String, required: true },
+    printer_name: { type: String, required: false },
+    api_url: { type: String, required: false },
     api_key: { type: String },
     seller_printing_email: { type: String },
     webhook_secret: { type: String },

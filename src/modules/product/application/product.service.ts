@@ -514,7 +514,7 @@ export class ProductsService {
             size: v.size,
             material: v.material,
             mockup_image: v.mockup_image,
-            base_cost: mongoose.Types.Decimal128.fromString(((v.base_cost ?? (v.price! * 0.6)) || 0).toString()),
+            base_cost: mongoose.Types.Decimal128.fromString((Number(v.base_cost) || 0).toString()),
             retail_price: mongoose.Types.Decimal128.fromString((v.price || 0).toString()),
             stock_quantity: v.stock ?? 100,
             is_active: true,
@@ -1675,7 +1675,9 @@ export class ProductsService {
                 const netPrice = Number(payload.price);
                 const grossPrice = withCommission(netPrice, await ProductsService.resolveProductCommission(mp));
                 updates.retail_price = mongoose.Types.Decimal128.fromString(grossPrice.toString());
-                updates.base_cost = mongoose.Types.Decimal128.fromString((netPrice * 0.7).toFixed(0));
+                if ((payload as any).base_cost !== undefined) {
+                    updates.base_cost = mongoose.Types.Decimal128.fromString(Number((payload as any).base_cost || 0).toFixed(0));
+                }
             }
             if (payload.stock !== undefined) updates.stock_quantity = Number(payload.stock);
             if (payload.sku !== undefined) updates.sku = payload.sku;
