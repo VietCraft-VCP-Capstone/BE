@@ -80,8 +80,6 @@ export class AiGatewayService {
         // fetch ném lỗi nếu GET kèm body; router luôn có req.body = {} nên chỉ gửi body cho POST/DELETE.
         const guiBody = options.body !== undefined && options.method !== 'GET';
         if (guiBody) headers['Content-Type'] = 'application/json';
-        const hasBody = Boolean(options.body && Object.keys(options.body).length > 0 && options.method !== 'GET');
-        if (hasBody) headers['Content-Type'] = 'application/json';
 
         const timeoutMs = options.timeoutMs
             ?? (process.env.AI_TIMEOUT_MS
@@ -93,7 +91,6 @@ export class AiGatewayService {
                 method: options.method,
                 headers,
                 body: guiBody ? JSON.stringify(options.body) : undefined,
-                body: hasBody ? JSON.stringify(options.body) : undefined,
                 signal: AbortSignal.timeout(timeoutMs),
             });
             const text = await response.text();
