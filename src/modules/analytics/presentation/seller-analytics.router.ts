@@ -38,7 +38,6 @@ const ROUTES: GatewayRoute[] = [
     { method: 'post', path: '/listings/:id/quality/audit', ai: p => `/api/analytics/listings/${p.id}/quality/audit` },
     { method: 'post', path: '/listings/:id/quality/recheck', ai: p => `/api/analytics/listings/${p.id}/quality/recheck` },
     { method: 'get', path: '/alerts', ai: () => '/api/notifications/alerts', query: ['period'] },
-    { method: 'get', path: '/categories', ai: () => '/api/analytics/shop/categories/revenue', query: ['timeRange'] },
     { method: 'get', path: '/money', ai: () => '/api/analytics/shop/money', query: ['timeRange'] },
     { method: 'get', path: '/money/advice', ai: () => '/api/analytics/shop/money/advice', query: ['timeRange'] },
     { method: 'get', path: '/competitors', ai: () => '/api/analytics/competitors', query: ['categoryId'] },
@@ -52,11 +51,7 @@ const ROUTES: GatewayRoute[] = [
     // Đúng dạng SRS 3.9.5; bản nhận body ở trên giữ cho client cũ.
     { method: 'delete', path: '/competitor-tracking/:shopId', ai: p => `/api/analytics/competitor-tracking/${p.shopId}`, forwardShopIdBody: true },
     // Dự báo (SRS 3.10)
-    { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window'] },
     { method: 'get', path: '/forecast/seasonal', ai: () => '/api/analytics/forecast/seasonal', query: ['categoryId', 'category_slug', 'campaign_id', 'campaignId', 'keyword'] },
-    { method: 'get', path: '/forecast/niches', ai: () => '/api/analytics/forecast/niches', query: ['categoryId'] },
-    { method: 'get', path: '/forecast/radar', ai: () => '/api/analytics/forecast/radar' },
-    { method: 'get', path: '/forecast/recommendations', ai: () => '/api/analytics/forecast/recommendations' },
     // Gợi ý sản phẩm thông minh (F42)
     { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'productType', 'keywords', 'blankCost', 'material'] },
     { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion' },
