@@ -176,7 +176,7 @@ Yêu cầu trả về JSON array đúng 3 phần tử:
             const res = await axios.post(
                 url,
                 { contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } },
-                { timeout: 8000 }
+                { timeout: 15000 }
             );
             const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
             const parsed = rawText ? JSON.parse(rawText) : null;
@@ -208,7 +208,7 @@ Yêu cầu trả về JSON array đúng 3 phần tử:
             // Fallback an toàn về bản phác thảo tổng hợp từ số liệu thật
         }
         const fb = buildFallbackIdeas();
-        SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: fb, expiresAt: Date.now() + 600 * 1000 });
+        SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: fb, expiresAt: Date.now() + 60 * 1000 });
         return fb;
     }
 
@@ -261,7 +261,7 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
                     contents: [{ parts: [{ text: prompt }] }],
                     generationConfig: { responseMimeType: 'application/json' },
                 },
-                { timeout: 2000 }
+                { timeout: 12000 }
             );
             const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
             if (!rawText) return null;
@@ -790,9 +790,9 @@ Yêu cầu nghiệp vụ:
             ? Math.min(0.40, Math.max(0.15, Math.round(shopRealCtr * 1.05 * 1000) / 1000))
             : benchmarkCtr;
 
-        const targetAddCart = Math.max(actualAddCart, Math.round(targetOrders / targetOrderRate));
-        const targetViews = Math.max(actualViews, Math.round(targetAddCart / targetCartRate));
-        const targetReach = Math.max(actualReach, Math.round(targetViews / targetCtr));
+        const targetAddCart = Math.max(1, Math.round(targetOrders / targetOrderRate));
+        const targetViews = Math.max(1, Math.round(targetAddCart / targetCartRate));
+        const targetReach = Math.max(1, Math.round(targetViews / targetCtr));
 
         const targetCtrPct = Math.round(targetCtr * 1000) / 10;
         const targetCartRatePct = Math.round(targetCartRate * 1000) / 10;
@@ -1582,8 +1582,8 @@ Yêu cầu nghiệp vụ:
                     badgeText = daysToTrac <= 0 ? 'Chuẩn bị nguồn hàng' : `Bắt đầu sau ${daysToTrac} ngày`;
                 }
 
-                // 1. GỌI TRỰC TIẾP GEMINI AI NẾU CÓ KEY (Ưu tiên các dịp đang hiển thị trong thẻ)
-                const isTargetCamp = data.all_campaigns.indexOf(camp) < 3 || camp.id === (data.active_campaign?.id || '');
+                // 1. GỌI TRỰC TIẾP GEMINI AI NẾU CÓ KEY (Chỉ gọi cho dịp đang chọn để tiết kiệm quota)
+                const isTargetCamp = camp.id === (data.active_campaign?.id || '');
                 const geminiRec = isTargetCamp ? await SeasonalAnalyticsService.fetchGeminiSeasonalAdvisory({
                     campName,
                     eventYear: evYear,
