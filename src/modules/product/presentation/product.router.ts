@@ -136,7 +136,8 @@ router.get('/meta/trending-keywords', async (req, res) => {
 
 router.get('/meta/tags', async (req, res) => {
     try {
-        res.json(await ProductsService.listTags());
+        const categoryId = typeof req.query.categoryId === 'string' ? req.query.categoryId : undefined;
+        res.json(await ProductsService.listTags(categoryId));
     } catch (error: any) {
         res.status(500).json({ error: error.message });
     }

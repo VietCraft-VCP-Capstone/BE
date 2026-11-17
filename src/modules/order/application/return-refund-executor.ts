@@ -1,4 +1,4 @@
-import { executeVnpayRefund } from '../../payment/application/refund-runtime';
+import { executeRefund } from '../../payment/application/refund-runtime';
 import { ReturnRefundExecution } from '../infrastructure/models/return-refund-execution.model';
 import { ReturnRequest } from '../infrastructure/models/return-request.model';
 import type { ReturnRequestData } from '../infrastructure/repositories/return-request.repository';
@@ -13,7 +13,7 @@ export async function executeReturnRefund(request: ReturnRequestData): Promise<{
     let status: ReturnRefundExecutionStatus;
     let error = '';
     try {
-        const result = await executeVnpayRefund({ orderId: request.order_id, businessKey: request.id, amount: linked.amount_minor,
+        const result = await executeRefund({ orderId: request.order_id, businessKey: request.id, amount: linked.amount_minor,
             reason: `Hoan tien mon hang ${request.order_item_id}`, createdBy: request.refund_admin_confirmed_by || 'VietCraft' });
         status = result.status;
         error = result.error || '';

@@ -62,6 +62,23 @@ export interface IAuditEntry {
     note?: string;
 }
 
+/**
+ * Kết quả đối chiếu thông tin seller nhập với kết quả quét OCR CCCD (tính lúc nộp hồ sơ).
+ * Không chặn việc nộp (OCR có thể đọc sai) — để admin biết hồ sơ nào cần soát kỹ.
+ * Chỉ lưu TÊN trường bị lệch, không lưu giá trị OCR.
+ */
+export type OcrCheckStatus = 'MATCH' | 'MISMATCH' | 'LOW_QUALITY' | 'NOT_SCANNED';
+
+export interface IOcrCheck {
+    status: OcrCheckStatus;
+    mismatches: string[];
+    front_valid?: boolean;
+    front_confidence?: number;
+    back_valid?: boolean;
+    back_confidence?: number;
+    checked_at: Date;
+}
+
 export interface ISellerApplication extends Document {
     user_id: mongoose.Types.ObjectId;
     seller_type: SellerType;
@@ -80,6 +97,7 @@ export interface ISellerApplication extends Document {
         rejection_reason?: string;
     };
     audit_trail: IAuditEntry[];
+    ocr_check?: IOcrCheck;
     created_at: Date;
     updated_at: Date;
 }
@@ -143,6 +161,16 @@ const AuditEntrySchema = new Schema<IAuditEntry>({
     note: { type: String },
 }, { _id: false });
 
+const OcrCheckSchema = new Schema<IOcrCheck>({
+    status: { type: String, enum: ['MATCH', 'MISMATCH', 'LOW_QUALITY', 'NOT_SCANNED'], required: true },
+    mismatches: { type: [String], default: [] },
+    front_valid: { type: Boolean },
+    front_confidence: { type: Number },
+    back_valid: { type: Boolean },
+    back_confidence: { type: Number },
+    checked_at: { type: Date, default: Date.now },
+}, { _id: false });
+
 const SellerApplicationSchema = new Schema<ISellerApplication>({
     user_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     seller_type: {
@@ -171,6 +199,7 @@ const SellerApplicationSchema = new Schema<ISellerApplication>({
         rejection_reason: { type: String },
     },
     audit_trail: { type: [AuditEntrySchema], default: [] },
+    ocr_check: { type: OcrCheckSchema },
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });

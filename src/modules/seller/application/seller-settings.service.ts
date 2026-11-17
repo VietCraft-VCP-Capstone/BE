@@ -110,7 +110,7 @@ export class SellerSettingsService {
         if (!shop) {
             shop = await Shop.create({
                 owner_id: ownerId,
-                shop_name: user?.full_name ? `${user.full_name}'s Shop` : DEFAULT_SETTINGS.brand.storeName,
+                shop_name: user?.full_name ? `${user.full_name}'s Shop` : (DEFAULT_SETTINGS.brand.storeName || 'Gian hàng VietCraft'),
                 slug: await resolveUniqueSlug('', ownerId, sellerId.substring(18)),
                 description: DEFAULT_SETTINGS.brand.description,
                 logo: user?.avatar || DEFAULT_SETTINGS.brand.logoUrl,
@@ -224,7 +224,7 @@ export class SellerSettingsService {
         if (!shop) {
             shop = await Shop.create({
                 owner_id: ownerId,
-                shop_name: payload.brand?.storeName || 'My Shop',
+                shop_name: payload.brand?.storeName || 'Gian hàng VietCraft',
                 slug: await resolveUniqueSlug(payload.brand?.slug || '', ownerId, sellerId.substring(18)),
                 settings: {}
             });

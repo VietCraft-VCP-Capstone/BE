@@ -35,6 +35,8 @@ export interface IProduct extends Document {
     moderation_status: 'PENDING' | 'APPROVED' | 'REJECTED';
     rejection_reason?: string;
     is_hidden: boolean;
+    // 'SKU': seller khai bảng phân loại (mẫu × size, giá/kho riêng từng dòng) thay vì màu + chia đều kho.
+    variant_mode?: 'SKU';
     // POD: phôi in (id bên Printer) + cách đặt design lên phôi.
     blank_id?: string;
     printer_id?: string;
@@ -149,6 +151,7 @@ const ProductSchema = new Schema<IProduct>({
     },
     rejection_reason: { type: String },
     is_hidden: { type: Boolean, default: false },
+    variant_mode: { type: String, enum: ['SKU'] },
     blank_id: { type: String, index: true },
     printer_id: { type: String, index: true },
     printer_name: { type: String },
