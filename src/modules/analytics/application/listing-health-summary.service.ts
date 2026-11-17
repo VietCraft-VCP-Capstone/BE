@@ -27,7 +27,7 @@ export async function healthSummary(shopId: string, days: number): Promise<{ htt
     });
 
     if (!mongoose.Types.ObjectId.isValid(shopId)) {
-        return { httpStatus: 200, body: insufficient('Cần thiết lập gian hàng thật trước khi xem điểm sức khoẻ listing.', meta()) };
+        return { httpStatus: 200, body: insufficient('Cần thiết lập gian hàng thật trước khi xem điểm tối ưu sản phẩm.', meta()) };
     }
 
     const products = await Product.find({ shop_id: shopId, seed_ref: { $exists: false }, is_hidden: { $ne: true } }).select('_id').lean();
