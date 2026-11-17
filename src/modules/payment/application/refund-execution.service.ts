@@ -49,7 +49,7 @@ export class RefundExecutionService {
         if (!Number.isSafeInteger(input.amount) || input.amount <= 0) throw new RefundExecutionError('Số tiền hoàn phải là số nguyên VND lớn hơn 0.');
         const context = await this.repository.loadContext(input.orderId);
         if (context.simulated) throw new RefundExecutionError('Đơn mô phỏng không phát sinh hoàn tiền.', 422);
-        if (!['VNPAY', 'PAYOS'].includes(context.paymentMethod)) throw new RefundExecutionError('Phương thức này chưa tích hợp hoàn tiền tự động; tiền chưa được chuyển.', 422);
+        if (context.paymentMethod !== 'PAYOS') throw new RefundExecutionError('Phương thức này chưa tích hợp hoàn tiền tự động; tiền chưa được chuyển.', 422);
         if (context.paymentMethod === 'PAYOS' && !context.destination) throw new RefundExecutionError('Không xác định được tài khoản ngân hàng đã dùng để thanh toán; tiền chưa được chuyển.', 422);
         input = { ...input, orderId: context.orderId };
         const record = await this.repository.findOrCreate(input);

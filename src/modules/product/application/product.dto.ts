@@ -21,6 +21,15 @@ export interface ProductVariantDTO {
     mockupImage?: string;
 }
 
+/** 1 dòng bảng phân loại: mẫu (set/lẻ/combo) × size. `price` là giá người bán nhận, chưa cộng hoa hồng. */
+export interface ProductSkuInputDTO {
+    option: string;
+    image?: string;
+    size?: string;
+    price: number;
+    stock: number;
+}
+
 export interface ShopInfoDTO {
     id: string;
     name: string;
@@ -48,6 +57,7 @@ export interface ProductItemResponseDTO {
     engagementTrend: number[];
     inventoryTrends: InventoryTrendPointDTO[];
     variants?: ProductVariantDTO[];
+    variantMode?: 'SKU';
     shopInfo?: ShopInfoDTO;
     sellerId?: string;
     tags?: string[];
@@ -81,6 +91,7 @@ export interface ProductFormDataDTO {
     images?: string[];
     colors?: ProductColorVariantDTO[];
     sizes?: string[];
+    skus?: ProductSkuInputDTO[];
 }
 
 export interface ProductFilterQueryDTO {

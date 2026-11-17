@@ -3,6 +3,7 @@ import { Coupon, ICoupon, CouponDiscountType } from '../infrastructure/models/co
 import { Shop } from '../../product/infrastructure/models/shop.model';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
+import { calcCouponDiscount } from './coupon-math';
 
 export const dec = (n: number) => mongoose.Types.Decimal128.fromString(Math.round(n || 0).toString());
 export const num = (v: any) => (v ? Number(v.toString()) : 0);
@@ -201,51 +202,7 @@ export class PromotionService {
 
         const discountVal = num(coupon.discount_value);
         const maxDiscount = num(coupon.max_discount_amount);
-        let discount = 0;
-        let target: 'PRODUCT' | 'SHIPPING' = 'PRODUCT';
-
-        switch (coupon.discount_type) {
-            case 'PERCENTAGE': {
-                const rawDiscount = eligibleSubtotal * (discountVal / 100);
-                const cappedDiscount = maxDiscount > 0 ? Math.min(rawDiscount, maxDiscount) : rawDiscount;
-                discount = Math.min(Math.round(cappedDiscount), eligibleSubtotal);
-                target = 'PRODUCT';
-                break;
-            }
-            case 'FIXED_AMOUNT': {
-                discount = Math.min(Math.round(discountVal), eligibleSubtotal);
-                target = 'PRODUCT';
-                break;
-            }
-            case 'FREE_SHIPPING': {
-                const maxShipDiscount = discountVal > 0 ? discountVal : shippingFee;
-                discount = Math.min(Math.round(maxShipDiscount), shippingFee);
-                target = 'SHIPPING';
-                break;
-            }
-            case 'FLASH_SALE': {
-                if (discountVal <= 100) {
-                    const raw = eligibleSubtotal * (discountVal / 100);
-                    const capped = maxDiscount > 0 ? Math.min(raw, maxDiscount) : raw;
-                    discount = Math.min(Math.round(capped), eligibleSubtotal);
-                } else {
-                    discount = Math.min(Math.round(discountVal), eligibleSubtotal);
-                }
-                target = 'PRODUCT';
-                break;
-            }
-            case 'BUNDLE': {
-                if (discountVal <= 100) {
-                    const raw = eligibleSubtotal * (discountVal / 100);
-                    const capped = maxDiscount > 0 ? Math.min(raw, maxDiscount) : raw;
-                    discount = Math.min(Math.round(capped), eligibleSubtotal);
-                } else {
-                    discount = Math.min(Math.round(discountVal), eligibleSubtotal);
-                }
-                target = 'PRODUCT';
-                break;
-            }
-        }
+        const { discount, target } = calcCouponDiscount(coupon.discount_type, discountVal, maxDiscount, eligibleSubtotal, shippingFee);
 
         return {
             valid: true,
@@ -392,7 +349,7 @@ export class PromotionService {
             const { Order } = await import('../../order/infrastructure/models/order.model');
             const existingOrder = await Order.findOne({
                 buyer_id: new mongoose.Types.ObjectId(buyerId),
-                coupon_code: cleanCode,
+                $or: [{ coupon_code: cleanCode }, { shipping_coupon_code: cleanCode }],
                 order_status: { $ne: 'CANCELLED' }
             }).select('_id').lean();
 

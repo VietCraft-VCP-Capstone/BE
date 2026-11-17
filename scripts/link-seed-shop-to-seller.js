@@ -221,7 +221,7 @@ const DANH_MUC = {
             buyer_id: buyer._id,
             shop_id: shop._id,
             order_code: `VC-SEED-${SEED_SHOP.replace('shp_', '')}-${String(i + 1).padStart(3, '0')}`,
-            payment_method: i % 3 === 0 ? 'COD' : 'VNPAY',
+            payment_method: i % 3 === 0 ? 'COD' : 'PAYOS',
             payment_status: 'PAID',
             order_status: 'DELIVERED',
             shipping_address: { ...diaChi, recipient_name: buyer.full_name || diaChi.recipient_name },

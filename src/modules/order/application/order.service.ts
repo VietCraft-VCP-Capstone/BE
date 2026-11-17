@@ -8,6 +8,8 @@ import { Design } from "../../design/infrastructure/models/design.model";
 import { notificationService } from "../../notification";
 import { dispatchToPrinter } from "./printer-dispatch.service";
 import { PromotionService } from "../../promotion/application/promotion.service";
+import { computeOrderTotals } from "../../promotion/application/coupon-math";
+import { reserveVariantStock, releaseVariantStock } from "./stock-reservation";
 import { Review } from "../infrastructure/models/review.model";
 import { OrderResponse, DEFAULT_SHIPPING_FEE, PAYMENT_METHODS, SHIPPING_CARRIERS, } from "../types";
 import { platformFinanceService } from "../../admin/application/platform-finance.service";
@@ -228,36 +230,7 @@ export class OrdersService {
       });
     }
     const shippingCalc = await OrdersService.resolveShippingFee(shopId, address);
-    let shippingFee = shippingCalc.shippingFee;
-    let discount = 0;
-    const couponCode = payload.couponCode || payload.coupon_code;
-    let isPlatformCoupon = true;
-    let cleanCouponCode: string | undefined;
-
-    if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
-      const applyResult = await PromotionService.validateAndApply(
-        couponCode,
-        subtotal,
-        shippingFee,
-        shopId || undefined,
-        undefined,
-        orderItems.map(it => ({
-          productId: it.product_id.toString(),
-          price: num(it.retail_price),
-          quantity: it.quantity
-        }))
-      );
-
-      if (!applyResult.valid) {
-        throw new Error(applyResult.message || 'Mã giảm giá không hợp lệ.');
-      }
-
-      discount = applyResult.discount;
-      isPlatformCoupon = applyResult.coupon?.is_platform ?? true;
-      cleanCouponCode = couponCode.trim().toUpperCase();
-
-      await PromotionService.claimUsage(cleanCouponCode, buyerId);
-    }
+    const shippingFee = shippingCalc.shippingFee;
 
     let commissionRate = 0.10;
     let minOrderFee = 10000;
@@ -274,24 +247,50 @@ export class OrdersService {
 
     const totalPrintingCost = orderItems.reduce((acc, it) => acc + (num(it.base_cost) * it.quantity), 0);
 
-    const sellerPayoutAmount = isPlatformCoupon
-      ? Math.max(0, subtotal - platformFee)
-      : Math.max(0, subtotal - discount - platformFee);
-
     const gateway = String(
       payload.paymentGateway || payload.payment_method || "COD",
     ).toUpperCase();
     const paymentMethod = PAYMENT_METHODS.includes(gateway) ? gateway : "COD";
 
     if (hasPodItem && paymentMethod === "COD") {
-      // Hoàn lại lượt dùng voucher nếu đơn bị reject ở bước này
-      if (cleanCouponCode) {
-        await PromotionService.releaseUsage(cleanCouponCode).catch(() => { });
-      }
       throw new Error(
-        "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn VNPAY hoặc PAYOS.",
+        "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn payOS.",
       );
     }
+
+    // 2 ô mã như Shopee: couponCode = mã giảm tiền hàng, shippingCouponCode = mã giảm phí vận chuyển.
+    const couponItems = orderItems.map(it => ({
+      productId: it.product_id.toString(),
+      price: num(it.retail_price),
+      quantity: it.quantity
+    }));
+    const applyCoupon = async (raw: unknown, slot: 'PRODUCT' | 'SHIPPING') => {
+      if (typeof raw !== 'string' || !raw.trim()) return null;
+      const res = await PromotionService.validateAndApply(raw, subtotal, shippingFee, shopId || undefined, undefined, couponItems);
+      if (!res.valid) throw new Error(res.message || 'Mã giảm giá không hợp lệ.');
+      if (res.target !== slot) {
+        throw new Error(slot === 'SHIPPING'
+          ? `Mã ${raw.trim().toUpperCase()} không phải mã giảm phí vận chuyển.`
+          : `Mã ${raw.trim().toUpperCase()} là mã giảm phí vận chuyển, hãy chọn ở ô Ưu đãi phí vận chuyển.`);
+      }
+      return { code: raw.trim().toUpperCase(), discount: res.discount, isPlatform: res.coupon?.is_platform ?? true };
+    };
+    const productCoupon = await applyCoupon(payload.couponCode || payload.coupon_code, 'PRODUCT');
+    const shippingCoupon = await applyCoupon(payload.shippingCouponCode || payload.shipping_coupon_code, 'SHIPPING');
+    const totals = computeOrderTotals(subtotal, shippingFee, productCoupon?.discount ?? 0, shippingCoupon?.discount ?? 0);
+
+    // Phần giảm do shop tự tài trợ (voucher shop) trừ vào tiền người bán nhận; voucher sàn thì sàn chịu.
+    const shopFunded = (productCoupon && !productCoupon.isPlatform ? totals.productDiscount : 0)
+      + (shippingCoupon && !shippingCoupon.isPlatform ? totals.shippingDiscount : 0);
+    const sellerPayoutAmount = Math.max(0, subtotal - shopFunded - platformFee);
+
+    // Giữ kho trước, rồi mới giữ lượt voucher; bước nào hỏng thì hoàn lại những gì đã giữ.
+    await reserveVariantStock(orderItems);
+    const claimed: string[] = [];
+    const rollback = async () => {
+      await releaseVariantStock(orderItems).catch(err => console.error('[STOCK] Lỗi hoàn tồn kho:', err?.message || err));
+      for (const code of claimed) await PromotionService.releaseUsage(code).catch(() => { });
+    };
 
     const carrierInput = String(
       payload.shippingProvider || "ghn",
@@ -302,55 +301,58 @@ export class OrdersService {
 
     const now = new Date();
     const isPodOrder = Boolean(hasPodItem);
-    const order = await OrderModel.create({
-      buyer_id: buyerObjectId,
-      shop_id: shopId,
-      order_code: `VC-${Date.now()}-${Math.floor(Math.random() * 9000 + 1000)}`,
-      payment_method: paymentMethod,
-      payment_status: "PENDING",
-      order_status: "ORDERED",
-      is_pod: isPodOrder,
-      order_type: isPodOrder ? "POD" : "READY_TO_SHIP",
-      seller_approval_status: "PENDING_APPROVAL",
-      fulfillment_status: isPodOrder ? "PENDING_APPROVAL" : "UNFULFILLED",
-      shipping_address: {
-        recipient_name: address.recipient_name,
-        phone: address.phone,
-        address_detail: address.address_detail,
-        province_id: address.province_id || "79",
-        district_id: address.district_id || "760",
-        ward_code: address.ward_code || "26734",
-      },
-      shipping_details: {
-        carrier,
-        tracking_number: "",
-        shipping_fee: dec(shippingFee),
-      },
-      items: orderItems,
-      financial_breakdown: {
-        subtotal: dec(subtotal),
-        shipping_fee: dec(shippingFee),
-        coupon_discount: dec(discount),
-        platform_fee: dec(platformFee),
-        seller_payout_amount: dec(sellerPayoutAmount),
-        commission_rate: commissionRate,
-        total_printing_cost: dec(totalPrintingCost),
-      },
-      coupon_code: cleanCouponCode || null,
-      status_history: [
-        { status: "ORDERED", changed_at: now, note: "Đơn được tạo" },
-      ],
-      order_hour_of_week: now.getDay() * 24 + now.getHours(),
-    });
-
-    // Trừ tồn kho biến thể tương ứng
-    for (const it of orderItems) {
-      if (it.variant_id) {
-        await ProductVariant.updateOne(
-          { _id: it.variant_id },
-          { $inc: { stock_quantity: -it.quantity } }
-        ).catch(err => console.error('[STOCK] Lỗi trừ tồn kho khi tạo đơn:', err?.message || err));
+    let order;
+    try {
+      for (const c of [productCoupon, shippingCoupon]) {
+        if (!c) continue;
+        await PromotionService.claimUsage(c.code, buyerId);
+        claimed.push(c.code);
       }
+      order = await OrderModel.create({
+        buyer_id: buyerObjectId,
+        shop_id: shopId,
+        order_code: `VC-${Date.now()}-${Math.floor(Math.random() * 9000 + 1000)}`,
+        payment_method: paymentMethod,
+        payment_status: "PENDING",
+        order_status: "ORDERED",
+        is_pod: isPodOrder,
+        order_type: isPodOrder ? "POD" : "READY_TO_SHIP",
+        seller_approval_status: "PENDING_APPROVAL",
+        fulfillment_status: isPodOrder ? "PENDING_APPROVAL" : "UNFULFILLED",
+        shipping_address: {
+          recipient_name: address.recipient_name,
+          phone: address.phone,
+          address_detail: address.address_detail,
+          province_id: address.province_id || "79",
+          district_id: address.district_id || "760",
+          ward_code: address.ward_code || "26734",
+        },
+        shipping_details: {
+          carrier,
+          tracking_number: "",
+          shipping_fee: dec(shippingFee),
+        },
+        items: orderItems,
+        financial_breakdown: {
+          subtotal: dec(subtotal),
+          shipping_fee: dec(shippingFee),
+          coupon_discount: dec(totals.couponDiscount),
+          shipping_discount: dec(totals.shippingDiscount),
+          platform_fee: dec(platformFee),
+          seller_payout_amount: dec(sellerPayoutAmount),
+          commission_rate: commissionRate,
+          total_printing_cost: dec(totalPrintingCost),
+        },
+        coupon_code: productCoupon?.code || null,
+        shipping_coupon_code: shippingCoupon?.code || null,
+        status_history: [
+          { status: "ORDERED", changed_at: now, note: "Đơn được tạo" },
+        ],
+        order_hour_of_week: now.getDay() * 24 + now.getHours(),
+      });
+    } catch (err) {
+      await rollback();
+      throw err;
     }
 
     // Phát thông báo Realtime cho Người mua & Người bán
@@ -395,6 +397,11 @@ export class OrdersService {
     if (order.coupon_code) {
       await PromotionService.releaseUsage(order.coupon_code).catch(err =>
         console.error('[COUPON] Lỗi hoàn lượt dùng voucher:', err?.message || err)
+      );
+    }
+    if (order.shipping_coupon_code) {
+      await PromotionService.releaseUsage(order.shipping_coupon_code).catch(err =>
+        console.error('[COUPON] Lỗi hoàn lượt dùng voucher vận chuyển:', err?.message || err)
       );
     }
     if (Array.isArray(order.items)) {
@@ -482,9 +489,9 @@ export class OrdersService {
     // Hoàn lại kho và voucher
     await OrdersService.restoreOrderStockAndCoupon(order);
 
-    // Tự động kích hoạt lệnh hoàn tiền qua PayOS Payout / VNPay Refund
+    // Tự động kích hoạt lệnh hoàn tiền qua PayOS Payout
     let refundMessageSuffix = '';
-    if (wasPaid && ['PAYOS', 'VNPAY'].includes(order.payment_method)) {
+    if (wasPaid && order.payment_method === 'PAYOS') {
       const refundAmount = Math.max(0,
         num(order.financial_breakdown?.subtotal) +
         num(order.financial_breakdown?.shipping_fee) -
