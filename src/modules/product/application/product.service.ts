@@ -1047,11 +1047,27 @@ export class ProductsService {
 
     static async getFeaturedShops(): Promise<any[]> {
         return cacheService.getOrSet('vietcraft:shops:featured', async () => {
-            return Shop.find()
-                .select('shop_name slug logo banner average_rating listing_count')
-                .sort({ average_rating: -1, listing_count: -1 })
-                .limit(5)
-                .lean();
+            // Xếp theo đánh giá thật (điểm rồi số lượt); shop chưa có đánh giá chỉ lấp chỗ trống, theo số sản phẩm.
+            const LIMIT = 5;
+            const rated = await mongoose.connection.collection('reviews').aggregate([
+                { $match: { is_reported: { $ne: true } } },
+                { $group: { _id: '$shop_id', avg: { $avg: '$rating' }, n: { $sum: 1 } } },
+                { $sort: { avg: -1, n: -1 } },
+                { $limit: LIMIT * 4 },
+            ]).toArray();
+            const select = 'shop_name slug logo banner listing_count';
+            const ratedShops = await Shop.find({ _id: { $in: rated.map(r => r._id) } }).select(select).lean();
+            const byId = new Map(ratedShops.map(s => [String(s._id), s]));
+            const top = rated
+                .filter(r => byId.has(String(r._id)))
+                .slice(0, LIMIT)
+                .map(r => ({ ...byId.get(String(r._id)), average_rating: Number(r.avg.toFixed(1)), rating_count: r.n }));
+            if (top.length < LIMIT) {
+                const rest = await Shop.find({ _id: { $nin: rated.map(r => r._id) } })
+                    .select(select).sort({ listing_count: -1 }).limit(LIMIT - top.length).lean();
+                top.push(...rest.map(s => ({ ...s, average_rating: 0, rating_count: 0 })));
+            }
+            return top;
         }, 600);
     }
 
