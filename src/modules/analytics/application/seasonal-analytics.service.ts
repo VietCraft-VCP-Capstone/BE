@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import axios from 'axios';
+import { llmJsonText } from './llm-json';
 import { AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { AnalyticsViewer } from './ai-gateway.service';
 import { Product } from '../../product/infrastructure/models/product.model';
@@ -172,13 +172,6 @@ export class SeasonalAnalyticsService {
             return redisCached;
         }
 
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-            const fb = buildFallbackIdeas();
-            SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: fb, expiresAt: Date.now() + 600 * 1000 });
-            return fb;
-        }
-
         try {
             const prompt = `Bạn là chuyên gia phát triển sản phẩm TMĐT. Hãy đọc BẢN PHÁC THẢO DỮ LIỆU THẬT dưới đây và tổng hợp đúng 3 ý tưởng sản phẩm MỚI cho shop (phải bám sát SỐ LIỆU TOÀN NGÀNH CỦA DỊP ${params.campName} đồng thời mang PHONG CÁCH RIÊNG của shop; KHÔNG tự bịa thêm số liệu ngoài bản phác thảo):
 
@@ -204,13 +197,7 @@ Yêu cầu trả về JSON array đúng 3 phần tử:
     "why_it_fits_shop": "Nêu rõ cả số liệu toàn ngành của dịp ${params.campName} lẫn sự phù hợp với phong cách shop (1 câu)"
   }
 ]`;
-            const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
-            const res = await axios.post(
-                url,
-                { contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } },
-                { timeout: 15000, headers: { 'x-goog-api-key': apiKey } }
-            );
-            const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const rawText = await llmJsonText(prompt, 15000);
             const parsed = rawText ? JSON.parse(rawText) : null;
             if (Array.isArray(parsed) && parsed.length >= 2) {
                 const ideas: ShopSeasonalIdea[] = parsed.slice(0, 3).map((item: any, idx: number) => {
@@ -261,9 +248,6 @@ Yêu cầu trả về JSON array đúng 3 phần tử:
         voucherShop?: number | null;
         voucherInd?: number | null;
     }): Promise<TraitActionItem[] | null> {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) return null;
-
         const cacheKey = `ta_${params.campId}_${params.catName}_${params.ordersGrowth}_${params.spendingGrowth}_${params.comboShop}_${params.voucherShop}`;
         const cached = SeasonalAnalyticsService.traitActionsCache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) {
@@ -286,16 +270,7 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
   {"priority":"Vận hành","title":"... (gắn ngày ${params.peak3DaysStr})","desc":"... (1 câu ngắn)","traitKey":"peakClustering"}
 ]`;
 
-            const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
-            const res = await axios.post(
-                url,
-                {
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { responseMimeType: 'application/json' },
-                },
-                { timeout: 12000, headers: { 'x-goog-api-key': apiKey } }
-            );
-            const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const rawText = await llmJsonText(prompt, 12000);
             if (!rawText) return null;
             const parsed = JSON.parse(rawText);
             if (Array.isArray(parsed) && parsed.length >= 2) {
@@ -334,9 +309,6 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
         cutStr: string;
         evStr: string;
     }): Promise<GeminiAdvisoryResult | null> {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) return null;
-
         const cacheKey = `${params.campName}_${params.eventYear}_${params.catName}_${params.matchCount}_${params.campSavedCount}_${params.campOrdersCount}_${params.isUrgent ? 'urg' : params.currentPhase}`;
         const cached = SeasonalAnalyticsService.geminiAdvisoryCache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) {
@@ -367,17 +339,7 @@ Yêu cầu nghiệp vụ:
 3. Tuyệt đối KHÔNG nhắc đến từ "AI", không viết lý thuyết chung chung sáo rỗng.
 4. Trả về đúng định dạng JSON: {"title": "...", "advice": "..."}`;
 
-            const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
-            const res = await axios.post(
-                url,
-                {
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { responseMimeType: 'application/json' }
-                },
-                { timeout: 2000, headers: { 'x-goog-api-key': apiKey } }
-            );
-
-            const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const rawText = await llmJsonText(prompt, 6000);
             if (!rawText) return null;
 
             const parsed = JSON.parse(rawText);
@@ -1098,16 +1060,13 @@ Yêu cầu nghiệp vụ:
             const isTet = campId.includes('tet');
 
             if (isMegaSale) {
-                // Đại hội Siêu Sale: 80% khách săn sale để tự tiêu dùng / tích trữ
                 defaultGiftPct = 20;
             } else if (isValentine) {
                 // Lễ tình nhân: Mua tặng chiếm ưu thế
                 defaultGiftPct = ['phu-kien', 'sac-dep', 'thu-cong-qua-tang'].includes(detectedSlug) ? 80 : 65;
             } else if (isWomenDay) {
-                // Quốc tế Phụ nữ / Phụ nữ VN: Mỹ phẩm, phụ kiện quà tặng chiếm 75%, thời trang nữ 60%
                 defaultGiftPct = ['sac-dep', 'phu-kien', 'thu-cong-qua-tang'].includes(detectedSlug) ? 75 : 60;
             } else if (isTeachersDay) {
-                // Tri ân 20/11: Quà tặng tri ân
                 defaultGiftPct = 75;
             } else if (isNoel) {
                 // Giáng sinh
@@ -1115,19 +1074,14 @@ Yêu cầu nghiệp vụ:
             } else if (isTet) {
                 // Tết Nguyên Đán: Khách hàng mua sắm theo đặc thù từng ngành hàng TMĐT:
                 if (detectedSlug === 'thoi-trang') {
-                    // Thời trang: Sắm quần áo mới diện Tết cho bản thân & gia đình là 75%
                     defaultGiftPct = 25;
                 } else if (detectedSlug === 'dien-tu') {
-                    // Điện tử & Công nghệ: Tự nâng cấp thiết bị cá nhân (80% tự dùng, 20% biếu tặng)
                     defaultGiftPct = 20;
                 } else if (detectedSlug === 'me-be') {
-                    // Mẹ & Bé: Sắm đồ Tết cho con (85% tự dùng gia đình, 15% quà tặng)
                     defaultGiftPct = 15;
                 } else if (detectedSlug === 'sac-dep') {
-                    // Sắc đẹp / Mỹ phẩm: 65% tự làm đẹp đón Tết, 35% set quà biếu
                     defaultGiftPct = 35;
                 } else if (detectedSlug === 'nha-cua-doi-song') {
-                    // Nhà cửa & Đời sống: Dọn dẹp làm mới nhà 60%, quà biếu 40%
                     defaultGiftPct = 40;
                 } else if (detectedSlug === 'the-thao') {
                     defaultGiftPct = 20;
@@ -1136,12 +1090,10 @@ Yêu cầu nghiệp vụ:
                 } else if (detectedSlug === 'phu-kien') {
                     defaultGiftPct = 40;
                 } else if (detectedSlug === 'bach-hoa') {
-                    // Bách hóa, Giỏ quà Tết, Hạt mứt trà rượu: 55% quà biếu Tết, 45% tự dùng
                     defaultGiftPct = 55;
                 } else if (detectedSlug === 'thu-cong-qua-tang') {
                     defaultGiftPct = 65;
                 } else {
-                    // Ngành hàng khác / Tổng hợp: 30% mua tặng, 70% tự mua sắm tiêu dùng
                     defaultGiftPct = 30;
                 }
             }
@@ -1162,7 +1114,7 @@ Yêu cầu nghiệp vụ:
             sample_size: totalClassified,
             source_description: totalClassified >= 3
                 ? `Bóc tách từ ${totalClassified} đơn thực tế (${giftCount} đơn quà tặng, ${selfUseCount} đơn tự dùng)`
-                : `Dự báo thị hiếu ngành ${detectedName} dịp ${activeCamp?.name || 'mùa vụ'} (Chuẩn ngành TMĐT)`,
+                : `Ước tính theo quy ước ngành ${detectedName} dịp ${activeCamp?.name || 'mùa vụ'}, chưa phải số đo từ đơn thực tế`,
             top_reasons: sortedReasons
         };
 
@@ -1259,7 +1211,7 @@ Yêu cầu nghiệp vụ:
                 rule: 'Đơn hàng áp dụng voucher giảm giá hoặc phát sinh qua cổng chiến dịch sàn.',
                 checklist: [
                     'Đăng ký tham gia cổng Flash Sale và Mega Sale của sàn trước hạn chốt an toàn.',
-                    'Tạo mã giảm giá shop độc quyền (giảm 10-15k cho đơn từ 200k) kích thích chốt giỏ hàng.',
+                    'Tạo mã giảm giá riêng của shop cho đơn đạt mức tối thiểu để kích thích chốt giỏ hàng.',
                     'Thiết lập Deal sốc hoặc Mua kèm deal sốc để tối ưu giá trị trung bình đơn (AOV).'
                 ],
                 targetRatio: 0.25
