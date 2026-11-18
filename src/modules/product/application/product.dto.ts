@@ -35,6 +35,7 @@ export interface ShopInfoDTO {
     name: string;
     logo?: string;
     rating: number;
+    ratingCount: number;
 }
 
 export interface ProductItemResponseDTO {
