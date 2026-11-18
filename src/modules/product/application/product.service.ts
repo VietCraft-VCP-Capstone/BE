@@ -1047,12 +1047,19 @@ export class ProductsService {
 
     static async getFeaturedShops(): Promise<any[]> {
         return cacheService.getOrSet('vietcraft:shops:featured', async () => {
-            // Xếp theo đánh giá thật (điểm rồi số lượt); shop chưa có đánh giá chỉ lấp chỗ trống, theo số sản phẩm.
+            // Xếp theo điểm Bayes (C*m + n*avg)/(C + n): shop ít lượt bị kéo về điểm chung m của sàn,
+            // nên 1 lượt 5 sao không vượt shop nhiều lượt. Shop chưa có đánh giá chỉ lấp chỗ trống, theo số sản phẩm.
             const LIMIT = 5;
-            const rated = await mongoose.connection.collection('reviews').aggregate([
-                { $match: { is_reported: { $ne: true } } },
+            const PRIOR_WEIGHT = 5;
+            const reviews = mongoose.connection.collection('reviews');
+            const match = { $match: { is_reported: { $ne: true } } };
+            const [all] = await reviews.aggregate([match, { $group: { _id: null, m: { $avg: '$rating' } } }]).toArray();
+            const m = all?.m ?? 0;
+            const rated = await reviews.aggregate([
+                match,
                 { $group: { _id: '$shop_id', avg: { $avg: '$rating' }, n: { $sum: 1 } } },
-                { $sort: { avg: -1, n: -1 } },
+                { $addFields: { score: { $divide: [{ $add: [PRIOR_WEIGHT * m, { $multiply: ['$n', '$avg'] }] }, { $add: [PRIOR_WEIGHT, '$n'] }] } } },
+                { $sort: { score: -1, n: -1 } },
                 { $limit: LIMIT * 4 },
             ]).toArray();
             const select = 'shop_name slug logo banner listing_count';
