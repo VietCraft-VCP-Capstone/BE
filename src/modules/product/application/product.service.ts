@@ -1047,10 +1047,10 @@ export class ProductsService {
 
     static async getFeaturedShops(): Promise<any[]> {
         return cacheService.getOrSet('vietcraft:shops:featured', async () => {
-            // Xếp theo điểm Bayes (C*m + n*avg)/(C + n): shop ít lượt bị kéo về điểm chung m của sàn,
-            // nên 1 lượt 5 sao không vượt shop nhiều lượt. Shop chưa có đánh giá chỉ lấp chỗ trống, theo số sản phẩm.
+            // Công thức IMDb: WR = (C*m + n*avg)/(C + n), m = điểm chung của sàn, C = số lượt tối thiểu.
+            // Shop đủ C lượt xếp trước; shop ít lượt chỉ lấp chỗ trống, sau đó tới shop chưa có đánh giá (theo số sản phẩm).
             const LIMIT = 5;
-            const PRIOR_WEIGHT = 5;
+            const MIN_REVIEWS = 3;
             const reviews = mongoose.connection.collection('reviews');
             const match = { $match: { is_reported: { $ne: true } } };
             const [all] = await reviews.aggregate([match, { $group: { _id: null, m: { $avg: '$rating' } } }]).toArray();
@@ -1058,8 +1058,11 @@ export class ProductsService {
             const rated = await reviews.aggregate([
                 match,
                 { $group: { _id: '$shop_id', avg: { $avg: '$rating' }, n: { $sum: 1 } } },
-                { $addFields: { score: { $divide: [{ $add: [PRIOR_WEIGHT * m, { $multiply: ['$n', '$avg'] }] }, { $add: [PRIOR_WEIGHT, '$n'] }] } } },
-                { $sort: { score: -1, n: -1 } },
+                { $addFields: {
+                    eligible: { $gte: ['$n', MIN_REVIEWS] },
+                    score: { $divide: [{ $add: [MIN_REVIEWS * m, { $multiply: ['$n', '$avg'] }] }, { $add: [MIN_REVIEWS, '$n'] }] },
+                } },
+                { $sort: { eligible: -1, score: -1, n: -1 } },
                 { $limit: LIMIT * 4 },
             ]).toArray();
             const select = 'shop_name slug logo banner listing_count';
