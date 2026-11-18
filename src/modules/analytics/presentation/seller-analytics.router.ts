@@ -244,9 +244,28 @@ const ALLOWED_RATINGS = new Set(['good', 'neutral', 'poor']);
 const SAFE_KEY_REGEX = /^[a-zA-Z0-9_-]{1,120}$/;
 const MAX_SAVED_IDEAS = 200;
 const MAX_DRAFTS_OR_REVIEWS = 200;
+const MAX_MILESTONES = 1000;
 
 function isSafeKey(value: unknown, maxLen = 120): value is string {
     return typeof value === 'string' && value.length > 0 && value.length <= maxLen && SAFE_KEY_REGEX.test(value);
+}
+
+// Bộ lọc nguyên tử: sửa mục đã có luôn được, thêm mục mới chỉ khi bản đồ chưa đạt trần
+function mapCapFilter(shopId: mongoose.Types.ObjectId, map: string, key: string, max: number) {
+    const path = `settings.seasonal_preferences.${map}`;
+    return {
+        _id: shopId,
+        $or: [
+            { [`${path}.${key}`]: { $exists: true } },
+            { $expr: { $lt: [{ $size: { $objectToArray: { $ifNull: [`${path}`, {}] } } }, max] } },
+        ],
+    };
+}
+
+async function limitOrMissing(res: Response, shopId: mongoose.Types.ObjectId, error: string) {
+    return (await Shop.exists({ _id: shopId }))
+        ? res.status(400).json({ success: false, error })
+        : res.status(404).json({ success: false, error: 'shop_not_found' });
 }
 
 // Gắn thẻ từ khóa cơ hội vào các sản phẩm phù hợp của gian hàng
@@ -390,22 +409,17 @@ router.post('/forecast/seasonal/idea-draft', async (req: AuthenticatedRequest, r
         };
 
         const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
-        const updated = await Shop.findByIdAndUpdate(
-            shopId,
+        const updated = await Shop.findOneAndUpdate(
+            mapCapFilter(shopId, 'idea_drafts', idea_id, MAX_DRAFTS_OR_REVIEWS),
             {
                 $set: { [`settings.seasonal_preferences.idea_drafts.${idea_id}`]: draft },
                 $addToSet: { 'settings.seasonal_preferences.saved_ideas': idea_id },
             },
             { new: true, select: 'settings.seasonal_preferences' }
         ).lean();
-        if (!updated) {
-            return res.status(404).json({ success: false, error: 'shop_not_found' });
-        }
+        if (!updated) return limitOrMissing(res, shopId, 'idea_drafts_limit_reached');
         const prefs = updated.settings?.seasonal_preferences || {};
         const drafts = prefs.idea_drafts || {};
-        if (Object.keys(drafts).length > MAX_DRAFTS_OR_REVIEWS) {
-            return res.status(400).json({ success: false, error: 'idea_drafts_limit_reached' });
-        }
         return res.json({ success: true, idea_drafts: drafts, saved_ideas: prefs.saved_ideas || [] });
     } catch (error: any) {
         return res.status(500).json({ success: false, error: error?.message || 'Lỗi khi lưu bản chỉnh sửa ý tưởng.' });
@@ -433,14 +447,12 @@ router.post('/forecast/seasonal/review', async (req: AuthenticatedRequest, res: 
             updated_at: new Date().toISOString(),
         };
         const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
-        const updated = await Shop.findByIdAndUpdate(
-            shopId,
+        const updated = await Shop.findOneAndUpdate(
+            mapCapFilter(shopId, 'occasion_reviews', camp_id, MAX_DRAFTS_OR_REVIEWS),
             { $set: { [`settings.seasonal_preferences.occasion_reviews.${camp_id}`]: reviewEntry } },
             { new: true, select: 'settings.seasonal_preferences.occasion_reviews' }
         ).lean();
-        if (!updated) {
-            return res.status(404).json({ success: false, error: 'shop_not_found' });
-        }
+        if (!updated) return limitOrMissing(res, shopId, 'occasion_reviews_limit_reached');
         return res.json({
             success: true,
             occasion_reviews: updated.settings?.seasonal_preferences?.occasion_reviews || {},
@@ -467,14 +479,12 @@ router.post('/forecast/seasonal/milestone', async (req: AuthenticatedRequest, re
         }
         const key = camp_id ? `${camp_id}_${milestone_idx}` : String(milestone_idx);
         const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
-        const updated = await Shop.findByIdAndUpdate(
-            shopId,
+        const updated = await Shop.findOneAndUpdate(
+            mapCapFilter(shopId, 'checked_milestones', key, MAX_MILESTONES),
             { $set: { [`settings.seasonal_preferences.checked_milestones.${key}`]: Boolean(is_done) } },
             { new: true, select: 'settings.seasonal_preferences.checked_milestones' }
         ).lean();
-        if (!updated) {
-            return res.status(404).json({ success: false, error: 'shop_not_found' });
-        }
+        if (!updated) return limitOrMissing(res, shopId, 'checked_milestones_limit_reached');
         return res.json({
             success: true,
             checked_milestones: updated.settings?.seasonal_preferences?.checked_milestones || {},
