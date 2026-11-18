@@ -64,7 +64,8 @@ ReviewSchema.statics.recalculateRatings = async function (
     try {
         // 1. Tính toán điểm cho Product
         const productStats = await this.aggregate([
-            { $match: { product_id: productId } },
+            // Bỏ review bị báo cáo, khớp với phần đánh giá hiển thị và điểm shop
+            { $match: { product_id: productId, is_reported: { $ne: true } } },
             {
                 $group: {
                     _id: '$product_id',
@@ -84,7 +85,7 @@ ReviewSchema.statics.recalculateRatings = async function (
 
         // 2. Tính toán điểm cho Shop
         const shopStats = await this.aggregate([
-            { $match: { shop_id: shopId } },
+            { $match: { shop_id: shopId, is_reported: { $ne: true } } },
             {
                 $group: {
                     _id: '$shop_id',
@@ -94,7 +95,7 @@ ReviewSchema.statics.recalculateRatings = async function (
             }
         ]);
 
-        const sAvg = shopStats.length > 0 ? Number(shopStats[0].avgRating.toFixed(1)) : 5.0;
+        const sAvg = shopStats.length > 0 ? Number(shopStats[0].avgRating.toFixed(1)) : 0;
         const sCount = shopStats.length > 0 ? shopStats[0].totalReviews : 0;
 
         await Shop.findByIdAndUpdate(shopId, {

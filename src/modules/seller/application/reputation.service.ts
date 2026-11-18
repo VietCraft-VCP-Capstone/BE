@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { Shop, IShop, ReputationTier } from '../../product/infrastructure/models/shop.model';
 import { ReputationLog, ReputationReferenceType, IReputationLog } from '../infrastructure/models/reputation-log.model';
 import { logger } from '../../../shared/utils/logger';
+import { ShopService } from '../../product/application/shop.service';
 
 export interface ShopRiskProfile {
     shop_id: string;
@@ -148,6 +149,7 @@ export class ReputationService {
 
         const score = scoreOf(shop);
         const band = bandOf(score);
+        const rating = (await ShopService.liveRatings([shop._id])).get(shop._id.toString()) ?? { averageRating: 0, ratingCount: 0 };
         return {
             shop_id: shop._id.toString(),
             shop_name: shop.shop_name,
@@ -156,8 +158,8 @@ export class ReputationService {
             clean_streak_orders: shop.clean_streak_orders || 0,
             dispute_count_30d: shop.dispute_count_30d || 0,
             penalty_points_30d: shop.penalty_points_30d || 0,
-            average_rating: shop.average_rating || 5.0,
-            rating_count: shop.rating_count || 0,
+            average_rating: rating.averageRating,
+            rating_count: rating.ratingCount,
             listing_count: shop.listing_count || 0,
             risk_level: band.risk,
             recommendation: band.recommendation
