@@ -123,7 +123,18 @@ export class CompetitorTrackingService {
             }
         }
         const rows = await Product.aggregate<{ _id: mongoose.Types.ObjectId; n: number }>([
-            { $match: { ...PUBLIC_QUERY, category_ids: { $in: [...ids].map(id => new mongoose.Types.ObjectId(id)) } } },
+            // Đếm như AI so sánh (_competitor_live): bỏ dữ liệu mẫu và sản phẩm không có biến thể đang bán có giá.
+            { $match: { ...PUBLIC_QUERY, seed_ref: { $exists: false }, category_ids: { $in: [...ids].map(id => new mongoose.Types.ObjectId(id)) } } },
+            {
+                $lookup: {
+                    from: 'product_variants', let: { id: '$_id' }, as: 'co_gia',
+                    pipeline: [
+                        { $match: { $expr: { $eq: ['$product_id', '$$id'] }, is_active: { $ne: false }, retail_price: { $gt: 0 } } },
+                        { $limit: 1 },
+                    ],
+                },
+            },
+            { $match: { 'co_gia.0': { $exists: true } } },
             { $group: { _id: '$shop_id', n: { $sum: 1 } } },
         ]);
         return new Map(rows.map(r => [String(r._id), r.n]));
