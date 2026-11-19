@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import axios from 'axios';
+import { llmJsonText } from './llm-json';
 import { AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { AnalyticsViewer } from './ai-gateway.service';
 import { Product } from '../../product/infrastructure/models/product.model';
@@ -40,10 +40,42 @@ export interface ShopSeasonalIdea {
     };
 }
 
+class BoundedTtlCache<T> {
+    private store = new Map<string, { data: T; expiresAt: number }>();
+    constructor(private readonly maxEntries = 200) {}
+
+    get(key: string): { data: T; expiresAt: number } | undefined {
+        const entry = this.store.get(key);
+        if (!entry) return undefined;
+        if (entry.expiresAt <= Date.now()) {
+            this.store.delete(key);
+            return undefined;
+        }
+        return entry;
+    }
+
+    set(key: string, value: { data: T; expiresAt: number }): void {
+        if (this.store.has(key)) {
+            this.store.delete(key);
+        } else if (this.store.size >= this.maxEntries) {
+            const now = Date.now();
+            for (const [k, v] of this.store) {
+                if (v.expiresAt <= now) this.store.delete(k);
+            }
+            while (this.store.size >= this.maxEntries) {
+                const oldestKey = this.store.keys().next().value;
+                if (oldestKey === undefined) break;
+                this.store.delete(oldestKey);
+            }
+        }
+        this.store.set(key, value);
+    }
+}
+
 export class SeasonalAnalyticsService {
-    private static geminiAdvisoryCache = new Map<string, { data: GeminiAdvisoryResult | null; expiresAt: number }>();
-    private static traitActionsCache = new Map<string, { data: TraitActionItem[] | null; expiresAt: number }>();
-    private static seasonalIdeasCache = new Map<string, { data: ShopSeasonalIdea[]; expiresAt: number }>();
+    private static geminiAdvisoryCache = new BoundedTtlCache<GeminiAdvisoryResult | null>(200);
+    private static traitActionsCache = new BoundedTtlCache<TraitActionItem[] | null>(200);
+    private static seasonalIdeasCache = new BoundedTtlCache<ShopSeasonalIdea[]>(200);
 
     static async fetchGeminiSeasonalIdeas(params: {
         shopId: string;
@@ -140,13 +172,6 @@ export class SeasonalAnalyticsService {
             return redisCached;
         }
 
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-            const fb = buildFallbackIdeas();
-            SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: fb, expiresAt: Date.now() + 600 * 1000 });
-            return fb;
-        }
-
         try {
             const prompt = `Bạn là chuyên gia phát triển sản phẩm TMĐT. Hãy đọc BẢN PHÁC THẢO DỮ LIỆU THẬT dưới đây và tổng hợp đúng 3 ý tưởng sản phẩm MỚI cho shop (phải bám sát SỐ LIỆU TOÀN NGÀNH CỦA DỊP ${params.campName} đồng thời mang PHONG CÁCH RIÊNG của shop; KHÔNG tự bịa thêm số liệu ngoài bản phác thảo):
 
@@ -172,13 +197,7 @@ Yêu cầu trả về JSON array đúng 3 phần tử:
     "why_it_fits_shop": "Nêu rõ cả số liệu toàn ngành của dịp ${params.campName} lẫn sự phù hợp với phong cách shop (1 câu)"
   }
 ]`;
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-            const res = await axios.post(
-                url,
-                { contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } },
-                { timeout: 15000 }
-            );
-            const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const rawText = await llmJsonText(prompt, 15000);
             const parsed = rawText ? JSON.parse(rawText) : null;
             if (Array.isArray(parsed) && parsed.length >= 2) {
                 const ideas: ShopSeasonalIdea[] = parsed.slice(0, 3).map((item: any, idx: number) => {
@@ -229,9 +248,6 @@ Yêu cầu trả về JSON array đúng 3 phần tử:
         voucherShop?: number | null;
         voucherInd?: number | null;
     }): Promise<TraitActionItem[] | null> {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) return null;
-
         const cacheKey = `ta_${params.campId}_${params.catName}_${params.ordersGrowth}_${params.spendingGrowth}_${params.comboShop}_${params.voucherShop}`;
         const cached = SeasonalAnalyticsService.traitActionsCache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) {
@@ -254,16 +270,7 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
   {"priority":"Vận hành","title":"... (gắn ngày ${params.peak3DaysStr})","desc":"... (1 câu ngắn)","traitKey":"peakClustering"}
 ]`;
 
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-            const res = await axios.post(
-                url,
-                {
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { responseMimeType: 'application/json' },
-                },
-                { timeout: 12000 }
-            );
-            const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const rawText = await llmJsonText(prompt, 12000);
             if (!rawText) return null;
             const parsed = JSON.parse(rawText);
             if (Array.isArray(parsed) && parsed.length >= 2) {
@@ -289,7 +296,7 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
         eventYear: number;
         catName: string;
         kw: string;
-        growthPct: number;
+        growthPct: number | null;
         matchCount: number;
         firstMatchedTitle: string;
         totalStock: number;
@@ -302,9 +309,6 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
         cutStr: string;
         evStr: string;
     }): Promise<GeminiAdvisoryResult | null> {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) return null;
-
         const cacheKey = `${params.campName}_${params.eventYear}_${params.catName}_${params.matchCount}_${params.campSavedCount}_${params.campOrdersCount}_${params.isUrgent ? 'urg' : params.currentPhase}`;
         const cached = SeasonalAnalyticsService.geminiAdvisoryCache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) {
@@ -312,34 +316,30 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
         }
 
         try {
+            const growthLine = params.growthPct !== null
+                ? `- Sức mua & xu hướng thị trường: Tăng trưởng đơn hàng dự báo ${params.growthPct >= 0 ? '+' : ''}${params.growthPct}% so với cùng kỳ\n`
+                : '';
+            const growthRequirement = params.growthPct !== null
+                ? `sức mua (${params.growthPct >= 0 ? '+' : ''}${params.growthPct}%)`
+                : 'xu hướng tìm kiếm thực tế';
+
             const prompt = `Bạn là Giám đốc Tăng trưởng TMĐT thực chiến (Shopee, TikTok Shop, Amazon).
 Dựa vào dữ liệu thực tế:
 - Dịp mua sắm: ${params.campName} năm ${params.eventYear}
 - Ngành hàng của shop: ${params.catName}
 - Từ khóa ngách thịnh hành: "${params.kw}"
-- Sức mua & xu hướng thị trường: Tăng trưởng đơn hàng dự báo +${params.growthPct}% so với cùng kỳ
-- Tình trạng shop: ${params.matchCount > 0 ? `Đã có ${params.matchCount} mẫu liên quan (mẫu: "${params.firstMatchedTitle}", tồn kho: ${params.totalStock} cái)` : 'Chưa có mẫu nào cho dịp này'}
+${growthLine}- Tình trạng shop: ${params.matchCount > 0 ? `Đã có ${params.matchCount} mẫu liên quan (mẫu: "${params.firstMatchedTitle}", tồn kho: ${params.totalStock} cái)` : 'Chưa có mẫu nào cho dịp này'}
 - Ý tưởng đã lưu vào kế hoạch: ${params.campSavedCount} mẫu
 - Đơn hàng thực tế đã phát sinh: ${params.campOrdersCount} đơn
 - Thời điểm hiện tại: ${params.isUrgent ? `Cực kỳ khẩn cấp, còn ${params.daysToCutoff} ngày là đến hạn chốt an toàn (${params.cutStr}) trước sự kiện (${params.evStr})` : params.currentPhase === 'traction' ? `Đang trong đợt mở bán gom đơn trước ngày cao điểm (${params.evStr})` : `Chuẩn bị nguồn hàng (bắt đầu mở bán vào ${params.tracStr})`}
 
 Yêu cầu nghiệp vụ:
 1. Viết 1 tiêu đề (title, tối đa 8 từ), thể hiện hành động cấp bách cần làm ngay.
-2. Viết 1 lời khuyên thực chiến (advice, tối đa 2-3 câu), phân tích thẳng vào xu hướng, sức mua (+${params.growthPct}%) và giải quyết nỗi đau của seller (AOV, combo, nguy cơ đứt hàng, xưởng quá tải hoặc kẹt vận chuyển).
+2. Viết 1 lời khuyên thực chiến (advice, tối đa 2-3 câu), phân tích thẳng vào xu hướng, ${growthRequirement} và giải quyết nỗi đau của seller (AOV, combo, nguy cơ đứt hàng, xưởng quá tải hoặc kẹt vận chuyển).
 3. Tuyệt đối KHÔNG nhắc đến từ "AI", không viết lý thuyết chung chung sáo rỗng.
 4. Trả về đúng định dạng JSON: {"title": "...", "advice": "..."}`;
 
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-            const res = await axios.post(
-                url,
-                {
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { responseMimeType: 'application/json' }
-                },
-                { timeout: 2000 }
-            );
-
-            const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const rawText = await llmJsonText(prompt, 6000);
             if (!rawText) return null;
 
             const parsed = JSON.parse(rawText);
@@ -1060,16 +1060,13 @@ Yêu cầu nghiệp vụ:
             const isTet = campId.includes('tet');
 
             if (isMegaSale) {
-                // Đại hội Siêu Sale: 80% khách săn sale để tự tiêu dùng / tích trữ
                 defaultGiftPct = 20;
             } else if (isValentine) {
                 // Lễ tình nhân: Mua tặng chiếm ưu thế
                 defaultGiftPct = ['phu-kien', 'sac-dep', 'thu-cong-qua-tang'].includes(detectedSlug) ? 80 : 65;
             } else if (isWomenDay) {
-                // Quốc tế Phụ nữ / Phụ nữ VN: Mỹ phẩm, phụ kiện quà tặng chiếm 75%, thời trang nữ 60%
                 defaultGiftPct = ['sac-dep', 'phu-kien', 'thu-cong-qua-tang'].includes(detectedSlug) ? 75 : 60;
             } else if (isTeachersDay) {
-                // Tri ân 20/11: Quà tặng tri ân
                 defaultGiftPct = 75;
             } else if (isNoel) {
                 // Giáng sinh
@@ -1077,19 +1074,14 @@ Yêu cầu nghiệp vụ:
             } else if (isTet) {
                 // Tết Nguyên Đán: Khách hàng mua sắm theo đặc thù từng ngành hàng TMĐT:
                 if (detectedSlug === 'thoi-trang') {
-                    // Thời trang: Sắm quần áo mới diện Tết cho bản thân & gia đình là 75%
                     defaultGiftPct = 25;
                 } else if (detectedSlug === 'dien-tu') {
-                    // Điện tử & Công nghệ: Tự nâng cấp thiết bị cá nhân (80% tự dùng, 20% biếu tặng)
                     defaultGiftPct = 20;
                 } else if (detectedSlug === 'me-be') {
-                    // Mẹ & Bé: Sắm đồ Tết cho con (85% tự dùng gia đình, 15% quà tặng)
                     defaultGiftPct = 15;
                 } else if (detectedSlug === 'sac-dep') {
-                    // Sắc đẹp / Mỹ phẩm: 65% tự làm đẹp đón Tết, 35% set quà biếu
                     defaultGiftPct = 35;
                 } else if (detectedSlug === 'nha-cua-doi-song') {
-                    // Nhà cửa & Đời sống: Dọn dẹp làm mới nhà 60%, quà biếu 40%
                     defaultGiftPct = 40;
                 } else if (detectedSlug === 'the-thao') {
                     defaultGiftPct = 20;
@@ -1098,12 +1090,10 @@ Yêu cầu nghiệp vụ:
                 } else if (detectedSlug === 'phu-kien') {
                     defaultGiftPct = 40;
                 } else if (detectedSlug === 'bach-hoa') {
-                    // Bách hóa, Giỏ quà Tết, Hạt mứt trà rượu: 55% quà biếu Tết, 45% tự dùng
                     defaultGiftPct = 55;
                 } else if (detectedSlug === 'thu-cong-qua-tang') {
                     defaultGiftPct = 65;
                 } else {
-                    // Ngành hàng khác / Tổng hợp: 30% mua tặng, 70% tự mua sắm tiêu dùng
                     defaultGiftPct = 30;
                 }
             }
@@ -1124,7 +1114,7 @@ Yêu cầu nghiệp vụ:
             sample_size: totalClassified,
             source_description: totalClassified >= 3
                 ? `Bóc tách từ ${totalClassified} đơn thực tế (${giftCount} đơn quà tặng, ${selfUseCount} đơn tự dùng)`
-                : `Dự báo thị hiếu ngành ${detectedName} dịp ${activeCamp?.name || 'mùa vụ'} (Chuẩn ngành TMĐT)`,
+                : `Ước tính theo quy ước ngành ${detectedName} dịp ${activeCamp?.name || 'mùa vụ'}, chưa phải số đo từ đơn thực tế`,
             top_reasons: sortedReasons
         };
 
@@ -1221,7 +1211,7 @@ Yêu cầu nghiệp vụ:
                 rule: 'Đơn hàng áp dụng voucher giảm giá hoặc phát sinh qua cổng chiến dịch sàn.',
                 checklist: [
                     'Đăng ký tham gia cổng Flash Sale và Mega Sale của sàn trước hạn chốt an toàn.',
-                    'Tạo mã giảm giá shop độc quyền (giảm 10-15k cho đơn từ 200k) kích thích chốt giỏ hàng.',
+                    'Tạo mã giảm giá riêng của shop cho đơn đạt mức tối thiểu để kích thích chốt giỏ hàng.',
                     'Thiết lập Deal sốc hoặc Mua kèm deal sốc để tối ưu giá trị trung bình đơn (AOV).'
                 ],
                 targetRatio: 0.25
@@ -1489,13 +1479,16 @@ Yêu cầu nghiệp vụ:
                     || (isCurrentActive ? savedIdeas.length : 0);
 
                 const evYear = evDate ? evDate.getFullYear() : (tracStart ? tracStart.getFullYear() : new Date().getFullYear());
-                const catSlug = detectedSlug || 'thoi-trang';
-                const catName = detectedName || 'Thời trang & May mặc';
-                const growthPct = Math.round(marketOrdersGrowthPct || 35);
+                const catSlug = detectedSlug || 'tong-hop';
+                const catName = detectedName || 'Ngành hàng của shop';
+                const growthPct: number | null =
+                    marketOrdersGrowthPct != null && Number.isFinite(marketOrdersGrowthPct)
+                        ? Math.round(marketOrdersGrowthPct)
+                        : null;
 
                 const categorySuggestions: Record<string, { winterItem: string; noelGift: string; tetSpecial: string }> = {
                     'thoi-trang': {
-                        winterItem: 'combo áo ấm mùa đông hoặc deal mua 2 giảm 10%',
+                        winterItem: 'combo áo ấm mùa đông hoặc deal mua kèm nhiều món',
                         noelGift: 'set áo len Noel, áo cặp họa tiết Giáng Sinh',
                         tetSpecial: `áo dài cách tân & dải sản phẩm đồ mặc gia đình đón Tết ${evYear}`
                     },
@@ -1607,33 +1600,34 @@ Yêu cầu nghiệp vụ:
                     recTitle = geminiRec.title;
                     recAdvice = geminiRec.advice;
                 } else if (isUrgent) {
+                    const growthPhrase = growthPct !== null ? ` Sức mua ngành ${catName} đợt ${campName} ${evYear} dự báo tăng ${growthPct >= 0 ? '+' : ''}${growthPct}%.` : '';
                     if (campKey.includes('tet')) {
                         recTitle = `Khóa nhận đơn Tết ${evYear}, xả toàn bộ hàng sẵn`;
-                        recAdvice = `Chỉ còn ${daysToCutoff} ngày đến hạn chốt an toàn (${cutStr}). Bưu cục bắt đầu quá tải và xưởng nghỉ Tết sớm; tắt ngay phân loại đặt trước, dồn toàn lực đóng gói ${matchCount > 0 ? `${matchCount} mẫu có sẵn` : 'toàn bộ đơn hàng'} để kịp giao trước 28 Tết.`;
+                        recAdvice = `Chỉ còn ${daysToCutoff} ngày đến hạn chốt an toàn (${cutStr}). Bưu cục bắt đầu quá tải và xưởng nghỉ Tết sớm; tắt ngay phân loại đặt trước, dồn toàn lực đóng gói ${matchCount > 0 ? `${matchCount} mẫu có sẵn` : 'toàn bộ đơn hàng'} để kịp bàn giao trước hạn chốt.`;
                     } else if (campKey.includes('noel') || campKey.includes('giang-sinh')) {
-                        recTitle = `Chốt đơn quà Noel, cam kết giao trước 23/12`;
-                        recAdvice = `Hạn chốt an toàn còn ${daysToCutoff} ngày (${cutStr}). Khách mua Noel chỉ nhận trước đêm 24/12; ngừng nhận đơn xa/đơn làm riêng, tập trung kiểm kê ${matchCount > 0 ? `${matchCount} mẫu sẵn kho` : 'hàng có sẵn'} kèm thiệp chúc để bàn giao bưu cục ngay.`;
-                    } else if (campKey.includes('12/12')) {
-                        recTitle = `Dừng nhận đơn đặt trước, chốt tồn kho 12/12`;
-                        recAdvice = `Hạn chốt an toàn còn ${daysToCutoff} ngày (${cutStr}). Tắt phân loại hàng đặt làm theo yêu cầu, khóa kho và dồn 100% nhân lực đóng gói ${matchCount > 0 ? `${matchCount} mẫu sẵn kho (tồn ${totalStock} cái)` : 'hàng sẵn'} để kịp bàn giao bưu cục, tránh bị sàn phạt giao trễ.`;
+                        recTitle = `Chốt đơn quà Noel, ưu tiên hàng sẵn kho`;
+                        recAdvice = `Hạn chốt an toàn còn ${daysToCutoff} ngày (${cutStr}). Khách mua Noel cần nhận trước đêm lễ; ngừng nhận đơn xa/đơn làm riêng, tập trung kiểm kê ${matchCount > 0 ? `${matchCount} mẫu sẵn kho` : 'hàng có sẵn'} kèm thiệp chúc để bàn giao bưu cục ngay.`;
+                    } else if (campKey.includes('12/12') || campKey.includes('11/11')) {
+                        recTitle = `Dừng nhận đơn đặt trước, chốt tồn kho ${campName}`;
+                        recAdvice = `Hạn chốt an toàn còn ${daysToCutoff} ngày (${cutStr}). Tắt phân loại hàng đặt làm theo yêu cầu, khóa kho và dồn nhân lực đóng gói ${matchCount > 0 ? `${matchCount} mẫu sẵn kho (tồn ${totalStock} cái)` : 'hàng sẵn'} để kịp bàn giao bưu cục, tránh giao trễ.`;
                     } else {
                         recTitle = `Tắt nhận đặt trước, dồn lực đóng gói giao hàng`;
-                        recAdvice = `Hạn chốt an toàn còn ${daysToCutoff} ngày (${cutStr}). Tắt ngay phân loại hàng đặt làm theo yêu cầu, khóa tồn kho và dồn 100% nhân lực đóng gói ${matchCount > 0 ? `${matchCount} mẫu có sẵn` : 'toàn bộ đơn hàng'} để bàn giao bưu cục kịp trước ${evStr}.`;
+                        recAdvice = `Hạn chốt an toàn còn ${daysToCutoff} ngày (${cutStr}). Tắt ngay phân loại hàng đặt làm theo yêu cầu, khóa tồn kho và dồn nhân lực đóng gói ${matchCount > 0 ? `${matchCount} mẫu có sẵn` : 'toàn bộ đơn hàng'} để bàn giao bưu cục kịp trước ${evStr}.`;
                     }
                 } else if (currentPhase === 'traction' || (tracStart && new Date() >= tracStart)) {
                     if (campOrdersCount > 0) {
                         recTitle = `Đã có ${campOrdersCount} đơn · Bật Deal Sốc kéo AOV`;
-                        recAdvice = `Sản phẩm đang cắn đơn tốt (${campOrdersCount} đơn). Bật ngay tính năng Mua Kèm Deal Sốc hoặc combo mua 2 giảm 10% trên sàn để tăng giá trị đơn trung bình và tận dụng lượng truy cập đang tăng tốc mùa ${evYear}.`;
+                        recAdvice = `Sản phẩm đang có đơn tốt (${campOrdersCount} đơn). Bật ngay tính năng Mua Kèm Deal Sốc hoặc gói combo mua nhiều món trên sàn để tăng giá trị đơn trung bình trong mùa ${campName} ${evYear}.`;
                     } else if (matchCount > 0) {
-                        if (campKey.includes('12/12')) {
+                        if (campKey.includes('12/12') || campKey.includes('11/11')) {
                             recTitle = `Cài voucher shop & Rà soát giá cho ${matchCount} mẫu`;
-                            recAdvice = `Đã mở bán nhưng ${matchCount} mẫu ("${firstMatchedTitle}") chưa nổ đơn. Khách săn sale 12/12/${evYear} chỉ chốt khi thấy hời; hãy cài voucher giảm 10k-20k cho đơn từ 200k và rà lại giá so với top bán chạy sàn.`;
+                            recAdvice = `Đã mở bán nhưng ${matchCount} mẫu ("${firstMatchedTitle}") chưa phát sinh đơn. Khách săn sale ${campName} ${evYear} thường so sánh giá rất kỹ; hãy cài voucher theo ngưỡng đơn của shop và rà lại giá so với top bán chạy sàn.`;
                         } else if (campKey.includes('noel') || campKey.includes('giang-sinh')) {
                             recTitle = `Đổi ảnh concept quà tặng Noel cho ${matchCount} mẫu`;
-                            recAdvice = `Đã có ${matchCount} mẫu nhưng chưa phát sinh đơn. Thay ngay ảnh đại diện thành concept hộp quà nơ đỏ và gắn tag "quà tặng Noel" vào đầu tiêu đề để hút khách mua tặng.`;
+                            recAdvice = `Đã có ${matchCount} mẫu nhưng chưa phát sinh đơn. Thay ngay ảnh đại diện thành concept hộp quà và gắn từ khóa "quà tặng Noel" vào đầu tiêu đề để hút khách mua tặng.`;
                         } else if (campKey.includes('tet')) {
                             recTitle = `Kích hoạt ưu đãi "Sắm Tết sớm" cho ${matchCount} mẫu`;
-                            recAdvice = `Tâm lý khách sắm Tết ${evYear} muốn nhận sớm để thử đồ. Cài đặt ưu đãi đặt sớm cho ${matchCount} mẫu ("${firstMatchedTitle}") để gom đơn trước khi thị trường bước vào tuần quá tải vận chuyển.`;
+                            recAdvice = `Tâm lý khách sắm Tết ${evYear} muốn nhận sớm để chủ động thời gian. Cài đặt ưu đãi đặt sớm cho ${matchCount} mẫu ("${firstMatchedTitle}") để gom đơn trước khi thị trường bước vào tuần quá tải vận chuyển.`;
                         } else {
                             recTitle = `Rà soát giá & Bổ sung video thật cho ${matchCount} mẫu`;
                             recAdvice = `Mẫu "${firstMatchedTitle}" chưa phát sinh đơn. Bổ sung ngay video quay thật cận chất liệu và thêm mã giảm giá giới hạn để kích hoạt những đơn hàng đầu tiên.`;
@@ -1643,16 +1637,17 @@ Yêu cầu nghiệp vụ:
                         recAdvice = `Nhu cầu tìm "${kw}" dịp ${campName} ${evYear} đang tăng tốc. Đăng ngay sản phẩm sẵn có để bot sàn kịp nhận diện từ khóa trước tuần lễ cao điểm.`;
                     }
                 } else {
-                    if (campKey.includes('12/12')) {
+                    const growthPhrase = growthPct !== null ? ` Sức mua ngành ${catName} đợt ${campName} ${evYear} dự báo tăng ${growthPct >= 0 ? '+' : ''}${growthPct}%.` : '';
+                    if (campKey.includes('12/12') || campKey.includes('11/11')) {
                         if (matchCount > 0) {
-                            recTitle = `Lên combo Mua 2 Giảm 10% cho ${matchCount} mẫu sẵn có`;
-                            recAdvice = `Shop đã có ${matchCount} mẫu ("${firstMatchedTitle}"). Sức mua ngành ${catName} đợt sale 12/12/${evYear} dự báo tăng +${growthPct}%; hãy đóng gói combo mua 2 tặng 1 hoặc deal mua kèm ${catSugg.winterItem} dưới 350k để tăng AOV trước ngày mở bán (${tracStr}).`;
+                            recTitle = `Lên gói combo & deal mua kèm cho ${matchCount} mẫu sẵn có`;
+                            recAdvice = `Shop đã có ${matchCount} mẫu ("${firstMatchedTitle}").${growthPhrase} Hãy đóng gói combo hoặc deal mua kèm ${catSugg.winterItem} để tăng giá trị đơn trước ngày mở bán (${tracStr}).`;
                         } else if (campSavedCount > 0) {
                             recTitle = `Chuẩn bị hàng mẫu đã lưu trước ngày mở bán (${tracStr})`;
-                            recAdvice = `Shop đã lưu ${campSavedCount} mẫu ý tưởng đón 12/12. Tập trung chọn 1 mẫu chủ lực về ${catSugg.winterItem} để chuẩn bị hàng hóa và đăng ký sự kiện sàn trước (${tracStr}), tránh thử nghiệm dàn trải làm đọng vốn.`;
+                            recAdvice = `Shop đã lưu ${campSavedCount} mẫu ý tưởng đón ${campName}. Tập trung chọn 1 mẫu chủ lực về ${catSugg.winterItem} để chuẩn bị hàng hóa và đăng ký sự kiện sàn trước (${tracStr}), tránh thử nghiệm dàn trải làm đọng vốn.`;
                         } else {
-                            recTitle = `Gom combo đón bão sale 12/12/${evYear}`;
-                            recAdvice = `Sức mua ngành ${catName} mùa 12/12/${evYear} dự báo tăng +${growthPct}%. Gom nhanh các mặt hàng hiện có thành ${catSugg.winterItem} dưới 300k trước ngày mở bán (${tracStr}) để đón đầu lượng tìm kiếm.`;
+                            recTitle = `Gom combo đón đợt sale ${campName} ${evYear}`;
+                            recAdvice = `${growthPhrase || `Đợt sale ${campName} ${evYear} sắp mở bán.`} Gom nhanh các mặt hàng hiện có thành ${catSugg.winterItem} trước ngày mở bán (${tracStr}) để đón đầu lượng tìm kiếm.`;
                         }
                     } else if (campKey.includes('noel') || campKey.includes('giang-sinh')) {
                         if (matchCount > 0) {
@@ -1694,8 +1689,8 @@ Yêu cầu nghiệp vụ:
                         }
                     } else if (campKey.includes('20/11')) {
                         if (matchCount > 0) {
-                            recTitle = `Định giá phân khúc 200k-400k & Kèm thiệp cho ${matchCount} mẫu`;
-                            recAdvice = `Đã có ${matchCount} mẫu. Phụ huynh và học sinh chuộng quà trang trọng tầm giá 200k-400k; bổ sung thiệp tri ân thầy cô trước ngày mở bán (${tracStr}).`;
+                            recTitle = `Đóng gói trang trọng & Kèm thiệp cho ${matchCount} mẫu`;
+                            recAdvice = `Đã có ${matchCount} mẫu. Phụ huynh và học sinh chuộng quà tặng trang trọng; bổ sung thiệp tri ân thầy cô trước ngày mở bán (${tracStr}).`;
                         } else {
                             recTitle = `Lên sản phẩm quà tặng tri ân thầy cô đón 20/11`;
                             recAdvice = `Chuẩn bị các mặt hàng trang nhã ngành ${catName} (như sổ bút cao cấp, áo sơ mi, set mỹ phẩm hoặc trà hoa) đóng hộp lịch sự trước (${tracStr}) để đón nhu cầu tri ân.`;

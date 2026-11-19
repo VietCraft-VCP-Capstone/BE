@@ -173,7 +173,8 @@ function mapToProductItemResponse(
             id: shop._id.toString(),
             name: shop.shop_name,
             logo: shop.logo,
-            rating: shop.average_rating ?? 5.0,
+            rating: (shop.rating_count ?? 0) > 0 ? (shop.average_rating ?? 0) : 0,
+            ratingCount: shop.rating_count ?? 0,
         } : undefined,
         sellerId: product.shop_id ? product.shop_id.toString() : undefined,
         tags: product.tags || [],
@@ -1046,11 +1047,37 @@ export class ProductsService {
 
     static async getFeaturedShops(): Promise<any[]> {
         return cacheService.getOrSet('vietcraft:shops:featured', async () => {
-            return Shop.find()
-                .select('shop_name slug logo banner average_rating listing_count')
-                .sort({ average_rating: -1, listing_count: -1 })
-                .limit(5)
-                .lean();
+            // Công thức IMDb: WR = (C*m + n*avg)/(C + n), m = điểm chung của sàn, C = số lượt tối thiểu.
+            // Shop đủ C lượt xếp trước; shop ít lượt chỉ lấp chỗ trống, sau đó tới shop chưa có đánh giá (theo số sản phẩm).
+            const LIMIT = 5;
+            const MIN_REVIEWS = 3;
+            const reviews = mongoose.connection.collection('reviews');
+            const match = { $match: { is_reported: { $ne: true } } };
+            const [all] = await reviews.aggregate([match, { $group: { _id: null, m: { $avg: '$rating' } } }]).toArray();
+            const m = all?.m ?? 0;
+            const rated = await reviews.aggregate([
+                match,
+                { $group: { _id: '$shop_id', avg: { $avg: '$rating' }, n: { $sum: 1 } } },
+                { $addFields: {
+                    eligible: { $gte: ['$n', MIN_REVIEWS] },
+                    score: { $divide: [{ $add: [MIN_REVIEWS * m, { $multiply: ['$n', '$avg'] }] }, { $add: [MIN_REVIEWS, '$n'] }] },
+                } },
+                { $sort: { eligible: -1, score: -1, n: -1 } },
+                { $limit: LIMIT * 4 },
+            ]).toArray();
+            const select = 'shop_name slug logo banner listing_count';
+            const ratedShops = await Shop.find({ _id: { $in: rated.map(r => r._id) } }).select(select).lean();
+            const byId = new Map(ratedShops.map(s => [String(s._id), s]));
+            const top = rated
+                .filter(r => byId.has(String(r._id)))
+                .slice(0, LIMIT)
+                .map(r => ({ ...byId.get(String(r._id)), average_rating: Number(r.avg.toFixed(1)), rating_count: r.n }));
+            if (top.length < LIMIT) {
+                const rest = await Shop.find({ _id: { $nin: rated.map(r => r._id) } })
+                    .select(select).sort({ listing_count: -1 }).limit(LIMIT - top.length).lean();
+                top.push(...rest.map(s => ({ ...s, average_rating: 0, rating_count: 0 })));
+            }
+            return top;
         }, 600);
     }
 
