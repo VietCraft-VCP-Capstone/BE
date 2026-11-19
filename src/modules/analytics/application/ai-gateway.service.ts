@@ -81,9 +81,11 @@ export class AiGatewayService {
         const guiBody = options.body !== undefined && options.method !== 'GET';
         if (guiBody) headers['Content-Type'] = 'application/json';
 
-        const timeoutMs = options.timeoutMs ?? (process.env.AI_TIMEOUT_MS
-            ? Number(process.env.AI_TIMEOUT_MS)
-            : Math.max(config.aiTimeoutMs || 5000, 20000));
+        // Route nào cần lâu hơn (nhận diện ảnh, lần đầu gợi ý giá) truyền timeoutMs riêng; còn lại dùng mặc định.
+        const timeoutMs = options.timeoutMs
+            ?? (process.env.AI_TIMEOUT_MS
+                ? Number(process.env.AI_TIMEOUT_MS)
+                : Math.max(config.aiTimeoutMs || 5000, 20000));
 
         try {
             const response = await fetch(url, {

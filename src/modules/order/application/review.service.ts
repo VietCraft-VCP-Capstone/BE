@@ -170,7 +170,7 @@ export class ReviewService {
             }
         });
 
-        const averageRating = totalCount > 0 ? Number((sumRating / totalCount).toFixed(1)) : 5.0;
+        const averageRating = totalCount > 0 ? Number((sumRating / totalCount).toFixed(1)) : 0;
 
         const percentages: Record<string, string> = {};
         const percentageNumbers: Record<string, number> = {};

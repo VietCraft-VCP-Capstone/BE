@@ -117,7 +117,8 @@ export class SellerSettingsService {
                 banner: DEFAULT_SETTINGS.brand.bannerUrl,
                 settings: DEFAULT_SETTINGS,
                 listing_count: 0,
-                average_rating: 5.0
+                average_rating: 0,
+                rating_count: 0
             });
         }
 
