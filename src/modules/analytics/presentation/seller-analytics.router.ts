@@ -241,23 +241,28 @@ router.post('/listings/intel/preview', userRateLimit(20, 60_000, 'Bạn thử qu
 router.post('/product/recognize-image', userRateLimit(10, 60_000, 'Bạn nhận diện ảnh quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 
 const ALLOWED_RATINGS = new Set(['good', 'neutral', 'poor']);
-const SAFE_KEY_REGEX = /^[a-zA-Z0-9_-]{1,120}$/;
+const SAFE_KEY_REGEX = /^[^$\0\r\n]{1,200}$/;
 const MAX_SAVED_IDEAS = 200;
 const MAX_DRAFTS_OR_REVIEWS = 200;
 const MAX_MILESTONES = 1000;
 
-function isSafeKey(value: unknown, maxLen = 120): value is string {
-    return typeof value === 'string' && value.length > 0 && value.length <= maxLen && SAFE_KEY_REGEX.test(value);
+function isSafeKey(value: unknown, maxLen = 200): value is string {
+    return typeof value === 'string' && value.trim().length > 0 && value.length <= maxLen && SAFE_KEY_REGEX.test(value);
+}
+
+function toSafeMapKey(key: string): string {
+    return key.replace(/\./g, '_');
 }
 
 // Bộ lọc nguyên tử: sửa mục đã có luôn được, thêm mục mới chỉ khi bản đồ chưa đạt trần
 function mapCapFilter(shopId: mongoose.Types.ObjectId, map: string, key: string, max: number) {
     const path = `settings.seasonal_preferences.${map}`;
+    const safeKey = toSafeMapKey(key);
     return {
         _id: shopId,
         $or: [
-            { [`${path}.${key}`]: { $exists: true } },
-            { $expr: { $lt: [{ $size: { $objectToArray: { $ifNull: [`${path}`, {}] } } }, max] } },
+            { [`${path}.${safeKey}`]: { $exists: true } },
+            { $expr: { $lt: [{ $size: { $objectToArray: { $ifNull: [`$${path}`, {}] } } }, max] } },
         ],
     };
 }
@@ -336,7 +341,7 @@ router.post('/forecast/seasonal/save-idea', async (req: AuthenticatedRequest, re
         const viewer = await viewerOrReply(req, res);
         if (!viewer) return;
         const { idea_id } = req.body || {};
-        if (!isSafeKey(idea_id, 120)) {
+        if (!isSafeKey(idea_id, 200)) {
             return res.status(400).json({ success: false, error: 'invalid_param', field: 'idea_id' });
         }
         if (!viewer.analysed_shop_id || !mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
@@ -388,7 +393,7 @@ router.post('/forecast/seasonal/idea-draft', async (req: AuthenticatedRequest, r
         const viewer = await viewerOrReply(req, res);
         if (!viewer) return;
         const { idea_id, title, concept, price_vnd, tags } = req.body || {};
-        if (!isSafeKey(idea_id, 120)) {
+        if (!isSafeKey(idea_id, 200)) {
             return res.status(400).json({ success: false, error: 'invalid_param', field: 'idea_id' });
         }
         if (!viewer.analysed_shop_id || !mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
@@ -409,10 +414,11 @@ router.post('/forecast/seasonal/idea-draft', async (req: AuthenticatedRequest, r
         };
 
         const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
+        const safeIdeaKey = toSafeMapKey(idea_id);
         const updated = await Shop.findOneAndUpdate(
-            mapCapFilter(shopId, 'idea_drafts', idea_id, MAX_DRAFTS_OR_REVIEWS),
+            mapCapFilter(shopId, 'idea_drafts', safeIdeaKey, MAX_DRAFTS_OR_REVIEWS),
             {
-                $set: { [`settings.seasonal_preferences.idea_drafts.${idea_id}`]: draft },
+                $set: { [`settings.seasonal_preferences.idea_drafts.${safeIdeaKey}`]: draft },
                 $addToSet: { 'settings.seasonal_preferences.saved_ideas': idea_id },
             },
             { new: true, select: 'settings.seasonal_preferences' }
@@ -447,9 +453,10 @@ router.post('/forecast/seasonal/review', async (req: AuthenticatedRequest, res: 
             updated_at: new Date().toISOString(),
         };
         const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
+        const safeCampKey = toSafeMapKey(camp_id);
         const updated = await Shop.findOneAndUpdate(
-            mapCapFilter(shopId, 'occasion_reviews', camp_id, MAX_DRAFTS_OR_REVIEWS),
-            { $set: { [`settings.seasonal_preferences.occasion_reviews.${camp_id}`]: reviewEntry } },
+            mapCapFilter(shopId, 'occasion_reviews', safeCampKey, MAX_DRAFTS_OR_REVIEWS),
+            { $set: { [`settings.seasonal_preferences.occasion_reviews.${safeCampKey}`]: reviewEntry } },
             { new: true, select: 'settings.seasonal_preferences.occasion_reviews' }
         ).lean();
         if (!updated) return limitOrMissing(res, shopId, 'occasion_reviews_limit_reached');
@@ -477,7 +484,7 @@ router.post('/forecast/seasonal/milestone', async (req: AuthenticatedRequest, re
         if (!viewer.analysed_shop_id || !mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
             return res.status(404).json({ success: false, error: 'shop_not_found' });
         }
-        const key = camp_id ? `${camp_id}_${milestone_idx}` : String(milestone_idx);
+        const key = toSafeMapKey(camp_id ? `${camp_id}_${milestone_idx}` : String(milestone_idx));
         const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
         const updated = await Shop.findOneAndUpdate(
             mapCapFilter(shopId, 'checked_milestones', key, MAX_MILESTONES),
