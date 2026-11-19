@@ -1330,6 +1330,16 @@ export class ProductsService {
     }
 
 
+    private static syncHealth(productId: string, shopId: string): void {
+        AiGatewayService.call({ method: 'POST', path: `/api/analytics/listings/${productId}/sync`, shopId })
+            .then(res => {
+                if (res.status >= 400 || res.body?.meta?.status === 'insufficient_data') {
+                    logger.warn(`AI health sync failed for product ${productId}: HTTP ${res.status} ${res.body?.meta?.reason ?? res.body?.error ?? ''}`);
+                }
+            })
+            .catch(err => logger.warn(`AI health sync failed for product ${productId}: ${err?.message}`));
+    }
+
     static async create(sellerId: string, payload: any): Promise<ProductItemResponseDTO> {
         const isStructured = payload?.blankId !== undefined
             || Array.isArray(payload?.designPlacements)
@@ -1338,14 +1348,7 @@ export class ProductsService {
             ? ProductsService.createStructured(sellerId, payload)
             : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO));
         if (result?.id) {
-            const shopId = result.shopInfo?.id || result.sellerId || '';
-            AiGatewayService.call({
-                method: 'POST',
-                path: `/api/analytics/listings/${result.id}/sync`,
-                shopId: String(shopId),
-            }).catch(err => {
-                logger.warn(`AI sync failed for created product ${result.id}: ${err?.message}`);
-            });
+            ProductsService.syncHealth(String(result.id), String(result.shopInfo?.id || result.sellerId || ''));
         }
         return result;
     }
@@ -1705,14 +1708,7 @@ export class ProductsService {
             : ProductsService.updateSimple(mp, actor, payload as Partial<ProductFormDataDTO>));
 
         await ProductsService.invalidateProductCache(id);
-        const shopId = mp.shop_id ? String(mp.shop_id) : (result?.shopInfo?.id || '');
-        AiGatewayService.call({
-            method: 'POST',
-            path: `/api/analytics/listings/${id}/sync`,
-            shopId,
-        }).catch(err => {
-            logger.warn(`AI sync failed for product ${id}: ${err?.message}`);
-        });
+        ProductsService.syncHealth(id, mp.shop_id ? String(mp.shop_id) : (result?.shopInfo?.id || ''));
         return result;
     }
 

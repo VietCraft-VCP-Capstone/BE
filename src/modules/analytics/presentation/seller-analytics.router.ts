@@ -12,6 +12,8 @@ import { cacheService } from '../../../shared/services/cache.service';
 import { generateSlug } from '../../../shared/utils/slug';
 import { ListingHealthService, HealthStatus } from '../application/listing-health.service';
 import { healthSummary } from '../application/listing-health-summary.service';
+import { searchInsights } from '../application/listing-search-gaps.service';
+import { listingImpact, recordHealthAction } from '../application/listing-impact.service';
 import { listingRanking } from '../application/listing-ranking.service';
 import { parsePreviewBody, PreviewBodyResult } from '../application/health-preview';
 import { parseIntelPreview } from '../application/intel-preview';
@@ -182,7 +184,7 @@ router.get('/listings/:id/health/history', async (req: AuthenticatedRequest, res
         const payload = httpStatus < 400 ? { ...body, viewer } : body;
         return res.status(httpStatus).json(payload);
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc lịch sử điểm tối ưu sản phẩm.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc lịch sử độ hoàn thiện trang sản phẩm.' });
     }
 });
 
@@ -219,6 +221,39 @@ router.get('/listings/ranking', async (req: AuthenticatedRequest, res: Response)
     }
 });
 
+router.get('/listings/:id/search-insights', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { httpStatus, body } = await searchInsights(req.params.id, viewer.analysed_shop_id!);
+        return res.status(httpStatus).json(httpStatus < 400 ? { ...body, viewer } : body);
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc từ khoá khách tìm.' });
+    }
+});
+
+router.get('/listings/:id/impact', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { httpStatus, body } = await listingImpact(req.params.id, viewer.analysed_shop_id!);
+        return res.status(httpStatus).json(httpStatus < 400 ? { ...body, viewer } : body);
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc tác động thay đổi nội dung.' });
+    }
+});
+
+router.post('/listings/:id/health/actions', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { httpStatus, body } = await recordHealthAction(req.params.id, viewer.analysed_shop_id!, req.user!.id, req.body);
+        return res.status(httpStatus).json(httpStatus < 400 ? { ...body, viewer } : body);
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi ghi nhận thao tác độ hoàn thiện trang sản phẩm.' });
+    }
+});
+
 router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const days = req.query.days === undefined ? 30 : Number(req.query.days);
@@ -232,7 +267,7 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
         const { httpStatus, body } = await healthSummary(viewer.analysed_shop_id!, days);
         return res.status(httpStatus).json({ ...body, viewer });
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc điểm tối ưu sản phẩm của shop.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc độ hoàn thiện trang sản phẩm của shop.' });
     }
 });
 
