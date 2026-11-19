@@ -87,6 +87,7 @@ export class AiGatewayService {
                 ? Number(process.env.AI_TIMEOUT_MS)
                 : Math.max(config.aiTimeoutMs || 5000, 20000));
 
+
         try {
             const response = await fetch(url, {
                 method: options.method,

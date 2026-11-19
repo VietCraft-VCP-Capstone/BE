@@ -58,7 +58,7 @@ const vnd = (n: number) => `${Math.round(n).toLocaleString('vi-VN')}đ`;
 function goodListingSlow(m: RankMetrics, r: Partial<Record<RankMetric, Rank | null>>, b: CategoryBench, ctx: Ctx, low: { reach: boolean; buyer: boolean }): RankInsight | null {
     const slowSales = !!r.units && r.units.of > 1 && r.units.rank > r.units.of / 2;
     if (!ready(ctx) || m.views === 0 || !(low.reach || low.buyer || slowSales)) return null;
-    const head = `Đăng chuẩn (${Math.floor(ctx.score!)} điểm) nhưng bán chậm`;
+    const head = `Trang sản phẩm đã hoàn thiện (${Math.floor(ctx.score!)}/100) nhưng bán chậm`;
     if (low.reach && r.views) {
         return { tone: 'warn', title: `${head}: ít người thấy`, field: 'title', next: 'tags',
             action: `Trang sản phẩm đã tốt, chỉ là khách chưa tìm tới (hạng ${r.views.rank}/${r.views.of} về lượt xem trong danh mục ${ctx.category} toàn sàn). Đưa từ khoá khách hay tìm vào tên, gắn tag còn thiếu của danh mục, chia sẻ link lên mạng xã hội hoặc chạy giảm giá ngắn ngày.` };
@@ -88,7 +88,7 @@ export function rankingInsights(m: RankMetrics, r: Partial<Record<RankMetric, Ra
 
     if (m.views === 0) {
         out.push(ready(ctx)
-            ? { tone: 'bad', title: `Đăng chuẩn (${Math.floor(ctx.score!)} điểm) nhưng chưa ai xem trong 30 ngày`, action: 'Trang đã tốt, chỉ là khách chưa tìm tới. Kiểm tra sản phẩm đang hiển thị, đưa từ khoá khách hay tìm vào tên, gắn tag còn thiếu và chia sẻ link lên mạng xã hội để có lượt xem đầu tiên.', field: 'title', next: 'tags' }
+            ? { tone: 'bad', title: `Trang sản phẩm đã hoàn thiện (${Math.floor(ctx.score!)}/100) nhưng chưa ai xem trong 30 ngày`, action: 'Trang đã tốt, chỉ là khách chưa tìm tới. Kiểm tra sản phẩm đang hiển thị, đưa từ khoá khách hay tìm vào tên, gắn tag còn thiếu và chia sẻ link lên mạng xã hội để có lượt xem đầu tiên.', field: 'title', next: 'tags' }
             : { tone: 'bad', title: 'Chưa ai xem trong 30 ngày', action: 'Kiểm tra sản phẩm đã được duyệt và đang hiển thị, gắn tag đúng từ khoá khách hay tìm.', field: 'tags', next: 'tags' });
     }
     if (slow) out.push(slow);
