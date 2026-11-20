@@ -97,7 +97,7 @@ const ListingHealthScoreSchema = new Schema<IListingHealthScore>({
     todos: { type: [TodoSchema], default: [] },
     warnings: { type: [Schema.Types.Mixed], default: [] },
     content_hash: { type: String, required: true },
-    model_version: { type: String, required: true, default: 'health-3.0' },
+    model_version: { type: String, required: true, default: 'health-3.1' },
     computed_at: { type: Date, required: true },
     inputs_hash: { type: String, default: null },
     coverage: { type: Schema.Types.Mixed, default: null },

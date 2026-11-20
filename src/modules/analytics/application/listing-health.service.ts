@@ -8,7 +8,7 @@ import { AiGatewayService } from './ai-gateway.service';
 
 
 const COLLECTION = 'listing_health_scores';
-export const HEALTH_VERSION = 'health-3.0';
+export const HEALTH_VERSION = 'health-3.1';
 const MODEL_VERSION_FALLBACK = HEALTH_VERSION;
 const STALE_REFRESH_LIMIT = 20;
 export const VN_OFFSET_MS = 7 * 3_600_000;
