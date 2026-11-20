@@ -509,17 +509,24 @@ router.post('/forecast/seasonal/milestone', async (req: AuthenticatedRequest, re
     try {
         const viewer = await viewerOrReply(req, res);
         if (!viewer) return;
-        const { milestone_idx, is_done, camp_id } = req.body || {};
+        const { milestone_idx, is_done, camp_id, idea_id } = req.body || {};
         if (typeof milestone_idx !== 'number' || !Number.isInteger(milestone_idx) || milestone_idx < 0 || milestone_idx > 50) {
             return res.status(400).json({ success: false, error: 'invalid_param', field: 'milestone_idx' });
         }
         if (camp_id !== undefined && camp_id !== null && !isSafeKey(camp_id, 80)) {
             return res.status(400).json({ success: false, error: 'invalid_param', field: 'camp_id' });
         }
+        if (idea_id !== undefined && idea_id !== null && !isSafeKey(idea_id, 120)) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'idea_id' });
+        }
         if (!viewer.analysed_shop_id || !mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
             return res.status(404).json({ success: false, error: 'shop_not_found' });
         }
-        const key = toSafeMapKey(camp_id ? `${camp_id}_${milestone_idx}` : String(milestone_idx));
+        const keyParts: string[] = [];
+        if (camp_id) keyParts.push(camp_id);
+        if (idea_id) keyParts.push(idea_id);
+        keyParts.push(String(milestone_idx));
+        const key = toSafeMapKey(keyParts.join('_'));
         const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
         const updated = await Shop.findOneAndUpdate(
             mapCapFilter(shopId, 'checked_milestones', key, MAX_MILESTONES),

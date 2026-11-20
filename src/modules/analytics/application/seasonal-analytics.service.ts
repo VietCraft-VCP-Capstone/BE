@@ -79,10 +79,13 @@ export class SeasonalAnalyticsService {
 
     static async fetchGeminiSeasonalIdeas(params: {
         shopId: string;
+        liveShopOid?: mongoose.Types.ObjectId | null;
         shopName: string;
         catName: string;
         campId: string;
         campName: string;
+        eventYear: number;
+        persistedIdeas?: ShopSeasonalIdea[] | null;
         shopStyleKeywords: string[];
         shopSampleTitles: string[];
         priceBand: { min: number; max: number; avg: number };
@@ -94,7 +97,13 @@ export class SeasonalAnalyticsService {
         occasionIndustryPriceBand?: { min?: number; max?: number; avg?: number };
         industryScale?: { productsCount?: number; sellersCount?: number; totalSold?: number };
     }): Promise<ShopSeasonalIdea[]> {
-        const cacheKey = `ideas_${params.shopId}_${params.campId}_${params.catName}_${params.topOppKeywords.map(k => k.tag).join(',')}`;
+        // Ưu tiên 1: Ý tưởng đã lưu bền vững trong MongoDB cho shop + dịp + năm (không bị mất hay đè khi restart server)
+        if (Array.isArray(params.persistedIdeas) && params.persistedIdeas.length > 0) {
+            return params.persistedIdeas;
+        }
+
+        const safeCampKey = `${String(params.campId || 'event').replace(/[^a-zA-Z0-9_-]/g, '_')}_${params.eventYear}`;
+        const cacheKey = `ideas_${params.shopId}_${safeCampKey}_${params.catName}`;
         const cached = SeasonalAnalyticsService.seasonalIdeasCache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) {
             return cached.data;
@@ -165,21 +174,42 @@ export class SeasonalAnalyticsService {
             });
         };
 
-        const redisKey = `vietcraft:seasonal:ideas:v2:${cacheKey}`;
+        const persistIdeasToMongo = async (ideasToSave: ShopSeasonalIdea[]) => {
+            if (!params.liveShopOid || ideasToSave.length === 0) return;
+            try {
+                await Shop.updateOne(
+                    { _id: params.liveShopOid },
+                    {
+                        $set: {
+                            [`settings.seasonal_preferences.generated_ideas.${safeCampKey}`]: {
+                                ideas: ideasToSave,
+                                event_year: params.eventYear,
+                                generated_at: new Date().toISOString(),
+                            },
+                        },
+                    }
+                );
+            } catch {
+                // Bỏ qua lỗi ghi nền để không chặn response
+            }
+        };
+
+        const redisKey = `vietcraft:seasonal:ideas:v3:${cacheKey}`;
         const redisCached = await cacheService.get<ShopSeasonalIdea[]>(redisKey).catch(() => null);
         if (Array.isArray(redisCached) && redisCached.length > 0 && redisCached[0]?.source_type === 'llm_scoped') {
             SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: redisCached, expiresAt: Date.now() + 1800 * 1000 });
+            await persistIdeasToMongo(redisCached);
             return redisCached;
         }
 
         try {
-            const prompt = `Bạn là chuyên gia phát triển sản phẩm TMĐT. Hãy đọc BẢN PHÁC THẢO DỮ LIỆU THẬT dưới đây và tổng hợp đúng 3 ý tưởng sản phẩm MỚI cho shop (phải bám sát SỐ LIỆU TOÀN NGÀNH CỦA DỊP ${params.campName} đồng thời mang PHONG CÁCH RIÊNG của shop; KHÔNG tự bịa thêm số liệu ngoài bản phác thảo):
+            const prompt = `Bạn là chuyên gia phát triển sản phẩm TMĐT. Hãy đọc BẢN PHÁC THẢO DỮ LIỆU THẬT dưới đây và tổng hợp đúng 3 ý tưởng sản phẩm MỚI cho shop (phải bám sát SỐ LIỆU TOÀN NGÀNH CỦA DỊP ${params.campName} ${params.eventYear} đồng thời mang PHONG CÁCH RIÊNG của shop; KHÔNG tự bịa thêm số liệu ngoài bản phác thảo; TUYỆT ĐỐI KHÔNG nhắc tới các năm cũ như 2023, 2024, 2025 — nếu cần ghi năm chỉ được dùng năm ${params.eventYear}):
 
 BẢN PHÁC THẢO (STRICT SCOPE):
-- Shop: "${params.shopName}" · Ngành: "${params.catName}"
+- Shop: "${params.shopName}" · Ngành: "${params.catName}" · Năm sự kiện: ${params.eventYear}
 - Sản phẩm mẫu & phong cách shop: ${params.shopSampleTitles.slice(0, 4).join(' | ') || 'Chưa có'} (từ khóa phong cách: ${shopStyleStr})
 - Khung giá shop: ${priceBandStr} (trung bình ${params.priceBand.avg.toLocaleString('vi-VN')}đ)
-- Dịp mua sắm: ${params.campName}
+- Dịp mua sắm: ${params.campName} ${params.eventYear}
 - Số liệu TOÀN NGÀNH trong dịp ${params.campName}:
   + Quy mô ngành: ${params.industryScale?.productsCount ?? 'N/A'} sản phẩm từ ${params.industryScale?.sellersCount ?? 'N/A'} gian hàng (${params.industryScale?.totalSold ?? 'N/A'} lượt bán đa sàn)
   + Dải giá ngành dịp này: ${params.occasionIndustryPriceBand?.min ? `${Math.round(params.occasionIndustryPriceBand.min / 1000)}k–${Math.round((params.occasionIndustryPriceBand.max || 0) / 1000)}k` : priceBandStr}
@@ -190,8 +220,8 @@ BẢN PHÁC THẢO (STRICT SCOPE):
 Yêu cầu trả về JSON array đúng 3 phần tử:
 [
   {
-    "title": "Tên ý tưởng sản phẩm mới hấp dẫn, kết hợp nhu cầu dịp ${params.campName} và phong cách shop (8-14 từ)",
-    "concept": "Mô tả cách thiết kế / đóng gói / combo cụ thể cho dịp ${params.campName} (1-2 câu)",
+    "title": "Tên ý tưởng sản phẩm mới hấp dẫn, kết hợp nhu cầu dịp ${params.campName} và phong cách shop (8-14 từ, không ghi năm cũ)",
+    "concept": "Mô tả cách thiết kế / đóng gói / combo cụ thể cho dịp ${params.campName} ${params.eventYear} (1-2 câu)",
     "target_price_vnd": số nguyên VND phù hợp khung giá shop & ngành (${Math.min(params.priceBand.min, params.occasionIndustryPriceBand?.min || params.priceBand.min)}-${Math.max(Math.round(params.priceBand.max * 1.25), params.occasionIndustryPriceBand?.max || params.priceBand.max)}),
     "tags": ["tag 1", "tag 2", "tag 3"],
     "why_it_fits_shop": "Nêu rõ cả số liệu toàn ngành của dịp ${params.campName} lẫn sự phù hợp với phong cách shop (1 câu)"
@@ -220,6 +250,7 @@ Yêu cầu trả về JSON array đúng 3 phần tử:
                 if (ideas.length > 0) {
                     SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: ideas, expiresAt: Date.now() + 1800 * 1000 });
                     await cacheService.set(redisKey, ideas, 86400).catch(() => {});
+                    await persistIdeasToMongo(ideas);
                     return ideas;
                 }
             }
@@ -376,7 +407,7 @@ Yêu cầu nghiệp vụ:
                 ? Product.find({
                     shop_id: liveShopOid,
                     listing_status: { $ne: 'EXPIRED' }
-                }).select('_id title slug images categories category_ids tags product_type original_price stock_alert_threshold').lean().catch(() => [])
+                }).select('_id title slug images categories category_ids tags product_type original_price stock_alert_threshold source_idea_id').lean().catch(() => [])
                 : Promise.resolve([] as any[]),
             (data.events && Array.isArray(data.events))
                 ? BlankClient.listBlanks(req.user?.id).catch(() => [] as Blank[])
@@ -385,14 +416,16 @@ Yêu cầu nghiệp vụ:
                 ? Order.countDocuments({
                     shop_id: liveShopOid,
                     created_at: { $gte: eightWeeksAgo },
-                    order_status: { $in: ['DELIVERED', 'COMPLETED', 'PAID'] }
+                    order_status: { $in: ['DELIVERED', 'COMPLETED', 'PAID'] },
+                    is_simulated: { $ne: true }
                 }).catch(() => 0)
                 : Promise.resolve(0),
             liveShopOid
                 ? Order.find({
                     shop_id: liveShopOid,
-                    order_status: { $in: ['DELIVERED', 'COMPLETED', 'PAID'] }
-                }).select('order_code items shipping_address buyer_id created_at financial_breakdown coupon_code order_type is_pod order_status').sort({ created_at: -1 }).limit(200).lean().catch(() => [])
+                    order_status: { $in: ['DELIVERED', 'COMPLETED', 'PAID'] },
+                    is_simulated: { $ne: true }
+                }).select('order_code items shipping_address buyer_id created_at financial_breakdown coupon_code order_type is_pod order_status notes').sort({ created_at: -1 }).limit(200).lean().catch(() => [])
                 : Promise.resolve([] as any[]),
             hasValidAnalysedShop
                 ? Shop.findById(viewer.analysed_shop_id).select('settings').lean().catch(() => null)
@@ -598,8 +631,9 @@ Yêu cầu nghiệp vụ:
             try {
                 shopRealOrders = await Order.find({
                     shop_id: liveShopOid,
-                    order_status: { $ne: 'CANCELLED' }
-                }).select('order_code items shipping_address buyer_id created_at financial_breakdown coupon_code order_type is_pod order_status').sort({ created_at: -1 }).limit(200).lean();
+                    order_status: { $ne: 'CANCELLED' },
+                    is_simulated: { $ne: true }
+                }).select('order_code items shipping_address buyer_id created_at financial_breakdown coupon_code order_type is_pod order_status notes').sort({ created_at: -1 }).limit(200).lean();
             } catch {
                 shopRealOrders = [];
             }
@@ -739,108 +773,60 @@ Yêu cầu nghiệp vụ:
             }
         }
 
-        // Tỷ lệ chuyển đổi chuẩn từ đơn hàng thực tế
-        const crAddCartToOrder = 0.285;
-        const crViewToAddCart = 0.088;
-        const crReachToView = 0.312;
-
+        // 100% số đo THẬT từ product_events (`view`, `add_to_cart`) và bảng orders (`orders`)
+        // Không chia ngược giả lập `impressions`, `views`, hay `add_to_cart` từ đơn hàng
         const actualOrders = totalReal;
-        // Ưu tiên đọc trực tiếp số đo THẬT từ bảng sự kiện nếu đã ghi nhận
-        const actualAddCart = realCartAddsCount > 0
-            ? realCartAddsCount
-            : (actualOrders > 0 ? Math.round(actualOrders / crAddCartToOrder) : 0);
+        const actualAddCart = realCartAddsCount;
+        const actualViews = realViewsCount;
+        const actualReach: number | null = null;
 
-        const actualViews = realViewsCount > 0
-            ? realViewsCount
-            : (actualOrders > 0 ? Math.round(actualAddCart / crViewToAddCart) : 0);
+        // Mục tiêu đơn hàng dựa trên nhịp đơn thực tế của shop × hệ số mùa vụ (nếu chưa có đơn thật -> null/0)
+        const targetOrders: number = shopRealOrders.length > 0
+            ? Math.max(1, Math.round((shopRealOrders.length / 60) * windowDays * campMult))
+            : 0;
 
-        const actualReach = actualViews > 0 ? Math.round(actualViews / crReachToView) : 0;
-
-        // Tính mục tiêu riêng biệt cho từng dịp dựa trên số ngày diễn ra chiến dịch và hệ số mùa vụ
-        let targetOrders: number;
-        if (shopRealOrders.length > 0) {
-            const dailyRate = Math.max(0.18, shopRealOrders.length / 60);
-            targetOrders = Math.max(5, Math.round(dailyRate * windowDays * campMult));
-        } else {
-            targetOrders = Math.max(5, Math.round(windowDays * 0.25 * campMult));
-        }
-
-        // Kiểm tra xem chiến dịch đã có phát sinh lưu lượng thực tế chưa
-        const hasActualTraffic = actualReach > 0 || actualOrders > 0;
-
-        // Tỷ lệ chuyển đổi chuẩn ngành mùa vụ khi chưa có traffic của dịp đó
-        const benchmarkOrderRate = Math.min(0.12, Math.max(0.07, 0.08 + (marketOrdersGrowthPct * 0.0002)));
-        const benchmarkCartRate = Math.min(0.10, Math.max(0.05, 0.06 + (Number(data.occasion_traits?.spending_growth_pct ?? 25) * 0.0003)));
-        const benchmarkCtr = Math.min(0.35, Math.max(0.18, 0.20 + (marketOrdersGrowthPct * 0.0008)));
-
-        // Tỷ lệ chuyển đổi thực tế của gian hàng (nếu đã có dữ liệu)
-        const shopRealOrderRate = (actualOrders > 0 && actualAddCart > 0) ? (actualOrders / actualAddCart) : benchmarkOrderRate;
-        const shopRealCartRate = (actualViews > 0 && actualAddCart > 0) ? (actualAddCart / actualViews) : benchmarkCartRate;
-        const shopRealCtr = (actualReach > 0 && actualViews > 0) ? (actualViews / actualReach) : benchmarkCtr;
-
-        // Mục tiêu các tầng phễu: Tính toán chuẩn xác theo quy tắc phễu ngược từ targetOrders
-        // Nếu có traffic thật: đặt mục tiêu cải thiện +10% đến +15%. Nếu chưa có: dùng benchmark mùa vụ
-        const targetOrderRate = hasActualTraffic
-            ? Math.min(0.25, Math.max(0.06, Math.round(shopRealOrderRate * 1.15 * 1000) / 1000))
-            : benchmarkOrderRate;
-        const targetCartRate = hasActualTraffic
-            ? Math.min(0.20, Math.max(0.05, Math.round(shopRealCartRate * 1.12 * 1000) / 1000))
-            : benchmarkCartRate;
-        const targetCtr = hasActualTraffic
-            ? Math.min(0.40, Math.max(0.15, Math.round(shopRealCtr * 1.05 * 1000) / 1000))
-            : benchmarkCtr;
-
-        const targetAddCart = Math.max(1, Math.round(targetOrders / targetOrderRate));
-        const targetViews = Math.max(1, Math.round(targetAddCart / targetCartRate));
-        const targetReach = Math.max(1, Math.round(targetViews / targetCtr));
-
-        const targetCtrPct = Math.round(targetCtr * 1000) / 10;
-        const targetCartRatePct = Math.round(targetCartRate * 1000) / 10;
-        const targetCvrPct = Math.round(targetOrderRate * 1000) / 10;
-
-        const buildTier = (target: number, actual: number, baselineConvRate: number) => {
-            const ratePercent = target > 0 ? Math.min(100, Math.round((actual / target) * 100)) : 0;
-            return {
-                target,
-                actual,
-                current_count: actual,
-                current_uv: actual,
-                current_pv: actual,
-                rate_percent: ratePercent,
-                baseline_rate_percent: baselineConvRate,
-                is_below_baseline: ratePercent < baselineConvRate
-            };
-        };
+        // Kiểm tra chiến dịch đã phát sinh lưu lượng thật từ product_events hoặc đơn hàng chưa
+        const hasActualTraffic = actualViews > 0 || actualAddCart > 0 || actualOrders > 0;
 
         const actualAov = actualOrders > 0
             ? Math.round(campTotalGmv / actualOrders)
             : (shopRealOrders.length > 0
                 ? Math.round(shopRealOrders.reduce((sum, o) => sum + getOrderAmount(o), 0) / shopRealOrders.length)
-                : 220000);
+                : 0);
 
-        // Tỷ lệ chuyển đổi và tỷ lệ rơi rụng thực tế từ dữ liệu vận hành shop (null nếu chưa phát sinh lưu lượng)
-        const realCtrPct = actualReach > 0 ? Math.round((actualViews / actualReach) * 1000) / 10 : null;
+        // Tỷ lệ chuyển đổi thực tế (null nếu mẫu bằng 0 — tuyệt đối không bịa)
+        const realCtrPct: number | null = null;
         const realCartRatePct = actualViews > 0 ? Math.round((actualAddCart / actualViews) * 1000) / 10 : null;
         const realOrderRatePct = actualAddCart > 0 ? Math.round((actualOrders / actualAddCart) * 1000) / 10 : null;
+        const realViewToOrderPct = actualViews > 0 ? Math.round((actualOrders / actualViews) * 1000) / 10 : null;
 
-        // So sánh với ngày thường chuẩn ngành
-        const baselineIndustryCtr = 12.6; // 12.6% CTR ngày thường
-        const baselineIndustryCvr = 11.5; // 11.5% CVR ngày thường
+        // Mục tiêu tham chiếu cho các tầng có tracking (`view`, `add_to_cart`) chỉ tính khi đã có nhịp chuyển đổi thực tế
+        const targetAddCart = (targetOrders > 0 && realOrderRatePct && realOrderRatePct > 0)
+            ? Math.max(targetOrders, Math.round(targetOrders / (realOrderRatePct / 100)))
+            : null;
+        const targetViews = (targetAddCart && realCartRatePct && realCartRatePct > 0)
+            ? Math.max(targetAddCart, Math.round(targetAddCart / (realCartRatePct / 100)))
+            : null;
 
-        const dynamicCtrLiftPct = realCtrPct !== null
-            ? Math.max(0, Math.round(((realCtrPct - baselineIndustryCtr) / baselineIndustryCtr) * 1000) / 10)
-            : Math.max(0, Math.round(((targetCtrPct - baselineIndustryCtr) / baselineIndustryCtr) * 1000) / 10);
-        const dynamicCvrMultiplier = realOrderRatePct !== null
-            ? Math.max(1.0, Math.round((realOrderRatePct / baselineIndustryCvr) * 10) / 10)
-            : Math.max(1.0, Math.round((targetCvrPct / baselineIndustryCvr) * 10) / 10);
+        const buildTier = (target: number | null, actual: number) => {
+            const ratePercent = (target && target > 0) ? Math.min(100, Math.round((actual / target) * 100)) : 0;
+            return {
+                target: target ?? 0,
+                actual,
+                current_count: actual,
+                current_uv: actual,
+                current_pv: actual,
+                rate_percent: ratePercent,
+                baseline_rate_percent: 0,
+                is_below_baseline: false
+            };
+        };
 
-        const realDropoff1 = Math.max(0, Math.min(100, Math.round((100 - (realCtrPct !== null ? realCtrPct : targetCtrPct)) * 10) / 10));
-        const realDropoff2 = Math.max(0, Math.min(100, Math.round((100 - (realCartRatePct !== null ? realCartRatePct : targetCartRatePct)) * 10) / 10));
-        const realDropoff3 = Math.max(0, Math.min(100, Math.round((100 - (realOrderRatePct !== null ? realOrderRatePct : targetCvrPct)) * 10) / 10));
-
+        const realDropoffCart = realCartRatePct !== null ? Math.max(0, Math.min(100, Math.round((100 - realCartRatePct) * 10) / 10)) : null;
+        const realDropoffOrder = realOrderRatePct !== null ? Math.max(0, Math.min(100, Math.round((100 - realOrderRatePct) * 10) / 10)) : null;
         const abandonedCartsCount = Math.max(0, actualAddCart - actualOrders);
 
-        // Khuyến nghị AI bóc tách theo ngành hàng thực tế của shop (chuẩn ngành TMĐT đa danh mục)
+        // Khuyến nghị bóc tách theo ngành hàng thực tế của shop
         const sellerCatSlug = data.seller_category?.slug || '';
         let stage2Recommendation = 'Bổ sung hình ảnh sản phẩm cận cảnh thực tế, bảng thông số phân loại rõ ràng và chính sách đổi trả minh bạch để khách an tâm chốt giỏ.';
         if (sellerCatSlug === 'thoi-trang') {
@@ -865,80 +851,42 @@ Yêu cầu nghiệp vụ:
             stage2Recommendation = 'Bổ sung ảnh chụp cận cảnh độ tinh xảo thủ công, kích thước chi tiết và quy cách đóng gói sang trọng.';
         }
 
-        const diagnostics = hasActualTraffic ? [
+        const diagnostics = [
             {
                 stage: 1,
-                title: 'Hiển thị ➔ Xem chi tiết',
-                dropoff_rate_pct: realDropoff1,
-                target_rate_pct: targetCtrPct,
-                badge_label: `Rơi rụng ${realDropoff1}%`,
-                metric_label: `CTR thực tế đạt ${realCtrPct}%. Tỷ lệ khách bấm vào xem sản phẩm đạt ${realCtrPct !== null && realCtrPct >= 15 ? 'hiệu quả tốt' : 'cần cải thiện'}.`,
-                status: realCtrPct !== null && realCtrPct >= 15 ? 'healthy' : 'warning',
-                ai_recommendation: `Tối ưu ảnh bìa sản phẩm mang không khí mùa lễ hội ${activeCamp?.name || 'chiến dịch'} và rà soát bộ từ khóa tiêu đề.`
-            },
-            {
-                stage: 2,
-                title: 'Xem chi tiết ➔ Thêm giỏ',
-                dropoff_rate_pct: realDropoff2,
-                target_rate_pct: targetCartRatePct,
-                badge_label: `Rơi rụng ${realDropoff2}%`,
-                metric_label: `Chỉ ${realCartRatePct}% khách xem bấm thêm giỏ. Điểm nghẽn rơi rụng lớn nhất nằm ở trang chi tiết sản phẩm.`,
-                status: realCartRatePct !== null && realCartRatePct < 20 ? 'critical' : 'warning',
+                title: '1. Xem chi tiết ➔ Thêm giỏ',
+                dropoff_rate_pct: realDropoffCart,
+                target_rate_pct: null,
+                badge_label: realCartRatePct !== null ? `Thêm giỏ ${realCartRatePct}%` : 'Chưa có lượt xem',
+                metric_label: actualViews > 0
+                    ? `Ghi nhận ${actualViews.toLocaleString('vi-VN')} lượt xem thực tế và ${actualAddCart.toLocaleString('vi-VN')} lượt thêm giỏ (tỷ lệ ${realCartRatePct}%).`
+                    : `Chưa ghi nhận lượt xem sản phẩm nào trong cửa sổ dịp ${activeCamp?.name || 'mùa vụ'} (đo từ product_events).`,
+                status: realCartRatePct === null ? 'warning' : (realCartRatePct >= 10 ? 'healthy' : 'critical'),
                 ai_recommendation: stage2Recommendation
             },
             {
-                stage: 3,
-                title: 'Thêm giỏ ➔ Chốt đơn',
-                dropoff_rate_pct: realDropoff3,
-                target_rate_pct: targetCvrPct,
-                badge_label: `Rơi rụng ${realDropoff3}%`,
-                metric_label: `Đang có ${abandonedCartsCount} giỏ hàng bị bỏ rơi (tỷ lệ hoàn tất thanh toán đạt ${realOrderRatePct}%).`,
+                stage: 2,
+                title: '2. Thêm giỏ ➔ Chốt đơn',
+                dropoff_rate_pct: realDropoffOrder,
+                target_rate_pct: null,
+                badge_label: realOrderRatePct !== null ? `Chốt đơn ${realOrderRatePct}%` : 'Chưa có giỏ hàng',
+                metric_label: actualAddCart > 0
+                    ? `Ghi nhận ${actualAddCart.toLocaleString('vi-VN')} lượt thêm giỏ và ${actualOrders.toLocaleString('vi-VN')} đơn hoàn tất (${abandonedCartsCount} giỏ chưa chốt, tỷ lệ ${realOrderRatePct}%).`
+                    : `Chưa có lượt thêm giỏ hàng trong cửa sổ dịp ${activeCamp?.name || 'mùa vụ'}.`,
                 abandoned_carts_count: abandonedCartsCount,
-                status: 'warning',
-                ai_recommendation: `Cài tin nhắn nhắc nhở giỏ hàng kèm ưu đãi freeship hoặc voucher nhẹ trước hạn chốt giao an toàn.`
-            }
-        ] : [
-            {
-                stage: 1,
-                title: '1. Kế hoạch đón lưu lượng (Hiển thị ➔ Xem)',
-                dropoff_rate_pct: realDropoff1,
-                target_rate_pct: targetCtrPct,
-                badge_label: `Chỉ tiêu CTR: ${targetCtrPct}%`,
-                metric_label: `Mục tiêu CTR đạt ${targetCtrPct}%. Cần chuẩn bị kéo ${targetViews.toLocaleString('vi-VN')} lượt click từ ${targetReach.toLocaleString('vi-VN')} lượt hiển thị.`,
-                status: 'healthy',
-                ai_recommendation: `Đăng ký sớm cổng sự kiện sàn và gắn bộ 5 thẻ tag ngách mùa ${activeCamp?.name || 'lễ hội'} để đón đầu tìm kiếm.`
-            },
-            {
-                stage: 2,
-                title: '2. Tối ưu trang sản phẩm (Xem ➔ Thêm giỏ)',
-                dropoff_rate_pct: realDropoff2,
-                target_rate_pct: targetCartRatePct,
-                badge_label: `Chỉ tiêu Thêm giỏ: ${targetCartRatePct}%`,
-                metric_label: `Mục tiêu đạt ${targetCartRatePct}% khách xem cho vào giỏ, tương ứng gom tối thiểu ${targetAddCart.toLocaleString('vi-VN')} giỏ hàng.`,
-                status: 'warning',
-                ai_recommendation: stage2Recommendation
-            },
-            {
-                stage: 3,
-                title: '3. Chuẩn bị chốt đơn (Thêm giỏ ➔ Đơn)',
-                dropoff_rate_pct: realDropoff3,
-                target_rate_pct: targetCvrPct,
-                badge_label: `Chỉ tiêu CVR: ${targetCvrPct}%`,
-                metric_label: `Mục tiêu chuyển đổi đạt ${targetCvrPct}% để về đích ${targetOrders} đơn hàng trước hạn chốt an toàn.`,
-                abandoned_carts_count: 0,
-                status: 'warning',
-                ai_recommendation: `Thiết lập sẵn mã voucher shop độc quyền và chính sách freeship để kích hoạt khách chốt đơn ngay khi mở bán.`
+                status: realOrderRatePct === null ? 'warning' : (realOrderRatePct >= 25 ? 'healthy' : 'warning'),
+                ai_recommendation: `Thiết lập mã ưu đãi hoặc freeship hợp lý trước hạn chốt giao an toàn để tăng tỷ lệ chốt giỏ.`
             }
         ];
 
-        // 3 Kịch bản mô phỏng doanh thu tính động theo AOV thực tế: Dự thu = Số đơn × AOV
-        const targetGmv = Math.round((targetOrders * actualAov) / 1000) * 1000;
-        const breakthroughOrders = Math.max(targetOrders + 2, Math.round(targetOrders * 1.3));
-        const breakthroughGmv = Math.round((breakthroughOrders * actualAov) / 1000) * 1000;
-        const peakOrders = Math.max(targetOrders + 5, Math.round(targetOrders * 1.6));
-        const peakGmv = Math.round((peakOrders * actualAov) / 1000) * 1000;
+        // 3 Kịch bản doanh thu chỉ hiển thị khi shop đã có AOV & mục tiêu đơn dựa trên đơn thật
+        const targetGmv = (targetOrders > 0 && actualAov > 0) ? Math.round((targetOrders * actualAov) / 1000) * 1000 : 0;
+        const breakthroughOrders = targetOrders > 0 ? Math.max(targetOrders + 2, Math.round(targetOrders * 1.3)) : 0;
+        const breakthroughGmv = (breakthroughOrders > 0 && actualAov > 0) ? Math.round((breakthroughOrders * actualAov) / 1000) * 1000 : 0;
+        const peakOrders = targetOrders > 0 ? Math.max(targetOrders + 5, Math.round(targetOrders * 1.6)) : 0;
+        const peakGmv = (peakOrders > 0 && actualAov > 0) ? Math.round((peakOrders * actualAov) / 1000) * 1000 : 0;
 
-        const scenarios = [
+        const scenarios = (targetOrders > 0 && actualAov > 0) ? [
             {
                 key: 'baseline',
                 name: 'Mục tiêu Cơ sở',
@@ -956,7 +904,9 @@ Yêu cầu nghiệp vụ:
                 growth_pct: 30,
                 projected_gmv: breakthroughGmv,
                 formula_basis: `${breakthroughOrders} đơn × ${actualAov.toLocaleString('vi-VN')}đ (AOV thực tế)`,
-                condition_note: `Chuyển đổi thêm ${breakthroughOrders - targetOrders} đơn từ ${abandonedCartsCount} giỏ hàng đang chờ chốt`
+                condition_note: abandonedCartsCount > 0
+                    ? `Chuyển đổi thêm từ ${abandonedCartsCount} giỏ hàng chưa chốt`
+                    : `Tăng thêm ${breakthroughOrders - targetOrders} đơn so với mục tiêu cơ sở`
             },
             {
                 key: 'peak',
@@ -965,25 +915,29 @@ Yêu cầu nghiệp vụ:
                 growth_pct: 60,
                 projected_gmv: peakGmv,
                 formula_basis: `${peakOrders} đơn × ${actualAov.toLocaleString('vi-VN')}đ (AOV thực tế)`,
-                condition_note: `Tận dụng lưu lượng tăng vọt của ngày Mega Sale sàn kết hợp remarketing tệp khách quen`
+                condition_note: `Kịch bản cao điểm khi tận dụng tốt chiến dịch sàn và tệp khách quen`
             }
-        ];
+        ] : [];
 
         const rawFunnel = data.campaign_funnel || {};
         data.campaign_funnel = {
-            impressions: targetReach,
+            impressions: null,
             clicks: targetViews,
-            ctr_pct: targetCtrPct,
-            ctr_vs_baseline_pct: dynamicCtrLiftPct,
+            views: targetViews,
+            ctr_pct: null,
+            ctr_vs_baseline_pct: null,
             cart_adds: targetAddCart,
-            cart_rate_pct: targetCartRatePct,
+            cart_rate_pct: realCartRatePct,
             orders: targetOrders,
-            conversion_rate_pct: targetCvrPct,
-            cvr_multiplier: dynamicCvrMultiplier,
+            conversion_rate_pct: realOrderRatePct,
+            view_to_order_pct: realViewToOrderPct,
+            cvr_multiplier: null,
             real_ctr_pct: realCtrPct,
             real_cart_rate_pct: realCartRatePct,
             real_order_rate_pct: realOrderRatePct,
-            pv_uv_ratio: typeof rawFunnel.pv_uv_ratio === 'number' ? rawFunnel.pv_uv_ratio : 1.45,
+            real_view_to_order_pct: realViewToOrderPct,
+            pv_uv_ratio: null,
+            tracking_stages: ['view', 'add_to_cart', 'order'],
             actual: {
                 orders: actualOrders,
                 direct_orders: directOrders.length,
@@ -992,26 +946,29 @@ Yêu cầu nghiệp vụ:
                 orders_progress_pct: targetOrders > 0 ? Math.min(100, Math.round((actualOrders / targetOrders) * 100)) : 0,
                 remaining_orders: Math.max(0, targetOrders - actualOrders),
                 impressions: actualReach,
+                views: actualViews,
                 clicks: actualViews,
                 cart_adds: actualAddCart,
-                window_label: windowLabel
+                window_label: windowLabel,
+                window_start: winStart.toISOString().slice(0, 10),
+                window_end: winEnd.toISOString().slice(0, 10)
             },
-            reach: buildTier(targetReach, actualReach, 35),
-            views: buildTier(targetViews, actualViews, 12),
-            add_to_cart: buildTier(targetAddCart, actualAddCart, 25),
-            orders_tier: buildTier(targetOrders, actualOrders, 10),
+            reach: null,
+            views_tier: buildTier(targetViews, actualViews),
+            add_to_cart: buildTier(targetAddCart, actualAddCart),
+            orders_tier: buildTier(targetOrders || null, actualOrders),
             diagnostics,
             scenarios,
             aov: actualAov,
             target_gmv: targetGmv,
             forecast_method_info: data.forecast_method_info || rawFunnel.forecast_method_info,
             summary: {
-                total_reach: actualReach,
+                total_reach: null,
                 total_views: actualViews,
                 total_add_to_cart: actualAddCart,
                 total_orders: actualOrders,
                 total_gmv: campTotalGmv,
-                conversion_rate: actualViews > 0 ? Math.round((actualOrders / actualViews) * 1000) / 10 : 0,
+                conversion_rate: realViewToOrderPct ?? 0,
                 aov: actualAov,
                 active_campaign_name: activeCamp?.name || 'Chiến dịch mùa vụ',
                 time_window_label: windowLabel
@@ -1043,100 +1000,38 @@ Yêu cầu nghiệp vụ:
         }
 
         const totalClassified = giftCount + selfUseCount;
-        let liveGiftPct: number;
-        let liveSelfPct: number;
-
         if (totalClassified >= 3) {
-            liveGiftPct = Math.round((giftCount / totalClassified) * 100);
-            liveSelfPct = 100 - liveGiftPct;
+            const liveGiftPct = Math.round((giftCount / totalClassified) * 100);
+            const liveSelfPct = 100 - liveGiftPct;
+            const sortedReasons = [
+                { reason: 'Tự mua dùng', pct: liveSelfPct },
+                { reason: 'Mua tặng', pct: liveGiftPct }
+            ].sort((a, b) => b.pct - a.pct);
+
+            data.motivation_breakdown = {
+                gift_purchases_pct: liveGiftPct,
+                self_purchases_pct: liveSelfPct,
+                source_type: 'shop_actual',
+                sample_size: totalClassified,
+                source_description: `Bóc tách từ ${totalClassified} đơn thực tế (${giftCount} đơn quà tặng, ${selfUseCount} đơn tự dùng)`,
+                top_reasons: sortedReasons
+            };
+
+            if (Array.isArray(data.purchase_reasons)) {
+                data.purchase_reasons = [
+                    { reason: 'Mua làm quà tặng', pct: liveGiftPct, count: giftCount },
+                    { reason: 'Tự mua sử dụng', pct: liveSelfPct, count: selfUseCount }
+                ];
+            }
         } else {
-            // Chuẩn ngành TMĐT đa danh mục (Shopee, Amazon, Etsy, Lazada) theo từng ngành hàng & loại sự kiện
-            let defaultGiftPct = 40;
-            const isMegaSale = campId.includes('11/11') || campId.includes('12/12') || campId.includes('sale') || campId.includes('black-friday') || campId.includes('luong-ve');
-            const isValentine = campId.includes('valentine');
-            const isWomenDay = campId.includes('8/3') || campId.includes('20/10');
-            const isTeachersDay = campId.includes('20/11');
-            const isNoel = campId.includes('noel') || campId.includes('giang-sinh');
-            const isTet = campId.includes('tet');
-
-            if (isMegaSale) {
-                defaultGiftPct = 20;
-            } else if (isValentine) {
-                // Lễ tình nhân: Mua tặng chiếm ưu thế
-                defaultGiftPct = ['phu-kien', 'sac-dep', 'thu-cong-qua-tang'].includes(detectedSlug) ? 80 : 65;
-            } else if (isWomenDay) {
-                defaultGiftPct = ['sac-dep', 'phu-kien', 'thu-cong-qua-tang'].includes(detectedSlug) ? 75 : 60;
-            } else if (isTeachersDay) {
-                defaultGiftPct = 75;
-            } else if (isNoel) {
-                // Giáng sinh
-                defaultGiftPct = ['thu-cong-qua-tang', 'nha-cua-doi-song'].includes(detectedSlug) ? 65 : 50;
-            } else if (isTet) {
-                // Tết Nguyên Đán: Khách hàng mua sắm theo đặc thù từng ngành hàng TMĐT:
-                if (detectedSlug === 'thoi-trang') {
-                    defaultGiftPct = 25;
-                } else if (detectedSlug === 'dien-tu') {
-                    defaultGiftPct = 20;
-                } else if (detectedSlug === 'me-be') {
-                    defaultGiftPct = 15;
-                } else if (detectedSlug === 'sac-dep') {
-                    defaultGiftPct = 35;
-                } else if (detectedSlug === 'nha-cua-doi-song') {
-                    defaultGiftPct = 40;
-                } else if (detectedSlug === 'the-thao') {
-                    defaultGiftPct = 20;
-                } else if (detectedSlug === 'van-phong-pham') {
-                    defaultGiftPct = 25;
-                } else if (detectedSlug === 'phu-kien') {
-                    defaultGiftPct = 40;
-                } else if (detectedSlug === 'bach-hoa') {
-                    defaultGiftPct = 55;
-                } else if (detectedSlug === 'thu-cong-qua-tang') {
-                    defaultGiftPct = 65;
-                } else {
-                    defaultGiftPct = 30;
-                }
-            }
-
-            liveGiftPct = defaultGiftPct;
-            liveSelfPct = 100 - defaultGiftPct;
-        }
-
-        const sortedReasons = [
-            { reason: 'Tự mua dùng', pct: liveSelfPct },
-            { reason: 'Mua tặng', pct: liveGiftPct }
-        ].sort((a, b) => b.pct - a.pct);
-
-        data.motivation_breakdown = {
-            gift_purchases_pct: liveGiftPct,
-            self_purchases_pct: liveSelfPct,
-            source_type: totalClassified >= 3 ? 'shop_actual' : 'industry_benchmark',
-            sample_size: totalClassified,
-            source_description: totalClassified >= 3
-                ? `Bóc tách từ ${totalClassified} đơn thực tế (${giftCount} đơn quà tặng, ${selfUseCount} đơn tự dùng)`
-                : `Ước tính theo quy ước ngành ${detectedName} dịp ${activeCamp?.name || 'mùa vụ'}, chưa phải số đo từ đơn thực tế`,
-            top_reasons: sortedReasons
-        };
-
-        if (Array.isArray(data.occasion_traits)) {
-            const purchaseGoalTrait = data.occasion_traits.find((t: any) => t.id === 'purchase_goal');
-            if (purchaseGoalTrait) {
-                purchaseGoalTrait.value = `${liveGiftPct}% Mua tặng / ${liveSelfPct}% Tự dùng`;
-                purchaseGoalTrait.evidence = {
-                    ...purchaseGoalTrait.evidence,
-                    definition: totalClassified >= 3
-                        ? `Dựa trên dữ liệu thực tế: ${giftCount} đơn mua quà và ${selfUseCount} đơn tự dùng ghi nhận trong dịp ${activeCamp?.name || ''}.`
-                        : `Dự báo hành vi người mua ngành ${detectedName} dịp ${activeCamp?.name || ''} từ dữ liệu chuẩn ngành TMĐT.`,
-                    n: totalClassified > 0 ? totalClassified : 1500
-                };
-            }
-        }
-
-        if (Array.isArray(data.purchase_reasons)) {
-            data.purchase_reasons = [
-                { reason: 'Mua làm quà tặng', pct: liveGiftPct, count: giftCount },
-                { reason: 'Tự mua sử dụng', pct: liveSelfPct, count: selfUseCount }
-            ];
+            data.motivation_breakdown = {
+                gift_purchases_pct: null,
+                self_purchases_pct: null,
+                source_type: 'insufficient',
+                sample_size: totalClassified,
+                source_description: `Chưa đủ 3 đơn thực tế trong dịp ${activeCamp?.name || 'mùa vụ'} (hiện có ${totalClassified} đơn) để phân loại mục đích mua.`,
+                top_reasons: []
+            };
         }
 
         // 3.2. Bóc tách và đồng bộ các kênh bán hàng chuẩn TMĐT (Channel Breakdown)
@@ -1258,9 +1153,10 @@ Yêu cầu nghiệp vụ:
                     sku_orders: b.skus.size || count,
                     items_sold: b.items,
                     aov_vnd: aov,
-                    growth_pct: count > 0 ? (cfg.key === 'campaign_promo' ? 28.0 : (cfg.key === 'organic_listing' ? 14.5 : 8.0)) : null,
+                    growth_pct: null,
                     action_tip: cfg.tip,
                     source_type: 'shop_actual',
+                    is_target_plan: false,
                     criteria_rule: cfg.rule,
                     action_checklist: cfg.checklist,
                     sample_orders: b.orders.slice(0, 4).map(o => ({
@@ -1272,39 +1168,23 @@ Yêu cầu nghiệp vụ:
                 };
             });
         } else {
-            // Trường hợp chưa phát sinh đơn: Phân bổ mục tiêu chuẩn ngành đồng bộ 100% với targetOrders
-            const ordListing = Math.round(targetOrders * 0.45);
-            const ordCampaign = Math.round(targetOrders * 0.25);
-            const ordSocial = Math.round(targetOrders * 0.15);
-            const ordRepeat = Math.max(0, targetOrders - ordListing - ordCampaign - ordSocial);
-            const channelCounts: Record<string, number> = {
-                organic_listing: ordListing,
-                campaign_promo: ordCampaign,
-                direct_social: ordSocial,
-                repeat_buyers: ordRepeat
-            };
-
-            data.channel_breakdown = CHANNEL_CONFIGS.map(cfg => {
-                const count = channelCounts[cfg.key] || 0;
-                const sharePct = targetOrders > 0 ? Math.round((count / targetOrders) * 1000) / 10 : cfg.targetRatio * 100;
-                const gmv = count * (actualAov || 250000);
-                return {
-                    channel_key: cfg.key,
-                    name: cfg.name,
-                    share_pct: sharePct,
-                    gmv_vnd: gmv,
-                    orders_count: count,
-                    sku_orders: Math.round(count * 1.2),
-                    items_sold: Math.round(count * 1.5),
-                    aov_vnd: actualAov || 250000,
-                    growth_pct: null,
-                    action_tip: cfg.tip,
-                    source_type: 'industry_benchmark',
-                    is_target_plan: true,
-                    criteria_rule: cfg.rule,
-                    action_checklist: cfg.checklist
-                };
-            });
+            // Trường hợp chưa phát sinh đơn: Không bịa tỷ trọng 45/25/15/15% hay GMV giả — trả 0 kèm checklist chuẩn bị
+            data.channel_breakdown = CHANNEL_CONFIGS.map(cfg => ({
+                channel_key: cfg.key,
+                name: cfg.name,
+                share_pct: 0,
+                gmv_vnd: 0,
+                orders_count: 0,
+                sku_orders: 0,
+                items_sold: 0,
+                aov_vnd: 0,
+                growth_pct: null,
+                action_tip: cfg.tip,
+                source_type: 'insufficient',
+                is_target_plan: true,
+                criteria_rule: cfg.rule,
+                action_checklist: cfg.checklist
+            }));
         }
 
         // Đọc trạng thái ý tưởng đã lưu, bản chỉnh sửa ý tưởng, đánh giá sau dịp và checklist mốc thời gian
@@ -1416,13 +1296,41 @@ Yêu cầu nghiệp vụ:
                 }))
                 : []);
 
+        // Gắn `source_idea_id` thật từ MongoDB vào `data.shop_products` để Tab Áp dụng khớp chính xác 100%
+        if (Array.isArray(data.shop_products) && shopProducts.length > 0) {
+            const ideaByProdId = new Map<string, string>();
+            for (const sp of shopProducts) {
+                if (sp._id && sp.source_idea_id) {
+                    ideaByProdId.set(String(sp._id), String(sp.source_idea_id));
+                }
+            }
+            for (const dp of data.shop_products) {
+                const pid = String(dp._id || dp.id || '');
+                if (pid && !dp.source_idea_id && ideaByProdId.has(pid)) {
+                    dp.source_idea_id = ideaByProdId.get(pid);
+                }
+            }
+        }
+
+        const activeCampIdForGen = data.active_campaign?.id || 'event';
+        const activeEventYear = peakDt && !Number.isNaN(peakDt.getTime()) ? peakDt.getFullYear() : new Date().getFullYear();
+        const safeGenCampKey = `${String(activeCampIdForGen).replace(/[^a-zA-Z0-9_-]/g, '_')}_${activeEventYear}`;
+        const persistedEntry = seasonalPrefs?.generated_ideas?.[safeGenCampKey];
+        const persistedIdeas: ShopSeasonalIdea[] | null =
+            Array.isArray(persistedEntry?.ideas) && persistedEntry.ideas.length > 0
+                ? persistedEntry.ideas
+                : null;
+
         const aiIdeasPromise = data.active_campaign
             ? SeasonalAnalyticsService.fetchGeminiSeasonalIdeas({
                 shopId: viewer.live_shop_id || viewer.analysed_shop_id || 'default',
+                liveShopOid,
                 shopName: viewer.shop_name || 'Gian hàng của bạn',
                 catName: data.seller_category?.name || 'Thời trang & Phụ kiện',
-                campId: data.active_campaign.id || 'event',
+                campId: activeCampIdForGen,
                 campName: data.active_campaign.name || 'Dịp cao điểm',
+                eventYear: activeEventYear,
+                persistedIdeas,
                 shopStyleKeywords: bpStyleKws,
                 shopSampleTitles: bpTitles,
                 priceBand: bpPriceBand,

@@ -52,6 +52,8 @@ export interface IProduct extends Document {
     }[];
     average_rating?: number;
     rating_count?: number;
+    // ID ý tưởng mùa vụ (F38 Seasonal) mà seller dùng để tạo sản phẩm này
+    source_idea_id?: string;
     // Do script seed ghi thẳng; khai báo để query lọc seed_ref có kiểu.
     seed_ref?: string;
     created_at: Date;
@@ -157,7 +159,8 @@ const ProductSchema = new Schema<IProduct>({
     printer_name: { type: String },
     design_placements: { type: [DesignPlacementSchema], default: [] },
     average_rating: { type: Number, default: 5.0, min: 0, max: 5, index: true },
-    rating_count: { type: Number, default: 0 }
+    rating_count: { type: Number, default: 0 },
+    source_idea_id: { type: String, index: true, sparse: true }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });

@@ -1122,6 +1122,10 @@ export class ProductsService {
         }
         images = await ProductsService.sanitizeImages(images);
 
+        const sourceIdeaId = typeof (payload.source_idea_id ?? payload.sourceIdeaId) === 'string'
+            ? String(payload.source_idea_id ?? payload.sourceIdeaId).trim().slice(0, 120) || undefined
+            : undefined;
+
         const mp = await MongoProduct.create({
             shop_id: shop._id,
             shipping_profile_id: new mongoose.Types.ObjectId(),
@@ -1141,6 +1145,7 @@ export class ProductsService {
             status: 'PUBLISHED',
             listing_status: 'ACTIVE',
             moderation_status: 'APPROVED',
+            ...(sourceIdeaId ? { source_idea_id: sourceIdeaId } : {}),
             ...podFields,
         });
 
@@ -1228,6 +1233,11 @@ export class ProductsService {
         }
         const images = await ProductsService.sanitizeImages(rawImages);
 
+        const rawSourceIdea = (payload as any).source_idea_id ?? (payload as any).sourceIdeaId;
+        const sourceIdeaId = typeof rawSourceIdea === 'string'
+            ? rawSourceIdea.trim().slice(0, 120) || undefined
+            : undefined;
+
         const mp = await MongoProduct.create({
             shop_id: shop._id,
             shipping_profile_id: new mongoose.Types.ObjectId(),
@@ -1250,6 +1260,7 @@ export class ProductsService {
             status: 'PUBLISHED',
             listing_status: payload.status === 'OUT_OF_STOCK' ? 'ACTIVE' : (payload.status || 'ACTIVE'),
             moderation_status: 'APPROVED',
+            ...(sourceIdeaId ? { source_idea_id: sourceIdeaId } : {}),
         });
 
         const baseSku = payload.sku || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
