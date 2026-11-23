@@ -36,7 +36,7 @@ export interface CreateRefundRequestInput {
 }
 
 /** Đơn COD: khách phải cung cấp tài khoản để người bán chuyển khoản hoàn. */
-function codBankInfo(raw?: CreateRefundRequestInput['refund_bank_info']) {
+export function codBankInfo(raw?: CreateRefundRequestInput['refund_bank_info']) {
     const bank_name = raw?.bank_name?.trim() ?? '';
     const account_holder = raw?.account_holder?.trim() ?? '';
     const account_number = raw?.account_number?.trim() ?? '';

@@ -8,6 +8,7 @@ import type { ReturnEvidenceItem } from '../application/return-evidence-policy';
 import { validateRefundEvidence } from '../application/refund-evidence-policy';
 import { ReplacementOrderService } from '../application/replacement-order.service';
 import { settleReturnRefundManually } from '../application/return-manual-refund';
+import { bankInfoForNewReturn, buyerUpdateReturnBankInfo, returnBankInfoOf, saveReturnBankInfo } from '../application/return-refund-bank';
 import { ReturnRequest } from '../infrastructure/models/return-request.model';
 import { Order } from '../infrastructure/models/order.model';
 import { ReputationService } from '../../seller/application/reputation.service';
@@ -51,17 +52,26 @@ export function createReturnRequestRouter({ service, authenticate, clock }: Retu
         const role=roleMap[String(req.user?.role||'').toLowerCase()] as ReturnRequestActorRole|undefined;
         if(!role) return res.status(req.user?403:401).json({error:'Buyer, Seller, Printer or Admin role required.'});
         const result=await service.listRequests({role,actorId:req.user.id,status:typeof req.query.status==='string'?req.query.status:undefined,page:Number(req.query.page)||1,pageSize:Number(req.query.pageSize)||20});
+        if(role==='SELLER'||role==='PRINTER') result.items=result.items.map(({refund_bank_info,...item}:any)=>item);
         return res.json({data:result});
     }));
     router.post('/requests', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='buyer') return res.status(req.user?403:401).json({error:'Buyer role required.'});
         validateUploadedReferences(req.body?.evidence||[],req.body?.reasonCode,req.body?.description);
+        const bank=await bankInfoForNewReturn(req.body?.orderId,req.body?.resolution,req.body?.refundBankInfo);
         const data=await service.createBuyerRequest({actorId:req.user.id,orderId:req.body?.orderId,orderItemId:req.body?.orderItemId,quantity:Number(req.body?.quantity),reasonCode:req.body?.reasonCode,description:req.body?.description,resolution:req.body?.resolution,evidence:req.body?.evidence||[]});
+        if(bank) await saveReturnBankInfo(String((data as any).id||(data as any)._id),bank);
         return res.status(201).json({data});
+    }));
+    router.put('/requests/:id/bank-info', asyncRoute(async(req,res)=>{
+        if(String(req.user?.role||'').toLowerCase()!=='buyer') return res.status(req.user?403:401).json({error:'Buyer role required.'});
+        return res.json({data:await buyerUpdateReturnBankInfo(req.params.id,req.user.id,req.body)});
     }));
     router.get('/requests/:id', asyncRoute(async(req,res)=>{
         const role=roleMap[String(req.user?.role||'').toLowerCase()]; if(!role) return res.status(req.user?403:401).json({error:'Unsupported role.'});
-        const data=await service.getRequestDetail(req.user.id,role,req.params.id); return data?res.json({data}):res.status(404).json({error:'Return request not found.'});
+        const data:any=await service.getRequestDetail(req.user.id,role,req.params.id); if(!data) return res.status(404).json({error:'Return request not found.'});
+        data.request={...data.request,refund_bank_info:role==='BUYER'||role==='ADMIN'?await returnBankInfoOf(req.params.id):null};
+        return res.json({data});
     }));
     router.get('/requests/:id/audit-profile', asyncRoute(async(req,res)=>{
         if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(403).json({error:'Admin role required.'});
