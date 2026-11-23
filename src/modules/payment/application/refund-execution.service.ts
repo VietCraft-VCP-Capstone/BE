@@ -18,6 +18,7 @@ export interface RefundExecutionRepository {
     findOrCreate(input: RefundExecutionInput): Promise<PaymentRefundRecord>;
     claim(record: PaymentRefundRecord): Promise<boolean>;
     lockOrder(orderId: string, executionId: string): Promise<boolean>;
+    referenceUsed(reference: string, exceptId: string): Promise<boolean>;
     refundedAmount(orderId: string): Promise<number>;
     recordResult(id: string, status: PaymentRefundStatus, result: Partial<RefundGatewayResult>): Promise<void>;
     releaseOrder(orderId: string, executionId: string): Promise<void>;
@@ -30,6 +31,12 @@ export interface RefundExecutionResult { executionId: string; status: 'REFUNDED'
 export class RefundExecutionError extends Error {
     constructor(message: string, readonly statusCode = 400) { super(message); }
 }
+/** Mã giao dịch ngân hàng nhập tay: chuẩn hóa in hoa, sai định dạng thì ném lỗi. */
+export const normalizeManualReference = (raw: string): string => {
+    const reference = (raw || '').trim().toUpperCase();
+    if (!/^[A-Z0-9-]{6,40}$/.test(reference)) throw new RefundExecutionError('Mã giao dịch phải gồm 6–40 ký tự chữ, số hoặc dấu gạch ngang.');
+    return reference;
+};
 
 /**
  * Một lần gửi lệnh chi (kể cả gateway tự retry) xong trong dưới một phút. Bản ghi còn
@@ -122,8 +129,7 @@ export class RefundExecutionService {
      * không thì khách có thể nhận tiền hoàn hai lần.
      */
     async settleManually(input: RefundExecutionInput, manual: ManualSettlement): Promise<RefundExecutionResult> {
-        const reference = manual.reference?.trim();
-        if (!reference) throw new RefundExecutionError('Cần mã giao dịch ngân hàng của lần chuyển khoản hoàn tiền.');
+        const reference = normalizeManualReference(manual.reference);
         if (!input.businessKey?.trim()) throw new RefundExecutionError('Thiếu mã yêu cầu hoàn tiền đã được duyệt.');
         if (!Number.isSafeInteger(input.amount) || input.amount <= 0) throw new RefundExecutionError('Số tiền hoàn phải là số nguyên VND lớn hơn 0.');
         const context = await this.repository.loadContext(input.orderId);
@@ -154,6 +160,7 @@ export class RefundExecutionService {
             await this.repository.releaseOrder(context.orderId, record._id);
         }
 
+        if (await this.repository.referenceUsed(reference, record._id)) throw new RefundExecutionError('Mã giao dịch này đã được dùng cho một lần hoàn tiền khác.', 409);
         if (!await this.repository.lockOrder(context.orderId, record._id)) {
             throw new RefundExecutionError('Đơn đang có một giao dịch hoàn tiền khác cần xác minh.', 409);
         }
