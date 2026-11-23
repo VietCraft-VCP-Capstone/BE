@@ -13,6 +13,7 @@ import { createReturnEligibilityItemSource } from './return-eligibility-source';
 import { getOrderItemReturnQuantityUsage } from './return-quantity-source';
 import { buildReturnItemSnapshot } from './return-item-snapshot';
 import { executeReturnRefund } from './return-refund-executor';
+import { refundContextOf } from '../../payment/application/refund-runtime';
 
 export function isDevOrderSimulationEnabled(env: NodeJS.ProcessEnv = process.env): boolean { return env.NODE_ENV==='development' && env.ENABLE_DEV_ORDER_SIMULATION==='true'; }
 export function createReturnClock(realClock: ReturnRequestClock, env: NodeJS.ProcessEnv = process.env): ReturnRequestClock {
@@ -57,5 +58,5 @@ export function createReturnRequestService(realClock: ReturnRequestClock = { now
     const enabled=isDevOrderSimulationEnabled(env);
     const bridgeRepository=new MongooseReturnRefundExecutionRepository();
     const bridge: ReturnRequestRefundBridge={ async createLinkedRefund(input){ return createLinkedRefundExecution(bridgeRepository,input); } };
-    return new ReturnRequestApplicationService({ repository:new MongoReturnRequestRepository(),snapshotSource:createOrderReturnSnapshotSource(enabled,env),eligibilityItemSource:createReturnEligibilityItemSource(enabled),resolveBuyerOrderId,deliveredEventSource:new OrderDeliveredEventSource(enabled),bridge,executeRefund:executeReturnRefund,clock:createReturnClock(realClock,env),id:()=>crypto.randomUUID() });
+    return new ReturnRequestApplicationService({ repository:new MongoReturnRequestRepository(),snapshotSource:createOrderReturnSnapshotSource(enabled,env),eligibilityItemSource:createReturnEligibilityItemSource(enabled),resolveBuyerOrderId,deliveredEventSource:new OrderDeliveredEventSource(enabled),bridge,executeRefund:executeReturnRefund,maxRefundMinor:async(orderId)=>(await refundContextOf(orderId)).paidAmount,clock:createReturnClock(realClock,env),id:()=>crypto.randomUUID() });
 }

@@ -7,6 +7,7 @@ import type { ReturnActor } from '../application/return-state-machine';
 import type { ReturnEvidenceItem } from '../application/return-evidence-policy';
 import { validateRefundEvidence } from '../application/refund-evidence-policy';
 import { ReplacementOrderService } from '../application/replacement-order.service';
+import { settleReturnRefundManually } from '../application/return-manual-refund';
 import { ReturnRequest } from '../infrastructure/models/return-request.model';
 import { Order } from '../infrastructure/models/order.model';
 import { ReputationService } from '../../seller/application/reputation.service';
@@ -148,6 +149,10 @@ export function createReturnRequestRouter({ service, authenticate, clock }: Retu
         const data=await service.adminConfirmRefund({actorId:req.user.id,requestId:req.params.id,amountMinor:req.body?.amountMinor,currency:req.body?.currency,faultParty:req.body?.faultParty});
 
         return res.json({data});
+    }));
+    router.post('/requests/:id/admin/manual-refund', asyncRoute(async(req,res)=>{
+        if(String(req.user?.role||'').toLowerCase()!=='admin') return res.status(req.user?403:401).json({error:'Admin role required.'});
+        return res.json({data:await settleReturnRefundManually(req.params.id,req.user.id,req.body?.reference,req.body?.note)});
     }));
     if(enabledDev()) {
         router.post('/requests/dev/printer-action', asyncRoute(async(req,res)=>{
