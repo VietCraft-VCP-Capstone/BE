@@ -304,6 +304,11 @@ export class PayosService {
         info: { amount: number; reference: string; paidAt: Date; responseCode: string; payload: Record<string, any> },
     ): Promise<boolean> {
         if (order.payment_status !== 'PENDING') return false;
+        if (order.order_status === 'CANCELLED') {
+            // Đơn đã hủy (kho, voucher đã hoàn): không hồi sinh. Tiền đã về nên cần hoàn thủ công.
+            logger.error(`[PayOS] Tiền về cho đơn ĐÃ HỦY #${order.order_code} (ref ${info.reference}, ${info.amount}đ). Cần hoàn tiền thủ công.`);
+            return false;
+        }
 
         const orderCode = order.order_code;
         const { amount: paidAmount, reference } = info;
@@ -314,7 +319,7 @@ export class PayosService {
         const isAutoApprove = isPod && Boolean(shopData?.printer_partner?.auto_approve);
 
         const updatedOrder = await Order.findOneAndUpdate(
-            { order_code: orderCode, payment_status: 'PENDING' },
+            { order_code: orderCode, payment_status: 'PENDING', order_status: { $ne: 'CANCELLED' } },
             {
                 $set: {
                     payment_status: 'PAID',

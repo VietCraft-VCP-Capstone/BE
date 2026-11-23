@@ -284,7 +284,7 @@ export class OrdersService {
     const claimed: string[] = [];
     const rollback = async () => {
       await releaseVariantStock(orderItems).catch(err => console.error('[STOCK] Lỗi hoàn tồn kho:', err?.message || err));
-      for (const code of claimed) await PromotionService.releaseUsage(code).catch(() => { });
+      for (const code of claimed) await PromotionService.releaseUsage(code, buyerId).catch(() => { });
     };
 
     const carrierInput = String(
@@ -389,13 +389,18 @@ export class OrdersService {
 
   /** Hoàn lại tồn kho và voucher khi đơn hàng bị hủy */
   static async restoreOrderStockAndCoupon(order: any): Promise<void> {
+    const claimed = await OrderModel.findOneAndUpdate(
+      { _id: order._id, stock_restored_at: { $exists: false } },
+      { $set: { stock_restored_at: new Date() } },
+    );
+    if (!claimed) return;
     if (order.coupon_code) {
-      await PromotionService.releaseUsage(order.coupon_code).catch(err =>
+      await PromotionService.releaseUsage(order.coupon_code, String(order.buyer_id)).catch(err =>
         console.error('[COUPON] Lỗi hoàn lượt dùng voucher:', err?.message || err)
       );
     }
     if (order.shipping_coupon_code) {
-      await PromotionService.releaseUsage(order.shipping_coupon_code).catch(err =>
+      await PromotionService.releaseUsage(order.shipping_coupon_code, String(order.buyer_id)).catch(err =>
         console.error('[COUPON] Lỗi hoàn lượt dùng voucher vận chuyển:', err?.message || err)
       );
     }
@@ -688,6 +693,10 @@ export class OrdersService {
   ): Promise<OrderResponse> {
     const order = await OrderModel.findOne(byCodeOrId(id)).populate("shop_id");
     if (!order) throw new Error("Không tìm thấy đơn hàng");
+    // Đơn payOS chỉ được xác nhận qua payOS; đơn đã trả hoặc đã hủy không được đổi trạng thái thanh toán nữa.
+    if (order.payment_method === 'PAYOS' || order.payment_status !== 'PENDING' || order.order_status === 'CANCELLED') {
+      throw new Error("Đơn hàng không ở trạng thái chờ thanh toán");
+    }
 
     if (gatewayStatus === "success") {
       order.payment_status = "PAID";

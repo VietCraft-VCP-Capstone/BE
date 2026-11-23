@@ -4,6 +4,7 @@ import { Shop } from '../../product/infrastructure/models/shop.model';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
 import { calcCouponDiscount } from './coupon-math';
+import { CouponRedemption } from '../infrastructure/models/coupon-redemption.model';
 
 export const dec = (n: number) => mongoose.Types.Decimal128.fromString(Math.round(n || 0).toString());
 export const num = (v: any) => (v ? Number(v.toString()) : 0);
@@ -358,6 +359,16 @@ export class PromotionService {
             }
         }
 
+        // Giữ chỗ "mỗi người một lần" bằng chỉ mục duy nhất: hai request song song cùng qua bước kiểm trên vẫn chỉ một cái ghi được.
+        if (buyerId) {
+            try {
+                await CouponRedemption.create({ code: cleanCode, buyer_id: new mongoose.Types.ObjectId(buyerId) });
+            } catch (err: any) {
+                if (err?.code === 11000) throw new Error('Bạn đã sử dụng mã giảm giá này ở đơn hàng trước đó.');
+                throw err;
+            }
+        }
+
         // Atomic increment: chỉ tăng nếu chưa vượt giới hạn
         const updated = await Coupon.findOneAndUpdate(
             {
@@ -373,6 +384,7 @@ export class PromotionService {
         );
 
         if (!updated) {
+            if (buyerId) await CouponRedemption.deleteOne({ code: cleanCode, buyer_id: new mongoose.Types.ObjectId(buyerId) }).catch(() => { });
             throw new Error('Mã giảm giá đã hết lượt sử dụng hoặc không còn hoạt động.');
         }
     }
@@ -380,12 +392,14 @@ export class PromotionService {
     /**
      * Hoàn lại 1 lượt sử dụng (khi hủy đơn hàng có dùng voucher).
      */
-    static async releaseUsage(code: string): Promise<void> {
+    static async releaseUsage(code: string, buyerId?: string): Promise<void> {
         if (!code) return;
+        const cleanCode = code.trim().toUpperCase();
         await Coupon.findOneAndUpdate(
-            { code: code.trim().toUpperCase(), used_count: { $gt: 0 } },
+            { code: cleanCode, used_count: { $gt: 0 } },
             { $inc: { used_count: -1 } }
         );
+        if (buyerId) await CouponRedemption.deleteOne({ code: cleanCode, buyer_id: new mongoose.Types.ObjectId(buyerId) });
     }
 
     /**

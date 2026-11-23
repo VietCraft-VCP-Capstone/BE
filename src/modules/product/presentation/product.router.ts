@@ -8,6 +8,7 @@ import { authenticate, requireRole, optionalAuthenticate, AuthenticatedRequest }
 import { ReviewService } from '../../order';
 import { RecommendService } from '../application/recommend/recommend.service';
 import { nfcLower } from '../../../shared/utils/vietnamese-search.util';
+import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 import { getRecentSearches, addRecentSearch, clearRecentSearches } from '../application/recent-searches';
 
 const router = Router();
@@ -89,7 +90,7 @@ router.get('/search', optionalAuthenticate, async (req: AuthenticatedRequest, re
     }
 });
 
-router.post('/search/click', async (req, res) => {
+router.post('/search/click', userRateLimit(60, 60_000, 'Gửi quá nhanh, vui lòng thử lại sau.'), async (req, res) => {
     const click = parseSearchClick(req.body);
     if (!click) return res.status(400).json({ error: 'Dữ liệu click không hợp lệ' });
     try {

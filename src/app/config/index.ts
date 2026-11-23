@@ -90,6 +90,10 @@ export const config = {
     speedSmsType: Number(process.env.SPEEDSMS_SMS_TYPE) || 2,
 };
 
+if (!process.env.NODE_ENV) {
+    logger.warn('NODE_ENV chưa được đặt nên đang chạy như development (CORS mở, bỏ qua một số kiểm tra). Máy chủ thật phải đặt NODE_ENV=production.');
+}
+
 if (!config.jwtSecret) {
     if (config.nodeEnv === 'production') {
         throw new Error('FATAL: JWT_SECRET environment variable is not defined.');
