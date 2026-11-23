@@ -31,14 +31,14 @@ export async function settleReturnRefundManually(requestId: string, adminId: str
     if (!request) throw fail('Không tìm thấy yêu cầu đổi/trả.', 404);
     const linked = await ReturnRefundExecution.findOne({ request_id: request._id, order_item_id: request.order_item_id }).lean();
     if (!linked || !request.refund_admin_confirmed || linked.admin_decision_id !== request.admin_decision_id) throw fail('Yêu cầu chưa có quyết định hoàn tiền đã được Admin xác nhận.');
-    if (linked.status === 'REFUNDED') return { id: String(linked._id), status: 'REFUNDED' as const };
-    if (linked.status !== 'PENDING_INTEGRATION' && linked.status !== 'FAILED') throw fail('Lệnh hoàn đang được xử lý tự động, chưa thể xác nhận thủ công.', 409);
+    if (!['PENDING_INTEGRATION', 'FAILED', 'REFUNDED'].includes(linked.status)) throw fail('Lệnh hoàn đang được xử lý tự động, chưa thể xác nhận thủ công.', 409);
     const amount = await capToPaid(request, linked, adminId);
     const result = await settleRefundManually(
         { orderId: request.order_id, businessKey: request._id, amount, reason: `Hoan tien mon hang ${request.order_item_id}`, createdBy: adminId },
         { reference, settledBy: adminId, ...(note?.trim() ? { note: note.trim() } : {}) },
     );
-    await ReturnRefundExecution.updateOne({ _id: linked._id }, { $set: { status: 'REFUNDED', error: '' } });
+    const marked = await ReturnRefundExecution.updateOne({ _id: linked._id, status: { $ne: 'REFUNDED' } }, { $set: { status: 'REFUNDED', error: '' } });
+    if (!marked.modifiedCount) return { id: String(linked._id), status: 'REFUNDED' as const };
     await ReturnRequest.updateOne({ _id: request._id }, { $set: { linked_refund_status: 'REFUNDED', updated_at: new Date() }, $inc: { version: 1 } });
     await ReturnRequestLog.create({ request_id: request._id, actor_id: adminId, actor_role: 'ADMIN', from_status: request.status, to_status: request.status,
         reason: `Đã chuyển khoản hoàn ${amount.toLocaleString('vi-VN')}đ cho bạn.`, event_id: result.executionId });

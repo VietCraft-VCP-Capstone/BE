@@ -139,8 +139,10 @@ export class RefundExecutionService {
         const record = await this.repository.findOrCreate(input);
         if (record.order_id !== context.orderId || record.amount !== input.amount) throw new RefundExecutionError('Yêu cầu hoàn tiền đã lưu có đơn hoặc số tiền khác.', 409);
         const output = (status: RefundExecutionResult['status'], error?: string): RefundExecutionResult => ({ executionId: record._id, status, amount: record.amount, ...(error ? { error } : {}) });
+        const otherReference = (saved: PaymentRefundRecord) => saved.gateway_response?.manual === true && saved.gateway_response.reference !== reference;
 
         if (record.status === 'SUCCEEDED') {
+            if (otherReference(record)) throw new RefundExecutionError('Yêu cầu này đã được xác nhận hoàn với mã giao dịch khác.', 409);
             await this.repository.materializeSuccess(context, record);
             return output('REFUNDED');
         }
@@ -171,7 +173,10 @@ export class RefundExecutionService {
         }
         const data = { manual: true, reference, settledBy: manual.settledBy, settledAt: new Date().toISOString(), ...(manual.note ? { note: manual.note } : {}) };
         await this.repository.recordResult(record._id, 'SUCCEEDED', { status: 'SUCCEEDED', data });
-        await this.repository.materializeSuccess(context, { ...record, status: 'SUCCEEDED', gateway_response: data });
+        // Bấm song song với mã khác: chỉ lệnh ghi được trước mới thành công.
+        const saved = await this.repository.findOrCreate(input);
+        if (otherReference(saved)) throw new RefundExecutionError('Yêu cầu này vừa được xác nhận hoàn với mã giao dịch khác.', 409);
+        await this.repository.materializeSuccess(context, saved);
         return output('REFUNDED');
     }
 }
