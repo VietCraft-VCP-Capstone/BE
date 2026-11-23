@@ -7,7 +7,7 @@ import type { ReturnActor } from '../application/return-state-machine';
 import type { ReturnEvidenceItem } from '../application/return-evidence-policy';
 import { validateRefundEvidence } from '../application/refund-evidence-policy';
 import { ReplacementOrderService } from '../application/replacement-order.service';
-import { settleReturnRefundManually } from '../application/return-manual-refund';
+import { payableReturnRefund, settleReturnRefundManually } from '../application/return-manual-refund';
 import { bankInfoForNewReturn, buyerUpdateReturnBankInfo, returnBankInfoOf, saveReturnBankInfo } from '../application/return-refund-bank';
 import { ReturnRequest } from '../infrastructure/models/return-request.model';
 import { Order } from '../infrastructure/models/order.model';
@@ -71,6 +71,7 @@ export function createReturnRequestRouter({ service, authenticate, clock }: Retu
         const role=roleMap[String(req.user?.role||'').toLowerCase()]; if(!role) return res.status(req.user?403:401).json({error:'Unsupported role.'});
         const data:any=await service.getRequestDetail(req.user.id,role,req.params.id); if(!data) return res.status(404).json({error:'Return request not found.'});
         data.request={...data.request,refund_bank_info:role==='BUYER'||role==='ADMIN'?await returnBankInfoOf(req.params.id):null};
+        if(role==='ADMIN'&&data.request.refund_amount_minor!=null) (data.request as any).refund_payable_minor=await payableReturnRefund(data.request.order_id,data.request.refund_amount_minor);
         return res.json({data});
     }));
     router.get('/requests/:id/audit-profile', asyncRoute(async(req,res)=>{

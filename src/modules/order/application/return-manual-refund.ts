@@ -5,10 +5,16 @@ import { ReturnRequest, ReturnRequestLog } from '../infrastructure/models/return
 
 const fail = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 
+export const cappedRefund = (decided: number, paid: number) => Number.isSafeInteger(paid) && paid > 0 ? Math.min(decided, paid) : decided;
+
+export async function payableReturnRefund(orderId: string, decided: number) {
+    try { return cappedRefund(decided, (await refundContextOf(orderId)).paidAmount); } catch { return decided; }
+}
+
 /** Quyết định cũ có thể vượt số tiền khách đã trả: chỉ hạ xuống, và chỉ khi tiền chưa được chi. */
 async function capToPaid(request: any, linked: any, adminId: string): Promise<number> {
     const paid = (await refundContextOf(request.order_id)).paidAmount;
-    if (!Number.isSafeInteger(paid) || paid <= 0 || linked.amount_minor <= paid) return linked.amount_minor;
+    if (cappedRefund(linked.amount_minor, paid) === linked.amount_minor) return linked.amount_minor;
     const pay = await PaymentRefundExecution.findOne({ business_key: request._id }).lean();
     if (pay && pay.status !== 'READY' && pay.status !== 'FAILED') throw fail('Lệnh hoàn đang được xử lý, chưa thể điều chỉnh số tiền.', 409);
     await PaymentRefundExecution.updateOne({ business_key: request._id, status: { $in: ['READY', 'FAILED'] } }, { $set: { amount: paid } });
