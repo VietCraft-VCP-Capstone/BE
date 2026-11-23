@@ -324,7 +324,7 @@ export class RefundRequestService {
                 status: 'REFUNDED', execution_status: 'SUCCEEDED', execution_error: '',
             } }, { runValidators: true });
             if (changed.modifiedCount) void this.notify(doc.buyer_id.toString(), 'Hoàn tiền thành công',
-                `Người bán đã hoàn ${result.amount.toLocaleString('vi-VN')}đ cho đơn của bạn. Mã giao dịch: ${String(reference).trim()}.`,
+                `Người bán đã hoàn ${result.amount.toLocaleString('vi-VN')}đ cho đơn của bạn. Mã giao dịch: ${String(reference).trim().toUpperCase()}.`,
                 `/refund-requests/${doc._id}`, { refundRequestId: String(doc._id) })
                 .catch(error => logger.error(`[REFUND] Notification failed: ${error.message}`));
         }
