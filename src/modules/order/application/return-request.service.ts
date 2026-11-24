@@ -167,7 +167,23 @@ export class ReturnRequestApplicationService {
             uploaded_by: input.actorId,
             created_at: this.now()
         }));
-        return this.commit(current, input.actorId, 'PRINTER', approve ? 'PRINTER_APPROVE' : 'PRINTER_REJECT', to, input.reason, { final_resolution: current.requested_resolution }, null, undefined, evidenceRows, auditRole, actingAs);
+        const saved = await this.commit(current, input.actorId, 'PRINTER', approve ? 'PRINTER_APPROVE' : 'PRINTER_REJECT', to, input.reason, { final_resolution: current.requested_resolution }, null, undefined, evidenceRows, auditRole, actingAs);
+        return to === 'AWAITING_ADMIN_REFUND' ? this.printerAutoRefund(saved, input.actorId, auditRole, actingAs) : saved;
+    }
+    /** Xưởng nhận lỗi thì hoàn ngay theo số tiền khách đã trả cho món; lỗi thì giữ ở AWAITING_ADMIN_REFUND cho admin. */
+    private async printerAutoRefund(request: ReturnRequestData, actorId: string, auditRole: ReturnRequestLogData['actor_role'], actingAs?: 'PRINTER'): Promise<ReturnRequestData> {
+        try {
+            const snap = request.item_snapshot as { item_paid_amount_minor?: number; unit_price?: number };
+            const decided = snap.item_paid_amount_minor ?? Number(snap.unit_price ?? 0) * request.quantity;
+            const max = this.deps.maxRefundMinor ? await this.deps.maxRefundMinor(request.order_id) : decided;
+            const amount = Math.min(decided, max);
+            if (!Number.isSafeInteger(amount) || amount <= 0) return request;
+            const confirmed = await this.commit(request, actorId, 'PRINTER', 'PRINTER_CONFIRM_REFUND', 'CONVERTED_TO_REFUND', 'Xưởng in chấp thuận, hệ thống tự hoàn tiền.', { final_resolution: 'REFUND', fault_party: 'PRINTER', fault_source: 'SYSTEM', refund_admin_confirmed: true, refund_admin_confirmed_by: actorId, refund_admin_confirmed_at: this.now(), refund_amount_minor: amount, refund_currency: 'VND', admin_decision_id: this.deps.id() }, null, undefined, [], auditRole, actingAs);
+            return this.createBridge(confirmed);
+        } catch (err) {
+            console.warn(`[Return] Tự hoàn tiền ${request.id} thất bại, chờ admin:`, (err as Error).message);
+            return (await this.deps.repository.findById(request.id)) ?? request;
+        }
     }
     async addEvidence(input:{actorId:string;requestId:string;role:'SELLER'|'PRINTER';evidence:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestData>{
         const current=await this.requireRequest(input.requestId); const action=input.role==='SELLER'?'SELLER_ADD_EVIDENCE':'PRINTER_ADD_EVIDENCE'; this.authorize(action,current,input.actorId,input.role);
