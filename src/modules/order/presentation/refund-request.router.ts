@@ -24,6 +24,8 @@ const asyncHandler = (fn: (req: AuthenticatedRequest, res: Response) => Promise<
     void fn(req, res).catch((error: Error & { statusCode?: number }) => res.status(error.statusCode || (/không tìm thấy/i.test(error.message) ? 404 : 400)).json({ error: error.message }));
 };
 const idOk = (id: string) => mongoose.Types.ObjectId.isValid(id);
+const PLATFORM_PRINTER_IDS = ['PRINTER_SHOP', 'PRINTING_SHOP_MOCK'];
+const isPlatformPrinter = (id: string) => PLATFORM_PRINTER_IDS.includes(id);
 
 const REFUND_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const REFUND_VIDEO_TYPES = new Map([['video/mp4', '.mp4'], ['video/webm', '.webm'], ['video/quicktime', '.mov']]);
@@ -118,15 +120,15 @@ router.post('/seller/refund-requests/:id/dispute', authenticate, requireRole(['s
 
 const listPrinterRefunds = asyncHandler(async (req: PrinterRefundRequest, res) => {
     const printerId = req.printerActorId!;
-    const printerQuery = ['PRINTER_SHOP', 'PRINTING_SHOP_MOCK'].includes(printerId)
-        ? { $in: ['PRINTER_SHOP', 'PRINTING_SHOP_MOCK', printerId] }
+    const printerQuery = isPlatformPrinter(printerId)
+        ? { $in: [...PLATFORM_PRINTER_IDS, printerId] }
         : printerId;
     const legacyDocs = await RefundRequest.find({ printer_id: printerQuery, status: 'PENDING_PRINTER' })
         .populate('order_id').populate('buyer_id', 'full_name email').sort({ created_at: 1 }).lean();
     
     // Đồng bộ các yêu cầu đổi trả (Đổi hàng & Hoàn tiền theo món) của xưởng in
     const returnDocs = await ReturnRequest.find({
-        printer_id: printerQuery,
+        ...(isPlatformPrinter(printerId) ? {} : { printer_id: printerId }),
         status: { $in: ['PENDING_PRINTER', 'APPROVED', 'REJECTED', 'DISPUTED', 'AWAITING_ADMIN_REFUND'] }
     }).sort({ updated_at: -1, created_at: -1 }).limit(50).lean();
     const returnMapped = await Promise.all(returnDocs.map(async (returnReq: any) => {
@@ -188,8 +190,7 @@ const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, re
     const id = String(req.params.id);
     const printerId = req.printerActorId!;
     const isMatchedPrinter = (targetId: string | undefined | null) => {
-        if (!targetId || targetId === printerId) return true;
-        if (['PRINTER_SHOP', 'PRINTING_SHOP_MOCK'].includes(printerId) && ['PRINTER_SHOP', 'PRINTING_SHOP_MOCK'].includes(targetId)) return true;
+        if (!targetId || targetId === printerId || isPlatformPrinter(printerId)) return true;
         return false;
     };
     const decision = String(req.body?.decision || '').toUpperCase();
@@ -200,8 +201,9 @@ const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, re
     if (returnDoc) {
         if (!isMatchedPrinter(returnDoc.printer_id)) return res.status(403).json({ error: 'Assigned Printer required' });
         const requestId = String(returnDoc.id || returnDoc._id);
+        const actorId = isPlatformPrinter(printerId) && returnDoc.printer_id ? String(returnDoc.printer_id) : printerId;
         // Retry after a lost callback response must acknowledge the original decision.
-        const previous = await ReturnRequestLog.findOne({ request_id: requestId, actor_id: printerId, actor_role: 'PRINTER',
+        const previous = await ReturnRequestLog.findOne({ request_id: requestId, actor_id: actorId, actor_role: 'PRINTER',
             to_status: { $in: decision === 'APPROVE' ? ['APPROVED', 'AWAITING_ADMIN_REFUND'] : ['REJECTED'] } }).lean();
         if (previous) return res.json({ success: true, data: returnDoc });
         const service = createReturnRequestService();
@@ -214,7 +216,7 @@ const respondToPrinterRefund = asyncHandler(async (req: PrinterRefundRequest, re
             uri: e.uri || e.url || e.storage_ref || String(e),
         })).filter(e => typeof e.uri === 'string' && e.uri.trim());
         const updated = await service.printerDecision({
-            actorId: printerId,
+            actorId,
             requestId,
             action: printerAction,
             reason,

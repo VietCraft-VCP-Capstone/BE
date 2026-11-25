@@ -32,6 +32,17 @@ export interface CreateRefundRequestInput {
     evidence?: string[];
     refund_type: 'FULL' | 'PARTIAL';
     refund_amount?: number;
+    refund_bank_info?: { bank_name: string; account_holder: string; account_number: string };
+}
+
+/** Đơn COD: khách phải cung cấp tài khoản để người bán chuyển khoản hoàn. */
+export function codBankInfo(raw?: CreateRefundRequestInput['refund_bank_info']) {
+    const bank_name = raw?.bank_name?.trim() ?? '';
+    const account_holder = raw?.account_holder?.trim() ?? '';
+    const account_number = raw?.account_number?.trim() ?? '';
+    const valid = bank_name.length >= 2 && bank_name.length <= 100 && account_holder.length >= 2 && account_holder.length <= 100 && /^\d{6,20}$/.test(account_number);
+    if (!valid) throw new Error('Đơn COD cần thông tin tài khoản nhận tiền hoàn hợp lệ.');
+    return { bank_name, account_holder, account_number };
 }
 
 function buildTestDeliveredOrder(source: any, now = new Date()) {
@@ -68,6 +79,7 @@ export class RefundRequestService {
 
         const order = await Order.findOne({ ...byCodeOrId(orderId), buyer_id: buyerId });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
+        const bankInfo = String(order.payment_method || '').toUpperCase() === 'COD' ? codBankInfo(input.refund_bank_info) : undefined;
         if (order.order_status !== 'DELIVERED') throw new Error('Chỉ đơn đã giao mới được yêu cầu hoàn tiền');
         const now = new Date();
         const deliveredAt = order.status_history.find(entry => entry.status === 'DELIVERED')?.changed_at;
@@ -93,6 +105,7 @@ export class RefundRequestService {
             product_type: productType,
             reason_category: input.reason_category, description: input.description.trim(), evidence,
             refund_type: input.refund_type, refund_amount: amount, status: initialStatus,
+            ...(bankInfo ? { refund_bank_info: bankInfo } : {}),
             responsible_party: productType === 'POD' ? 'PRINTER' : null,
             printer_id: productType === 'POD' ? String(order.printer_info?.printer_id || process.env.PRINTER_REFUND_PRINTER_ID || 'PRINTER_SHOP') : undefined,
             sla_deadlines: productType === 'POD' ? { seller_deadline: new Date(now.getTime() + 48 * 60 * 60 * 1000), printer_deadline: printerDeadline } : { seller_deadline: new Date(now.getTime() + 48 * 60 * 60 * 1000) },
@@ -162,7 +175,7 @@ export class RefundRequestService {
         const query: Record<string, unknown> = { seller_id: sellerId };
         if (status) query.status = status;
         return RefundRequest.find(query)
-            .populate({ path: 'order_id', select: 'order_code order_status payment_status items financial_breakdown' })
+            .populate({ path: 'order_id', select: 'order_code order_status payment_status payment_method items financial_breakdown' })
             .populate({ path: 'buyer_id', select: 'full_name email avatar' })
             .sort({ created_at: -1 }).lean();
     }
@@ -182,12 +195,13 @@ export class RefundRequestService {
 
     static async sellerDecision(requestId: string, sellerId: string, decision: 'APPROVE' | 'REJECT', note?: string) {
         if (!['APPROVE', 'REJECT'].includes(decision)) throw new Error('decision không hợp lệ');
+        if (!note?.trim()) throw new Error('Cần ghi chú cho quyết định hoàn tiền.');
         const doc = await this.assertSellerOwnership(requestId, sellerId);
         if (!sellerCanActOnRefund(doc.product_type)) throw new Error('POD được gửi thẳng tới xưởng in; seller chỉ có quyền xem');
         if (doc.status !== 'PENDING_SELLER') throw new Error('Request chưa đủ điều kiện để seller quyết định');
         const status: RefundRequestStatus = decision === 'APPROVE' ? 'SELLER_APPROVED' : 'SELLER_REJECTED';
         RefundStateMachine.assertTransition(doc.status, 'seller-decision', status);
-        const updated = await RefundRequest.findOneAndUpdate({ _id: doc._id, status: 'PENDING_SELLER' }, { $set: { status, responsible_party: 'SELLER', seller_response: { decision, note, responded_at: new Date() } } }, { new: true });
+        const updated = await RefundRequest.findOneAndUpdate({ _id: doc._id, status: 'PENDING_SELLER' }, { $set: { status, responsible_party: 'SELLER', seller_response: { decision, note: note.trim(), responded_at: new Date() } } }, { new: true });
         if (!updated) throw new Error('Request đã được cập nhật đồng thời; hãy tải lại');
         if (decision === 'REJECT') await Order.updateOne({ _id: doc.order_id, refund_status: { $in: ['REQUESTED', 'UNDER_REVIEW'] } }, { $set: { refund_status: 'REFUND_REJECTED' } });
         else await Order.updateOne({ _id: doc.order_id }, { $set: { refund_status: 'UNDER_REVIEW' } });
@@ -286,6 +300,7 @@ export class RefundRequestService {
         } catch (error) {
             logger.warn(`[REFUND] Không lấy được tài khoản nhận cho ${doc._id}: ${error instanceof Error ? error.message : error}`);
         }
+        if (!destination && doc.refund_bank_info) destination = { bin: '', bankName: doc.refund_bank_info.bank_name, accountNo: doc.refund_bank_info.account_number, accountName: doc.refund_bank_info.account_holder };
         return {
             amount: Number(doc.refund_amount),
             paymentMethod: order?.payment_method,
@@ -309,7 +324,7 @@ export class RefundRequestService {
                 status: 'REFUNDED', execution_status: 'SUCCEEDED', execution_error: '',
             } }, { runValidators: true });
             if (changed.modifiedCount) void this.notify(doc.buyer_id.toString(), 'Hoàn tiền thành công',
-                `Người bán đã hoàn ${result.amount.toLocaleString('vi-VN')}đ cho đơn của bạn. Mã giao dịch: ${String(reference).trim()}.`,
+                `Người bán đã hoàn ${result.amount.toLocaleString('vi-VN')}đ cho đơn của bạn. Mã giao dịch: ${String(reference).trim().toUpperCase()}.`,
                 `/refund-requests/${doc._id}`, { refundRequestId: String(doc._id) })
                 .catch(error => logger.error(`[REFUND] Notification failed: ${error.message}`));
         }
@@ -335,10 +350,14 @@ export class RefundRequestService {
             return result;
         } catch (error) {
             const unsupported = (error as { statusCode?: number }).statusCode === 422;
-            await RefundRequest.updateOne({ _id: doc._id, execution_status: { $ne: 'SUCCEEDED' } }, { $set: {
+            const changed = await RefundRequest.updateOne({ _id: doc._id, execution_status: { $ne: 'SUCCEEDED' } }, { $set: {
                 execution_status: unsupported ? 'NOT_STARTED' : 'FAILED', execution_error: error instanceof Error ? error.message : 'Chưa xác nhận hoàn tiền.',
             } });
             if (!unsupported) throw error;
+            if (changed.matchedCount) void this.notify(doc.buyer_id.toString(), 'Yêu cầu hoàn tiền đã được duyệt',
+                `Người bán đã duyệt hoàn ${Number(doc.refund_amount).toLocaleString('vi-VN')}đ và sẽ chuyển khoản thủ công vào tài khoản bạn cung cấp.`,
+                `/refund-requests/${doc._id}`, { refundRequestId: String(doc._id) })
+                .catch(error => logger.error(`[REFUND] Notification failed: ${error.message}`));
         }
     }
 

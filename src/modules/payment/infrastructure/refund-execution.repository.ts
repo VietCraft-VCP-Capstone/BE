@@ -49,6 +49,9 @@ export class MongoRefundExecutionRepository implements RefundExecutionRepository
         const changed = await Order.updateOne({ _id: orderId, $or: [{ refund_execution_id: { $exists: false } }, { refund_execution_id: null }, { refund_execution_id: executionId }] }, { $set: { refund_execution_id: executionId } });
         return changed.matchedCount === 1;
     }
+    async referenceUsed(reference: string, exceptId: string): Promise<boolean> {
+        return !!await PaymentRefundExecution.exists({ _id: { $ne: exceptId }, status: 'SUCCEEDED', 'gateway_response.manual': true, 'gateway_response.reference': reference });
+    }
     async refundedAmount(orderId: string): Promise<number> {
         const rows = await Transaction.aggregate([{ $match: { order_id: new mongoose.Types.ObjectId(orderId), type: 'REFUND', status: 'SUCCESS' } }, { $group: { _id: null, total: { $sum: '$amount' } } }]);
         return rows.length ? Number(String(rows[0].total)) : 0;
