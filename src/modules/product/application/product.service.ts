@@ -820,10 +820,19 @@ export class ProductsService {
         const andConditions: any[] = hits ? [{ _id: { $in: hits.ids } }] : buildTermsMatch(terms);
 
         if (params.category && params.category !== 'ALL' && params.category !== 'Tất cả danh mục') {
-            const rawCat = params.category.trim();
-            andConditions.push(/^[0-9a-fA-F]{24}$/.test(rawCat)
-                ? { category_ids: new mongoose.Types.ObjectId(rawCat) }
-                : { categories: { $regex: escapeRegex(rawCat), $options: 'i' } });
+            const rawCat = params.category.trim().normalize('NFC');
+            if (/^[0-9a-fA-F]{24}$/.test(rawCat)) {
+                andConditions.push({ category_ids: new mongoose.Types.ObjectId(rawCat) });
+            } else {
+                // Sản phẩm mới chỉ lưu category_ids; trường chuỗi `categories` là dữ liệu cũ.
+                // Đổi tên/slug danh mục ra id để lọc được cả hai loại.
+                const exact = new RegExp(`^${escapeRegex(rawCat)}$`, 'i');
+                const cats = await Category.find({ $or: [{ name: exact }, { slug: rawCat.toLowerCase() }] }).select('_id').lean();
+                andConditions.push({ $or: [
+                    ...(cats.length ? [{ category_ids: { $in: cats.map((c: any) => c._id) } }] : []),
+                    { categories: { $regex: escapeRegex(rawCat), $options: 'i' } },
+                ] });
+            }
         }
 
         const pType = params.productType || params.craftType;
@@ -1065,15 +1074,17 @@ export class ProductsService {
                 { $sort: { eligible: -1, score: -1, n: -1 } },
                 { $limit: LIMIT * 4 },
             ]).toArray();
-            const select = 'shop_name slug logo banner listing_count';
-            const ratedShops = await Shop.find({ _id: { $in: rated.map(r => r._id) } }).select(select).lean();
+            const select = 'shop_name slug logo banner description listing_count';
+            // Chỉ shop đang hoạt động mới được quảng bá cho khách (shop đóng/chờ duyệt không có hàng để mua).
+            const active = { status: 'ACTIVE' };
+            const ratedShops = await Shop.find({ ...active, _id: { $in: rated.map(r => r._id) } }).select(select).lean();
             const byId = new Map(ratedShops.map(s => [String(s._id), s]));
             const top = rated
                 .filter(r => byId.has(String(r._id)))
                 .slice(0, LIMIT)
                 .map(r => ({ ...byId.get(String(r._id)), average_rating: Number(r.avg.toFixed(1)), rating_count: r.n }));
             if (top.length < LIMIT) {
-                const rest = await Shop.find({ _id: { $nin: rated.map(r => r._id) } })
+                const rest = await Shop.find({ ...active, _id: { $nin: rated.map(r => r._id) } })
                     .select(select).sort({ listing_count: -1 }).limit(LIMIT - top.length).lean();
                 top.push(...rest.map(s => ({ ...s, average_rating: 0, rating_count: 0 })));
             }
@@ -1860,6 +1871,44 @@ export class ProductsService {
         await ProductsService.invalidateProductCache(id);
 
         return { product: await ProductsService.getById(id, { includeHidden: true }), warnings };
+    }
+
+    /**
+     * Danh mục có nhiều sản phẩm đang bán nhất, kèm số sản phẩm thật và ảnh bìa lấy từ sản phẩm
+     * được đánh giá nhiều nhất trong danh mục. Dùng cho trang chủ khách vãng lai.
+     */
+    static async getFeaturedCategories(limit = 6): Promise<Array<{ _id: string; name: string; slug: string; product_count: number; cover_image: string | null }>> {
+        const n = Math.min(24, Math.max(1, Math.floor(Number(limit)) || 6));
+        return cacheService.getOrSet(`vietcraft:categories:featured:${n}`, async () => {
+            const grouped = await MongoProduct.aggregate([
+                { $match: { status: 'PUBLISHED', is_hidden: { $ne: true }, listing_status: 'ACTIVE', moderation_status: 'APPROVED' } },
+                { $project: {
+                    category_ids: 1, rating_count: 1, created_at: 1,
+                    cover: { $arrayElemAt: ['$images', 0] },
+                    has_cover: { $gt: [{ $size: { $ifNull: ['$images', []] } }, 0] },
+                } },
+                // Sản phẩm có ảnh + nhiều đánh giá đứng đầu để $first chọn ra ảnh bìa đẹp nhất.
+                { $sort: { has_cover: -1, rating_count: -1, created_at: -1 } },
+                { $unwind: '$category_ids' },
+                { $group: { _id: '$category_ids', product_count: { $sum: 1 }, cover: { $first: '$cover' } } },
+                { $sort: { product_count: -1 } },
+                { $limit: n * 3 },
+            ], { allowDiskUse: true });
+            if (grouped.length === 0) return [];
+            const cats: any[] = await Category.find({
+                _id: { $in: grouped.map(g => g._id) },
+                is_active: true, status: { $ne: 'banned' }, review_status: { $ne: 'banned' },
+            }).select('name slug').lean();
+            const byId = new Map(cats.map(c => [String(c._id), c]));
+            return grouped
+                .filter(g => byId.has(String(g._id)))
+                .slice(0, n)
+                .map(g => {
+                    const c = byId.get(String(g._id));
+                    const cover = typeof g.cover === 'string' && g.cover.trim() !== '' ? g.cover : null;
+                    return { _id: String(c._id), name: c.name, slug: c.slug, product_count: g.product_count, cover_image: cover };
+                });
+        }, 600);
     }
 
     static async listActiveCategories() {

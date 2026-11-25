@@ -125,6 +125,14 @@ router.get('/meta/categories', async (req, res) => {
     }
 });
 
+router.get('/meta/featured-categories', async (req, res) => {
+    try {
+        res.json(await ProductsService.getFeaturedCategories(Number(req.query.limit) || 6));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tải danh mục nổi bật.' });
+    }
+});
+
 router.get('/meta/trending-keywords', async (req, res) => {
     try {
         const limit = Number(req.query.limit) || 8;
