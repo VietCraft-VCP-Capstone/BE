@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import mongoose from 'mongoose';
 import { Shop } from '../infrastructure/models/shop.model';
+import { DealsService } from '../application/deals.service';
 import { ProductsService, ValidationError, ForbiddenError, ProductActor } from '../application/product.service';
 import { SearchProductsParams } from '../application/product.dto';
 import { BlankClient } from '../application/blank-client.service';
@@ -129,11 +130,45 @@ router.get('/meta/categories', async (req, res) => {
     }
 });
 
+router.get('/meta/home-stats', async (_req, res) => {
+    try {
+        res.json(await ProductsService.getHomeStats());
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tải số liệu trang chủ.' });
+    }
+});
+
+// Giá tốt với mã: danh sách có phân trang, và tra cứu cho một nhóm sản phẩm.
+router.get('/deals', async (req, res) => {
+    try {
+        res.json(await DealsService.list(Number(req.query.page) || 1, Number(req.query.limit) || 20));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tải sản phẩm giá tốt.' });
+    }
+});
+
+router.get('/deals/lookup', async (req, res) => {
+    try {
+        const raw = typeof req.query.ids === 'string' ? req.query.ids : '';
+        res.json(await DealsService.lookup(raw.split(',').map(s => s.trim()).filter(Boolean)));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tra cứu giá tốt.' });
+    }
+});
+
 router.get('/meta/featured-categories', async (req, res) => {
     try {
         res.json(await ProductsService.getFeaturedCategories(Number(req.query.limit) || 6));
     } catch (error: any) {
         res.status(500).json({ error: error.message || 'Lỗi khi tải danh mục nổi bật.' });
+    }
+});
+
+router.get('/meta/popular-searches', async (req, res) => {
+    try {
+        res.json(await ProductsService.getPopularSearches(Number(req.query.limit) || 6));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi lấy từ khoá tìm nhiều.' });
     }
 });
 

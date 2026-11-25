@@ -28,7 +28,7 @@ import { SearchLog } from '../../analytics/infrastructure/models/search-log.mode
 import { BannedKeyword } from '../../analytics/infrastructure/models/banned-keyword.model';
 import { ProductEvent } from '../../analytics/infrastructure/models/product-event.model';
 import { shouldLogSearch, rankSuggestions, SUGGEST_PROJECTION } from './product-search.helpers';
-import { buildKeywordSuggestions, fetchLoggedKeywords, fetchPopularKeywords } from './suggest-keywords';
+import { buildKeywordSuggestions, fetchLoggedKeywords, fetchPopularKeywords, fetchPopularSearches } from './suggest-keywords';
 import { getTrendingKeywords as fetchTrendingKeywords } from './trending-keywords';
 import { buildTermsMatch, buildSearchPipeline } from './product-search.pipeline';
 import { findSearchHits } from './atlas-search';
@@ -972,6 +972,15 @@ export class ProductsService {
                 slug: c.slug
             }))
         };
+    }
+
+    /** Từ khoá người dùng VietCraft thật sự tìm gần đây (khác getTrendingKeywords là xu hướng thị trường). */
+    static async getPopularSearches(limit = 6): Promise<string[]> {
+        const n = Math.min(12, Math.max(1, Math.floor(limit) || 6));
+        return cacheService.getOrSet(`vietcraft:search:popular:${n}`, async () => {
+            const banned = await BannedKeyword.distinct('keyword');
+            return fetchPopularSearches(n, banned as string[]);
+        }, 600);
     }
 
     static async getTrendingKeywords(limit = 8): Promise<string[]> {
@@ -1926,6 +1935,19 @@ export class ProductsService {
                     return { _id: String(c._id), name: c.name, slug: c.slug, product_count: g.product_count, cover_image: cover };
                 });
         }, 600);
+    }
+
+    /** Số liệu cho khối mở đầu trang chủ: tổng sản phẩm đang bán và số lên kệ trong 7 ngày qua. */
+    static async getHomeStats(): Promise<{ totalProducts: number; newThisWeek: number }> {
+        return cacheService.getOrSet('vietcraft:products:home-stats', async () => {
+            const base = { ...PUBLIC_QUERY, listing_status: 'ACTIVE' };
+            const since = new Date(Date.now() - 7 * 86_400_000);
+            const [totalProducts, newThisWeek] = await Promise.all([
+                MongoProduct.countDocuments(base),
+                MongoProduct.countDocuments({ ...base, created_at: { $gte: since } }),
+            ]);
+            return { totalProducts, newThisWeek };
+        }, 300);
     }
 
     static async listActiveCategories() {
