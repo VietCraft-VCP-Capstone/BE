@@ -2,16 +2,16 @@ import crypto from 'crypto';
 
 /**
  * Lấy khóa bí mật chuyên biệt cho KYC (tuyệt đối không dùng chung với JWT secret).
- * Bắt buộc phải có trong Production; trong Development tạo khóa cách ly riêng.
+ * Bắt buộc phải có, trừ khi NODE_ENV ghi rõ development/test (máy chủ quên đặt NODE_ENV không được rơi về khóa công khai).
  */
 function getKycRawSecret(): string {
     const key = process.env.KYC_ENCRYPTION_KEY;
     if (key && key.trim().length >= 16) {
         return key.trim();
     }
-    if (process.env.NODE_ENV === 'production') {
+    if (process.env.NODE_ENV !== 'development' && process.env.NODE_ENV !== 'test') {
         throw new Error(
-            '[CryptoSecurity] Biến môi trường KYC_ENCRYPTION_KEY bắt buộc phải được cấu hình trong môi trường Production (tối thiểu 16 ký tự).'
+            '[CryptoSecurity] Biến môi trường KYC_ENCRYPTION_KEY bắt buộc phải được cấu hình (tối thiểu 16 ký tự).'
         );
     }
     return 'vietcraft_dev_isolated_kyc_encryption_key_2026_safe!';

@@ -94,6 +94,10 @@ if (!process.env.NODE_ENV) {
     logger.warn('NODE_ENV chưa được đặt nên đang chạy như development (CORS mở, bỏ qua một số kiểm tra). Máy chủ thật phải đặt NODE_ENV=production.');
 }
 
+if (config.nodeEnv === 'production' && (process.env.KYC_ENCRYPTION_KEY || '').trim().length < 16) {
+    throw new Error('FATAL: KYC_ENCRYPTION_KEY (tối thiểu 16 ký tự) chưa được cấu hình.');
+}
+
 if (!config.jwtSecret) {
     if (config.nodeEnv === 'production') {
         throw new Error('FATAL: JWT_SECRET environment variable is not defined.');
