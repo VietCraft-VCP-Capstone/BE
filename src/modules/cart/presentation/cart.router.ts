@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { CartService } from '../application/cart.service';
-import { authenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 
 const router = Router();
 
@@ -14,7 +14,7 @@ router.get('/', authenticate, async (req: AuthenticatedRequest, res) => {
     }
 });
 
-router.post('/items', authenticate, async (req: AuthenticatedRequest, res) => {
+router.post('/items', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res) => {
     try {
         const userId = req.user!.id;
         const cart = await CartService.addItem(userId, req.body);

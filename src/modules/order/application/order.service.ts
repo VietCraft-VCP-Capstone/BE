@@ -20,6 +20,7 @@ import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
 import { executeRefund } from "../../payment/application/refund-runtime";
 import { payosService } from "../../payment/application/payos.service";
 import { logger } from "../../../shared/utils/logger";
+import { assertNotOwnProduct } from '../../product/application/purchase-guard';
 
 
 export class OrdersService {
@@ -128,6 +129,7 @@ export class OrdersService {
       }
       const product = await Product.findById(it.productId);
       if (!product) throw new Error(`Sản phẩm ${it.productId} không tồn tại`);
+      await assertNotOwnProduct(buyerId, product.shop_id);
       if (
         product.listing_status === "INACTIVE" ||
         product.listing_status === "EXPIRED"

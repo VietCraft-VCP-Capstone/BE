@@ -37,6 +37,8 @@ import { RecommendService } from './recommend/recommend.service';
 import { normalizeVi, nfcLower, escapeRegex, accentInsensitive, extractSearchTerms } from '../../../shared/utils/vietnamese-search.util';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
+import { ShopService } from './shop.service';
+import { R06_DELIVERED_WINDOW_HOURS } from '../../order/application/return-policy';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
 import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
@@ -57,6 +59,15 @@ function getColorHex(colorName: string): string {
     if (lower.includes('vàng') || lower.includes('yellow')) return '#EAB308';
     if (lower.includes('xám') || lower.includes('gray')) return '#9CA3AF';
     return '#8B5CF6';
+}
+
+/** Điểm sản phẩm tính thẳng từ reviews (bỏ review bị báo cáo), cùng công thức với Review.recalculateRatings. */
+async function liveProductRating(productId: mongoose.Types.ObjectId): Promise<{ averageRating: number; ratingCount: number }> {
+    const [row] = await mongoose.connection.collection('reviews').aggregate([
+        { $match: { product_id: productId, is_reported: { $ne: true } } },
+        { $group: { _id: null, avg: { $avg: '$rating' }, n: { $sum: 1 } } },
+    ]).toArray();
+    return row ? { averageRating: Number(row.avg.toFixed(1)), ratingCount: row.n } : { averageRating: 0, ratingCount: 0 };
 }
 
 function mapToProductItemResponse(
@@ -104,36 +115,12 @@ function mapToProductItemResponse(
         ?? undefined;
     const baseRank = product.display_rank ?? product.stock_alert_threshold ?? 1;
 
-    let engagementTrend = customTrend;
-    if (!engagementTrend || engagementTrend.length < 2) {
-        // Fallback tự nhiên theo seed _id sản phẩm: mỗi sản phẩm có một biên độ dao động riêng biệt
-        const pidStr = product._id?.toString() || 'default_seed';
-        let seed = 0;
-        for (let i = 0; i < pidStr.length; i++) {
-            seed = ((seed << 5) - seed + pidStr.charCodeAt(i)) | 0;
-        }
-        seed = Math.abs(seed);
-        const base = Math.max(10, (seed % 35) + Math.min(soldCount * 2, 40));
-        const pattern = seed % 5;
-        engagementTrend = Array.from({ length: 7 }, (_, d) => {
-            const jitter = ((seed * (d + 2) * 13) % 9) - 4;
-            let val = base;
-            if (pattern === 0) val = Math.round(base * (0.65 + (d / 6) * 0.75)) + jitter; // Tăng trưởng mạnh
-            else if (pattern === 1) val = Math.round(base * (0.8 + (d / 6) * 0.4)) + jitter;  // Tăng trưởng vừa
-            else if (pattern === 2) val = Math.round(base * (0.9 + Math.sin(d * 1.3) * 0.25)) + jitter; // Dao động tự nhiên
-            else if (pattern === 3) val = Math.round(base * (1.0 + ((d % 2 === 0 ? 1 : -1) * 0.12))) + jitter; // Đi ngang
-            else val = Math.round(base * (1.15 - (d / 6) * 0.35)) + jitter; // Giảm nhẹ
-            return Math.max(1, val);
-        });
-    }
+    // Tương tác 7 ngày gần nhất lấy từ sự kiện thật (mapMany truyền vào). Không có sự kiện nghĩa là
+    // không ai tương tác: trả về 7 điểm 0 thay vì tự sinh đường cong (quy tắc chống fix cứng số liệu).
+    const engagementTrend = customTrend && customTrend.length >= 2 ? customTrend : Array(7).fill(0);
 
-    const inventoryTrends: InventoryTrendPointDTO[] = [
-        { date: 'Jan 21', stock: Math.round(totalStock * 1.6) },
-        { date: 'Mar 3', stock: Math.round(totalStock * 1.4) },
-        { date: 'Jul 9', stock: Math.round(totalStock * 1.2) },
-        { date: 'Oct 25', stock: Math.round(totalStock * 1.1) },
-        { date: 'Jan 20', stock: totalStock }
-    ];
+    // Chưa lưu lịch sử tồn kho theo thời gian, nên không trả điểm nào — giao diện hiện "chưa có dữ liệu".
+    const inventoryTrends: InventoryTrendPointDTO[] = [];
 
     const location = product.location || (product.tags && product.tags[0]) || '';
 
@@ -240,7 +227,9 @@ export interface ProductActor {
     role: string;
 }
 
-export const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
+// Sản phẩm khách được thấy: đã đăng, không bị ẩn, đã qua kiểm duyệt (cùng luật với trang tìm kiếm).
+// listing_status không lọc ở đây để link cũ của sản phẩm ngừng bán vẫn mở được và hiện "ngừng bán".
+export const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true }, moderation_status: 'APPROVED' } as const;
 
 export class ProductsService {
 
@@ -807,7 +796,8 @@ export class ProductsService {
         const limit = n > 0 ? Math.min(48, n) : 12;
 
         // Chỉ ghi lịch sử ở trang 1 với sort mặc định, tránh thổi phồng khi lọc/phân trang
-        const logId = shouldLogSearch(q, page, params) ? new mongoose.Types.ObjectId() : undefined;
+        // Tìm trong một gian hàng không tính vào lịch sử/xu hướng tìm kiếm toàn sàn.
+        const logId = !params.shopId && shouldLogSearch(q, page, params) ? new mongoose.Types.ObjectId() : undefined;
 
         const match: any = {
             status: 'PUBLISHED',
@@ -835,6 +825,11 @@ export class ProductsService {
             }
         }
 
+        if (params.shopId) {
+            if (!mongoose.Types.ObjectId.isValid(params.shopId)) return { items: [], total: 0, page, limit, totalPages: 1 };
+            match.shop_id = new mongoose.Types.ObjectId(params.shopId);
+        }
+
         const pType = params.productType || params.craftType;
         if (pType && pType !== 'ALL') {
             match.product_type = pType;
@@ -859,6 +854,11 @@ export class ProductsService {
         if (params.inStockOnly === true || params.inStockOnly === 'true') {
             // POD in theo yêu cầu, luôn sẵn sàng phục vụ
             priceStock.$or = [{ product_type: { $ne: 'READY_TO_SHIP' } }, { _totalStock: { $gt: 0 } }];
+        }
+
+        if (params.onSale === true || params.onSale === 'true') {
+            // Đang giảm giá: giá gốc người bán khai cao hơn giá bán thấp nhất hiện tại.
+            priceStock.$expr = { $gt: [{ $ifNull: ['$original_price', 0] }, '$_minPrice'] };
         }
 
         if (andConditions.length > 0) {
@@ -1002,12 +1002,24 @@ export class ProductsService {
             const mp = await MongoProduct.findOne(query).lean();
             if (!mp) throw new Error('Không tìm thấy sản phẩm.');
 
-            const [variants, shop, sold] = await Promise.all([
+            const [variants, shop, sold, productRating, shopRatings] = await Promise.all([
                 MongoVariant.find({ product_id: mp._id }).lean(),
                 Shop.findById(mp.shop_id).lean(),
-                getSoldCounts([mp._id])
+                getSoldCounts([mp._id]),
+                liveProductRating(mp._id),
+                mp.shop_id ? ShopService.liveRatings([mp.shop_id]) : Promise.resolve(new Map()),
             ]);
-            return mapToProductItemResponse(mp, variants, shop, sold.get(mp._id.toString()) ?? 0);
+            const dto: any = mapToProductItemResponse(mp, variants, shop, sold.get(mp._id.toString()) ?? 0);
+            // Điểm tính thẳng từ reviews để khớp phần "Đánh giá sản phẩm" và trang shop;
+            // trường lưu sẵn trên products/shops chỉ dùng cho danh sách và có thể lệch.
+            dto.rating = productRating.ratingCount > 0 ? productRating.averageRating : 0;
+            dto.ratingCount = productRating.ratingCount;
+            if (dto.shopInfo && shop) {
+                const sr = shopRatings.get(String(shop._id)) ?? { averageRating: 0, ratingCount: 0 };
+                dto.shopInfo = { ...dto.shopInfo, rating: sr.averageRating, ratingCount: sr.ratingCount, returnPolicy: shop.return_policy || '' };
+            }
+            dto.returnWindowDays = Math.round(R06_DELIVERED_WINDOW_HOURS / 24);
+            return dto;
         };
 
         if (opts.includeHidden) {
@@ -1088,7 +1100,12 @@ export class ProductsService {
                     .select(select).sort({ listing_count: -1 }).limit(LIMIT - top.length).lean();
                 top.push(...rest.map(s => ({ ...s, average_rating: 0, rating_count: 0 })));
             }
-            return top;
+            const counts = await MongoProduct.aggregate([
+                { $match: { ...PUBLIC_QUERY, shop_id: { $in: top.map((s: any) => s._id) } } },
+                { $group: { _id: '$shop_id', n: { $sum: 1 } } },
+            ]);
+            const countBy = new Map(counts.map(c => [String(c._id), c.n as number]));
+            return top.map((s: any) => ({ ...s, listing_count: countBy.get(String(s._id)) ?? 0 }));
         }, 600);
     }
 

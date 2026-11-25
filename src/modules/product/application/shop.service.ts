@@ -2,6 +2,10 @@ import mongoose from 'mongoose';
 import { Shop } from '../infrastructure/models/shop.model';
 import { ShopFollower } from '../infrastructure/models/shop-follower.model';
 import { logger } from '../../../shared/utils/logger';
+import { User } from '../../user/infrastructure/models/user.model';
+
+// Cùng luật PUBLIC_QUERY ở product.service (không import để tránh vòng phụ thuộc).
+const PUBLIC_PRODUCT_MATCH = { status: 'PUBLISHED', is_hidden: { $ne: true }, moderation_status: 'APPROVED' };
 
 // BR-201: người bán theo dõi gian hàng = theo dõi đối thủ, tối đa 10; người mua không giới hạn.
 export const SELLER_FOLLOW_LIMIT = 10;
@@ -30,6 +34,8 @@ export interface ShopDetailDTO {
     listingCount: number;
     followersCount: number;
     isFollowing: boolean;
+    isOwner?: boolean;
+    returnPolicy?: string;
     reputation_score?: number;
     reputation_tier?: string;
     createdAt?: Date;
@@ -64,6 +70,28 @@ export class ShopService {
         return new Map(rows.map(r => [String(r._id), { averageRating: Number(r.avg.toFixed(1)), ratingCount: r.n }]));
     }
 
+    /**
+     * Số người theo dõi = số tài khoản CÒN TỒN TẠI trong danh sách (tài khoản đã xoá không được tính),
+     * để con số hiển thị luôn khớp với người thật có thể nhận thông báo từ shop.
+     */
+    static async liveFollowerCounts(docs: Array<{ shop_id: any; buyer_ids?: any[] }>): Promise<Map<string, number>> {
+        const allIds = [...new Set(docs.flatMap(d => (d.buyer_ids || []).map(String)))];
+        if (allIds.length === 0) return new Map();
+        const existing = await User.find({ _id: { $in: allIds } }).select('_id').lean();
+        const alive = new Set(existing.map((u: any) => String(u._id)));
+        return new Map(docs.map(d => [String(d.shop_id), new Set((d.buyer_ids || []).map(String).filter(id => alive.has(id))).size]));
+    }
+
+    /** Số sản phẩm khách xem được của mỗi shop (cùng luật PUBLIC_QUERY), thay cho listing_count lưu sẵn. */
+    static async publicProductCounts(shopIds: mongoose.Types.ObjectId[]): Promise<Map<string, number>> {
+        if (shopIds.length === 0) return new Map();
+        const rows = await mongoose.connection.collection('products').aggregate([
+            { $match: { shop_id: { $in: shopIds }, ...PUBLIC_PRODUCT_MATCH } },
+            { $group: { _id: '$shop_id', n: { $sum: 1 } } },
+        ]).toArray();
+        return new Map(rows.map(r => [String(r._id), r.n as number]));
+    }
+
     static async resolveShop(shopIdOrSlug: string) {
         let shop = null;
         if (mongoose.Types.ObjectId.isValid(shopIdOrSlug)) {
@@ -81,12 +109,15 @@ export class ShopService {
             throw new Error('Không tìm thấy thông tin gian hàng.');
         }
 
-        const [followerDoc, ratings] = await Promise.all([
+        const [followerDoc, ratings, productCount] = await Promise.all([
             ShopFollower.findOne({ shop_id: shop._id }).lean(),
             ShopService.liveRatings([shop._id]),
+            ShopService.publicProductCounts([shop._id]).then(m => m.get(shop._id.toString()) ?? 0),
         ]);
         const rating = ratings.get(shop._id.toString()) ?? { averageRating: 0, ratingCount: 0 };
-        const followersCount = followerDoc?.buyer_ids?.length || 0;
+        const followersCount = followerDoc
+            ? (await ShopService.liveFollowerCounts([followerDoc])).get(shop._id.toString()) ?? 0
+            : 0;
         const isFollowing = Boolean(
             currentUserId &&
             followerDoc?.buyer_ids?.some(id => id.toString() === currentUserId)
@@ -116,15 +147,17 @@ export class ShopService {
             name: shop.shop_name,
             shopName: shop.shop_name,
             slug: shop.slug,
-            logo: shop.logo || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=200',
-            banner: shop.banner || 'https://images.unsplash.com/photo-1578749556568-bc2c40e68b61?auto=format&fit=crop&q=80&w=1200',
+            logo: shop.logo || '',
+            banner: shop.banner || '',
             description: shop.description || '',
             rating: rating.averageRating,
             averageRating: rating.averageRating,
             ratingCount: rating.ratingCount,
-            listingCount: typeof shop.listing_count === 'number' ? shop.listing_count : 0,
+            listingCount: productCount,
             followersCount,
             isFollowing,
+            isOwner: Boolean(currentUserId && shop.owner_id && shop.owner_id.toString() === currentUserId),
+            returnPolicy: shop.return_policy || '',
             reputation_score: score,
             reputation_tier: tier,
             createdAt: shop.created_at,
@@ -168,7 +201,7 @@ export class ShopService {
             { upsert: true, new: true }
         );
 
-        const followersCount = updated?.buyer_ids?.length || 0;
+        const followersCount = updated ? (await ShopService.liveFollowerCounts([updated])).get(shop._id.toString()) ?? 0 : 0;
         logger.info(`[ShopFollow] Buyer ${buyerId} followed Shop ${shop._id} (total: ${followersCount})`);
 
         return {
@@ -194,7 +227,7 @@ export class ShopService {
             { new: true }
         );
 
-        const followersCount = updated?.buyer_ids?.length || 0;
+        const followersCount = updated ? (await ShopService.liveFollowerCounts([updated])).get(shop._id.toString()) ?? 0 : 0;
         logger.info(`[ShopFollow] Buyer ${buyerId} unfollowed Shop ${shop._id} (total: ${followersCount})`);
 
         return {
@@ -216,15 +249,13 @@ export class ShopService {
         }
 
         const shopIds = followerDocs.map(doc => doc.shop_id);
-        const [shops, ratings] = await Promise.all([
+        const [shops, ratings, productCounts] = await Promise.all([
             Shop.find({ _id: { $in: shopIds } }).lean(),
             ShopService.liveRatings(shopIds),
+            ShopService.publicProductCounts(shopIds),
         ]);
 
-        const countMap = new Map<string, number>();
-        followerDocs.forEach(doc => {
-            countMap.set(doc.shop_id.toString(), doc.buyer_ids?.length || 0);
-        });
+        const countMap = await ShopService.liveFollowerCounts(followerDocs);
 
         return shops.map(shop => {
             const sId = shop._id.toString();
@@ -235,13 +266,13 @@ export class ShopService {
                 name: shop.shop_name,
                 shopName: shop.shop_name,
                 slug: shop.slug,
-                logo: shop.logo || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=200',
-                banner: shop.banner || 'https://images.unsplash.com/photo-1578749556568-bc2c40e68b61?auto=format&fit=crop&q=80&w=1200',
+                logo: shop.logo || '',
+                banner: shop.banner || '',
                 description: shop.description || '',
                 rating: rating.averageRating,
                 averageRating: rating.averageRating,
                 ratingCount: rating.ratingCount,
-                listingCount: typeof shop.listing_count === 'number' ? shop.listing_count : 0,
+                listingCount: productCounts.get(sId) ?? 0,
                 followersCount: countMap.get(sId) || 0,
                 isFollowing: true,
                 createdAt: shop.created_at,

@@ -39,7 +39,7 @@ router.post('/calculate-shipping', async (req: Request, res: Response) => {
     }
 });
 
-router.post('/', authenticate, async (req: AuthenticatedRequest, res) => {
+router.post('/', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res) => {
     try {
         const buyerId = req.user!.id;
         const order = await OrdersService.createOrder(buyerId, req.body);

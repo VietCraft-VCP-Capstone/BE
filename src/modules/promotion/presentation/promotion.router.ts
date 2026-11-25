@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { PromotionService } from '../application/promotion.service';
 import { Coupon } from '../infrastructure/models/coupon.model';
-import { optionalAuthenticate, authenticate } from '../../../app/middleware/auth.middleware';
+import { optionalAuthenticate, authenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { VoucherWalletService, VoucherWalletError } from '../application/voucher-wallet.service';
 
 const router = Router();
 
@@ -82,6 +83,24 @@ router.post('/apply', authenticate, async (req, res) => {
     } catch (error: any) {
         res.status(500).json({ valid: false, discount: 0, target: 'PRODUCT', message: error.message || 'Lỗi khi áp dụng mã giảm giá.' });
     }
+});
+
+// ── Ví voucher của tài khoản ────────────────────────────────────────────────
+const walletError = (res: any, error: any) =>
+    error instanceof VoucherWalletError
+        ? res.status(error.status).json({ error: error.message })
+        : res.status(500).json({ error: 'Không thể cập nhật ví voucher, vui lòng thử lại.' });
+
+router.get('/saved', authenticate, async (req: AuthenticatedRequest, res) => {
+    try { res.json(await VoucherWalletService.list(req.user!.id)); } catch (error) { walletError(res, error); }
+});
+
+router.post('/:id/save', authenticate, async (req: AuthenticatedRequest, res) => {
+    try { res.status(201).json(await VoucherWalletService.save(req.user!.id, req.params.id)); } catch (error) { walletError(res, error); }
+});
+
+router.delete('/:id/save', authenticate, async (req: AuthenticatedRequest, res) => {
+    try { await VoucherWalletService.remove(req.user!.id, req.params.id); res.status(204).end(); } catch (error) { walletError(res, error); }
 });
 
 export const promotionRouter = router;

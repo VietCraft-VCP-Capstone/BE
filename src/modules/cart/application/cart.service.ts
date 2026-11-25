@@ -4,6 +4,7 @@ import { Product } from '../../product/infrastructure/models/product.model';
 import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
 import { PRODUCT_POPULATE, toUserObjectId, VARIANT_POPULATE } from '../utils';
 import { EventService } from '../../analytics/application/event.service';
+import { assertNotOwnProduct } from '../../product/application/purchase-guard';
 
 export class CartService {
 
@@ -94,8 +95,9 @@ export class CartService {
         const quantity = Math.max(1, Number(payload.quantity) || 1);
 
         if (!mongoose.Types.ObjectId.isValid(productId)) throw new Error('Sản phẩm không hợp lệ');
-        const product = await Product.findById(productId).select('title listing_status');
+        const product = await Product.findById(productId).select('title listing_status shop_id');
         if (!product) throw new Error('Sản phẩm không tồn tại');
+        await assertNotOwnProduct(userId, product.shop_id);
         if (product.listing_status === 'INACTIVE' || product.listing_status === 'EXPIRED') {
             throw new Error(`Sản phẩm "${product.title}" hiện không bán`);
         }
