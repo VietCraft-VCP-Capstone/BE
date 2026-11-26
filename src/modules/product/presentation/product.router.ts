@@ -267,10 +267,7 @@ router.post('/preview-mockup', authenticate, requireRole(['seller', 'admin']), a
             req.user!.id,
             req.body?.blankId,
             req.body?.designPlacements || [],
-            {
-                colorHex: req.body?.colorHex,
-                colors: req.body?.colors
-            }
+            { colors: req.body?.colors }
         );
         res.json(result);
     } catch (error: any) {

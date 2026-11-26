@@ -10,7 +10,8 @@ import { tagsService } from '../../tags/application/tags.service';
 import { Design } from '../../design/infrastructure/models/design.model';
 import { generateSlug } from '../../../shared/utils/slug';
 import { BlankClient, Blank } from './blank-client.service';
-import { generateMockup, generateMockupLayers, generateWrapMockup, resolveColorHex } from './mockup.service';
+import { generateMockup } from './mockup.service';
+import { RenderColor, RenderedColor, RenderPlacement, renderColorMockups } from './mockup-render.service';
 import { normalizeRole } from '../../../app/middleware/auth.middleware';
 import {
     ProductItemResponseDTO,
@@ -1131,8 +1132,10 @@ export class ProductsService {
         let variantsToWrite: VariantInput[] = data.variants;
         let podFields: any = {};
         if (data.isPod && data.blank) {
+            const hasPicked = Array.isArray(payload.images) && payload.images.length > 0;
             const built = await ProductsService.buildPodArtifacts(
                 data.blank, data.podVariants!, data.designPlacements!, data.category?._id?.toString() ?? null,
+                !hasPicked, ProductsService.cleanColorImages(payload.colorImages, payload.images),
             );
             images = (Array.isArray(payload.images) && payload.images.length > 0)
                 ? payload.images
@@ -1442,7 +1445,11 @@ export class ProductsService {
         podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[],
         placements: any[],
         /** Danh mục chính của sản phẩm — quyết định mức hoa hồng áp cho biến thể POD. */
-        categoryId: string | null
+        categoryId: string | null,
+        /** false khi người bán đã chọn ảnh ở bước xem trước: khỏi render lại. */
+        renderImages = true,
+        /** Ảnh mockup người bán chọn cho từng màu -> gắn vào biến thể để khách chọn màu thấy đúng ảnh. */
+        colorImages: Record<string, string> = {}
     ): Promise<{ images: string[]; variants: VariantInput[] }> {
 
         const ids = new Set<string>();
@@ -1457,34 +1464,19 @@ export class ProductsService {
         const designUrl = (id: string) => designs.find(d => d._id.toString() === String(id))?.file_url;
 
         const mockups: string[] = [];
-        for (const p of placements) {
-            const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-            const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
-            const blankImage = rawImage || blank.default_image;
-
-            if (Array.isArray(p.layers) && p.layers.length) {
-
-                const layers = p.layers.map((l: any) => l.type === 'image'
-                    ? { ...l, designUrl: designUrl(l.design_id) }
-                    : l
-                ).filter((l: any) => l.type !== 'image' || l.designUrl);
-                if (area && (area as any).surface === 'wrap') {
-                    mockups.push(await generateWrapMockup(blankImage, layers, {
-                        x: p.area?.x ?? area.x,
-                        y: p.area?.y ?? area.y,
-                        width: p.area?.width ?? area.width,
-                        height: p.area?.height ?? area.height,
-                        template_w: (area as any).template_w || 2475,
-                        template_h: (area as any).template_h || 1155,
-                        arc: (area as any).arc || 1.35,
-                    }));
-                } else {
-                    mockups.push(await generateMockupLayers(blankImage, layers));
-                }
-            } else if (p.design_id) {
-
-                const url = designUrl(p.design_id);
+        if (renderImages) {
+            const renderPlacements = ProductsService.toRenderPlacements(blank, placements, l => designUrl(l.design_id));
+            if (renderPlacements.length) {
+                const [first] = await renderColorMockups(renderPlacements, ProductsService.blankRenderColors(blank, []).slice(0, 1));
+                mockups.push(...(first?.images || []).map(i => i.url));
+            }
+            // Dữ liệu cũ chỉ có 1 thiết kế đơn (không layers)
+            for (const p of placements) {
+                if (Array.isArray(p.layers) && p.layers.length) continue;
+                const url = p.design_id ? designUrl(p.design_id) : undefined;
                 if (!url) continue;
+                const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
+                const blankImage = (typeof area?.image === 'string' && area.image.trim()) ? area.image : blank.default_image;
                 mockups.push(await generateMockup(blankImage, url, area, { x: p.x, y: p.y, scale: p.scale, rotation: p.rotation }));
             }
         }
@@ -1498,6 +1490,7 @@ export class ProductsService {
             return {
                 sku: pv.sku,
                 color: pv.color || vari?.color || 'Màu mặc định',
+                ...(colorImages[(pv.color || vari?.color || '').trim()] ? { mockup_image: colorImages[(pv.color || vari?.color || '').trim()] } : {}),
                 size: pv.size || vari?.size || 'Freesize',
                 material: pv.material || vari?.material || (blank as any)?.material || 'Cotton',
                 base_cost: baseCost,
@@ -1508,103 +1501,114 @@ export class ProductsService {
         return { images, variants };
     }
 
+    /** Ảnh mockup theo màu người bán gửi lên: { "Đen": url }. Chỉ nhận chuỗi, tối đa 50 màu. */
+    private static cleanColorImages(raw: unknown, allowed: unknown): Record<string, string> {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+        // Chỉ nhận ảnh nằm trong bộ ảnh sản phẩm người bán đã chọn, không nhận URL tuỳ ý
+        const allowedSet = new Set(Array.isArray(allowed) ? allowed.filter(x => typeof x === 'string') : []);
+        const out: Record<string, string> = {};
+        for (const [k, v] of Object.entries(raw as Record<string, unknown>).slice(0, 50)) {
+            if (k.trim() && typeof v === 'string' && allowedSet.has(v)) out[k.trim()] = v;
+        }
+        return out;
+    }
+
+    /** Các màu khác nhau của phôi, kèm mã màu và ảnh thật theo mặt in do xưởng khai báo. */
+    private static blankRenderColors(blank: Blank, requested: { color?: string; color_hex?: string }[]): RenderColor[] {
+        const fromBlank = (blank.variations || []).map(v => ({ color: v.color || 'Mặc định', color_hex: v.color_hex }));
+        const source = requested.length ? requested : fromBlank;
+        const seen = new Set<string>();
+        const out: RenderColor[] = [];
+        for (const item of source) {
+            const name = (item.color || 'Mặc định').trim();
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            // Mã màu theo khai báo của xưởng; mã client gửi chỉ dùng khi xưởng không có
+            const printerHex = (blank.variations || []).find(v => (v.color || '').trim() === name)?.color_hex;
+            const photoByArea: Record<string, string> = {};
+            for (const ci of blank.color_images || []) {
+                if ((ci.color || '').trim() === name && ci.area_key && ci.image) photoByArea[ci.area_key] = ci.image;
+            }
+            out.push({ color: name, hex: printerHex || item.color_hex, photoByArea });
+        }
+        return out;
+    }
+
+    /** Placement từ client -> đầu vào bộ render (vùng in, ảnh phôi, mask, layers đã có URL thiết kế). */
+    private static toRenderPlacements(
+        blank: Blank,
+        designPlacements: any[],
+        designUrlOf: (layer: any) => string | undefined,
+    ): RenderPlacement[] {
+        const out: RenderPlacement[] = [];
+        for (const p of (designPlacements || [])) {
+            if (!Array.isArray(p.layers) || !p.layers.length) continue;
+            const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
+            const baseImage = (typeof area?.image === 'string' && area.image.trim()) ? area.image : blank.default_image;
+            if (!baseImage) continue;
+            const layers = p.layers
+                .map((l: any) => l.type === 'image' ? { ...l, designUrl: designUrlOf(l) } : l)
+                .filter((l: any) => l.type !== 'image' || l.designUrl);
+            if (!layers.length) continue;
+            const box = {
+                x: Number(p.area?.x ?? area?.x ?? 200),
+                y: Number(p.area?.y ?? area?.y ?? 200),
+                width: Number(p.area?.width ?? area?.width ?? 400),
+                height: Number(p.area?.height ?? area?.height ?? 400),
+            };
+            const surface: 'flat' | 'wrap' = area?.surface === 'wrap' ? 'wrap' : 'flat';
+            out.push({
+                areaKey: p.print_area_key,
+                label: area?.label,
+                baseImage,
+                maskImage: area?.mask_image,
+                maskStatus: area?.mask_status,
+                surface,
+                box,
+                wrap: surface === 'wrap' ? {
+                    ...box,
+                    template_w: area?.template_w || 2475,
+                    template_h: area?.template_h || 1155,
+                    arc: area?.arc || 1.35,
+                } : undefined,
+                layers,
+            });
+        }
+        return out;
+    }
+
     static async previewMockups(
         sellerId: string,
         blankId: string,
         designPlacements: any[],
-        options?: { colorHex?: string; colors?: { color?: string; color_hex?: string; sku?: string }[] }
-    ): Promise<{ images: string[]; byColor: { color: string; color_hex?: string; images: string[] }[] }> {
+        options?: { colors?: { color?: string; color_hex?: string }[] }
+    ): Promise<{ images: string[]; byColor: (RenderedColor & { image_urls: string[] })[] }> {
         if (!blankId) throw new ValidationError(['thiếu blankId']);
         const blank = await BlankClient.getBlank(blankId, sellerId);
         if (!blank) throw new ValidationError(['phôi không tồn tại']);
+        if (!Array.isArray(designPlacements) || designPlacements.length > 10) throw new ValidationError(['vị trí in không hợp lệ']);
 
         const ids = new Set<string>();
-        for (const p of (designPlacements || [])) {
-            if (p.design_id) ids.add(String(p.design_id));
+        for (const p of designPlacements) {
             for (const l of (p.layers || [])) if (l.type === 'image' && l.design_id) ids.add(String(l.design_id));
         }
         const validIds = [...ids].filter(id => mongoose.Types.ObjectId.isValid(id));
-        const designs = validIds.length > 0
-            ? await Design.find({ _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+        // Chỉ dùng thiết kế của chính người bán (không nhận URL tuỳ ý từ client)
+        const designs = validIds.length > 0 && mongoose.Types.ObjectId.isValid(sellerId)
+            ? await Design.find({
+                _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) },
+                seller_id: new mongoose.Types.ObjectId(sellerId),
+            }).lean()
             : [];
-        const ownedUrl = (id: string) => {
-            const d = designs.find(x => x._id.toString() === String(id));
-            if (!d) return undefined;
-            if (d.seller_id.toString() !== String(sellerId)) return undefined;
-            return d.file_url;
-        };
+        const ownedUrl = (l: any) => designs.find(d => d._id.toString() === String(l.design_id))?.file_url;
 
-        const renderPlacements = async (colorHex?: string): Promise<string[]> => {
-            const out: string[] = [];
-            for (const p of (designPlacements || [])) {
-                const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-                const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
-                const blankImage = rawImage || blank.default_image;
-                if (!Array.isArray(p.layers) || !p.layers.length) continue;
-                const layers = p.layers.map((l: any) => l.type === 'image' ? { ...l, designUrl: ownedUrl(l.design_id) || l.designUrl || l.design?.file_url } : l)
-                    .filter((l: any) => l.type !== 'image' || l.designUrl);
-                if (!layers.length) continue;
-                if (area && (area as any).surface === 'wrap') {
-                    out.push(await generateWrapMockup(blankImage, layers, {
-                        x: p.area?.x ?? area.x,
-                        y: p.area?.y ?? area.y,
-                        width: p.area?.width ?? area.width,
-                        height: p.area?.height ?? area.height,
-                        template_w: (area as any).template_w || 2475,
-                        template_h: (area as any).template_h || 1155,
-                        arc: (area as any).arc || 1.35,
-                    }, colorHex));
-                } else {
-                    out.push(await generateMockupLayers(blankImage, layers, colorHex));
-                }
-            }
-            return out;
-        };
+        const placements = ProductsService.toRenderPlacements(blank, designPlacements, ownedUrl);
+        if (!placements.length) throw new ValidationError(['chưa có thiết kế nào trên phôi']);
 
-        // Danh sách màu sắc từ options hoặc từ biến thể của phôi do printer khai báo
-        const inputColors = (options?.colors && Array.isArray(options.colors) && options.colors.length > 0)
-            ? options.colors
-            : (blank.variations && blank.variations.length > 0)
-                ? blank.variations.map(v => ({ color: v.color || 'Mặc định', color_hex: (v as any).color_hex || resolveColorHex(v.color) }))
-                : [];
-
-        const distinctColors: { color: string; color_hex?: string }[] = [];
-        const seenColors = new Set<string>();
-        for (const item of inputColors) {
-            const name = (item.color || 'Mặc định').trim();
-            if (name && !seenColors.has(name)) {
-                seenColors.add(name);
-                distinctColors.push({
-                    color: name,
-                    color_hex: item.color_hex || resolveColorHex(name)
-                });
-            }
-        }
-
-        const byColor: { color: string; color_hex?: string; images: string[] }[] = [];
-        if (distinctColors.length > 0) {
-            for (const c of distinctColors) {
-                const colorImgs = await renderPlacements(c.color_hex);
-                byColor.push({
-                    color: c.color,
-                    color_hex: c.color_hex,
-                    images: colorImgs.length ? colorImgs : [blank.default_image]
-                });
-            }
-        } else {
-            const defaultImgs = await renderPlacements(options?.colorHex);
-            byColor.push({
-                color: 'Mặc định',
-                color_hex: options?.colorHex,
-                images: defaultImgs.length ? defaultImgs : [blank.default_image]
-            });
-        }
-
-        const allImages = byColor.flatMap(c => c.images);
-        return {
-            images: allImages.length ? allImages : [blank.default_image],
-            byColor
-        };
+        const requested = Array.isArray(options?.colors) ? options!.colors.slice(0, 40) : [];
+        const rendered = await renderColorMockups(placements, ProductsService.blankRenderColors(blank, requested));
+        const byColor = rendered.map(c => ({ ...c, image_urls: c.images.map(i => i.url) }));
+        return { images: byColor.flatMap(c => c.image_urls), byColor };
     }
 
 
