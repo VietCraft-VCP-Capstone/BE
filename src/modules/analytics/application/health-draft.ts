@@ -25,7 +25,7 @@ function text(value: unknown, max: number): string | null {
     return typeof value === 'string' && value.length <= max ? value : null;
 }
 
-export function parseIntelPreview(raw: unknown): PreviewBodyResult<Body> {
+export function parseHealthDraft(raw: unknown): PreviewBodyResult<Body> {
     const src = raw && typeof raw === 'object' ? (raw as Body) : {};
     const body: Body = {};
 
