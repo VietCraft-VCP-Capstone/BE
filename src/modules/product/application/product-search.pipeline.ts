@@ -77,7 +77,25 @@ const SOLD_LOOKUP: PipelineStage = {
             { $match: { order_status: 'DELIVERED', refund_status: { $ne: 'REFUNDED' } } },
             { $unwind: '$items' },
             { $match: { $expr: { $eq: ['$items.product_id', '$$pid'] } } },
-            { $group: { _id: null, n: { $sum: '$items.quantity' } } },
+            // Trừ món đã hoàn tiền qua yêu cầu trả hàng — cùng cách đếm "Đã bán" của getSoldCounts,
+            // để thứ tự "bán chạy" khớp con số hiển thị trên thẻ sản phẩm.
+            {
+                $lookup: {
+                    from: 'return_requests',
+                    let: { oid: { $toString: '$_id' }, iid: '$items.order_item_id' },
+                    pipeline: [
+                        { $match: { $expr: { $and: [
+                            { $eq: ['$order_id', '$$oid'] },
+                            { $eq: ['$order_item_id', '$$iid'] },
+                            { $eq: ['$status', 'COMPLETED'] },
+                            { $eq: [{ $ifNull: ['$final_resolution', '$requested_resolution'] }, 'REFUND'] },
+                        ] } } },
+                        { $group: { _id: null, qty: { $sum: '$quantity' } } },
+                    ],
+                    as: '_refunded',
+                },
+            },
+            { $group: { _id: null, n: { $sum: { $max: [0, { $subtract: ['$items.quantity', { $ifNull: [{ $first: '$_refunded.qty' }, 0] }] }] } } } },
         ],
         as: '_s',
     },

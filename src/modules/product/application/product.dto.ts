@@ -130,6 +130,10 @@ export interface SearchProductsParams {
     limit?: number | string;
     pageSize?: number | string;
     inStockOnly?: boolean | string;
+    /** Chỉ sản phẩm của một gian hàng (trang shop). */
+    shopId?: string;
+    /** Chỉ sản phẩm đang giảm giá (original_price > giá bán). */
+    onSale?: boolean | string;
     userId?: string;
 }
 

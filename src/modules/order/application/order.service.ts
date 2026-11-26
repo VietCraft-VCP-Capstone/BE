@@ -20,6 +20,8 @@ import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
 import { executeRefund } from "../../payment/application/refund-runtime";
 import { payosService } from "../../payment/application/payos.service";
 import { logger } from "../../../shared/utils/logger";
+import { assertNotOwnProduct } from '../../product/application/purchase-guard';
+import { Cart } from '../../cart/infrastructure/models/cart.model';
 
 
 export class OrdersService {
@@ -98,23 +100,20 @@ export class OrdersService {
     return { shippingFee, pricingType, zoneType, zoneLabel, shopProvince, destProvince };
   }
 
-  static async createOrder(
+  /**
+   * Kiểm tra hàng và tính tiền đúng như lúc tạo đơn, nhưng chưa giữ kho hay lượt voucher.
+   * Dùng chung cho xem trước (quote) và tạo đơn, để số tiền người mua thấy là số server sẽ thu.
+   * softCoupons: mã lỗi không làm hỏng cả phép tính, chỉ ghi vào couponErrors (dùng cho quote).
+   */
+  private static async buildOrderDraft(
     buyerId: string,
     payload: any,
-  ): Promise<OrderResponse> {
-    const buyerObjectId = toBuyerObjectId(buyerId);
-
+    opts: { softCoupons?: boolean } = {},
+  ) {
     const items = Array.isArray(payload.items) ? payload.items : [];
     if (items.length === 0) throw new Error("Order phải có ít nhất 1 sản phẩm");
-
-    const address = payload.shippingAddress || payload.shipping_address;
-    if (
-      !address?.recipient_name ||
-      !address?.phone ||
-      !address?.address_detail
-    ) {
-      throw new Error("Thiếu địa chỉ giao hàng");
-    }
+    if (items.length > 100) throw new Error("Mỗi đơn tối đa 100 dòng sản phẩm");
+    const address = payload.shippingAddress || payload.shipping_address || undefined;
 
     let shopId: mongoose.Types.ObjectId | null = null;
     const orderItems: any[] = [];
@@ -128,6 +127,7 @@ export class OrdersService {
       }
       const product = await Product.findById(it.productId);
       if (!product) throw new Error(`Sản phẩm ${it.productId} không tồn tại`);
+      await assertNotOwnProduct(buyerId, product.shop_id);
       if (
         product.listing_status === "INACTIVE" ||
         product.listing_status === "EXPIRED"
@@ -247,28 +247,34 @@ export class OrdersService {
     ).toUpperCase();
     const paymentMethod = PAYMENT_METHODS.includes(gateway) ? gateway : "COD";
 
-    if (hasPodItem && paymentMethod === "COD") {
-      throw new Error(
-        "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn payOS.",
-      );
-    }
-
     // 2 ô mã như Shopee: couponCode = mã giảm tiền hàng, shippingCouponCode = mã giảm phí vận chuyển.
     const couponItems = orderItems.map(it => ({
       productId: it.product_id.toString(),
       price: num(it.retail_price),
       quantity: it.quantity
     }));
+    const couponErrors: Partial<Record<'PRODUCT' | 'SHIPPING', string>> = {};
     const applyCoupon = async (raw: unknown, slot: 'PRODUCT' | 'SHIPPING') => {
       if (typeof raw !== 'string' || !raw.trim()) return null;
-      const res = await PromotionService.validateAndApply(raw, subtotal, shippingFee, shopId || undefined, undefined, couponItems);
-      if (!res.valid) throw new Error(res.message || 'Mã giảm giá không hợp lệ.');
-      if (res.target !== slot) {
-        throw new Error(slot === 'SHIPPING'
-          ? `Mã ${raw.trim().toUpperCase()} không phải mã giảm phí vận chuyển.`
-          : `Mã ${raw.trim().toUpperCase()} là mã giảm phí vận chuyển, hãy chọn ở ô Ưu đãi phí vận chuyển.`);
+      try {
+        const res = await PromotionService.validateAndApply(raw, subtotal, shippingFee, shopId || undefined, undefined, couponItems, buyerId);
+        if (!res.valid) throw new Error(res.message || 'Mã giảm giá không hợp lệ.');
+        if (res.target !== slot) {
+          throw new Error(slot === 'SHIPPING'
+            ? `Mã ${raw.trim().toUpperCase()} không phải mã giảm phí vận chuyển.`
+            : `Mã ${raw.trim().toUpperCase()} là mã giảm phí vận chuyển, hãy chọn ở ô Ưu đãi phí vận chuyển.`);
+        }
+        return {
+          code: raw.trim().toUpperCase(),
+          discount: res.discount,
+          isPlatform: res.coupon?.is_platform ?? true,
+          title: res.coupon?.title as string | undefined,
+        };
+      } catch (err: any) {
+        if (!opts.softCoupons) throw err;
+        couponErrors[slot] = err?.message || 'Mã giảm giá không hợp lệ.';
+        return null;
       }
-      return { code: raw.trim().toUpperCase(), discount: res.discount, isPlatform: res.coupon?.is_platform ?? true };
     };
     const productCoupon = await applyCoupon(payload.couponCode || payload.coupon_code, 'PRODUCT');
     const shippingCoupon = await applyCoupon(payload.shippingCouponCode || payload.shipping_coupon_code, 'SHIPPING');
@@ -278,6 +284,118 @@ export class OrdersService {
     const shopFunded = (productCoupon && !productCoupon.isPlatform ? totals.productDiscount : 0)
       + (shippingCoupon && !shippingCoupon.isPlatform ? totals.shippingDiscount : 0);
     const sellerPayoutAmount = Math.max(0, subtotal - shopFunded - platformFee);
+
+    return {
+      shopId,
+      orderItems,
+      subtotal,
+      platformFee,
+      effectiveCommissionRate,
+      totalPrintingCost,
+      hasPodItem,
+      shippingCalc,
+      shippingFee,
+      paymentMethod,
+      productCoupon,
+      shippingCoupon,
+      couponErrors,
+      totals,
+      sellerPayoutAmount,
+    };
+  }
+
+  /**
+   * Xem trước đơn hàng: giá từng dòng, phí vận chuyển và mã giảm giá do server tính.
+   * Trang thanh toán hiển thị đúng các số này, nên số người mua thấy khớp số bị trừ khi đặt.
+   */
+  static async quoteOrder(buyerId: string, payload: any) {
+    toBuyerObjectId(buyerId);
+    const d = await OrdersService.buildOrderDraft(buyerId, payload, { softCoupons: true });
+    const shop = d.shopId ? await Shop.findById(d.shopId).select('shop_name logo').lean() : null;
+
+    return {
+      shopId: d.shopId ? d.shopId.toString() : null,
+      shopName: (shop as any)?.shop_name || 'VietCraft Shop',
+      shopLogo: (shop as any)?.logo || null,
+      items: d.orderItems.map(it => ({
+        productId: it.product_id.toString(),
+        variantId: it.variant_id.toString(),
+        title: it.title,
+        color: it.color || null,
+        size: it.size || null,
+        image: it.image || null,
+        unitPrice: num(it.retail_price),
+        quantity: it.quantity,
+        lineTotal: num(it.retail_price) * it.quantity,
+      })),
+      subtotal: d.subtotal,
+      shippingFee: d.shippingFee,
+      shipping: {
+        zoneLabel: d.shippingCalc.zoneLabel,
+        zoneType: d.shippingCalc.zoneType,
+        pricingType: d.shippingCalc.pricingType,
+      },
+      productDiscount: d.totals.productDiscount,
+      shippingDiscount: d.totals.shippingDiscount,
+      total: d.totals.total,
+      coupons: {
+        product: d.productCoupon ? { code: d.productCoupon.code, isPlatform: d.productCoupon.isPlatform, title: d.productCoupon.title || null } : null,
+        shipping: d.shippingCoupon ? { code: d.shippingCoupon.code, isPlatform: d.shippingCoupon.isPlatform, title: d.shippingCoupon.title || null } : null,
+      },
+      couponErrors: d.couponErrors,
+      codAllowed: !d.hasPodItem,
+    };
+  }
+
+  /** Bỏ các dòng vừa đặt khỏi giỏ của người mua. Không làm hỏng đơn nếu lỗi. */
+  private static async removeOrderedItemsFromCart(buyerObjectId: mongoose.Types.ObjectId, orderItems: any[]) {
+    if (orderItems.length === 0) return;
+    try {
+      await Cart.updateOne(
+        { user_id: buyerObjectId },
+        { $pull: { items: { $or: orderItems.map(it => ({ product_id: it.product_id, variant_id: it.variant_id })) } } as any },
+      );
+    } catch (err: any) {
+      logger.warn('[CART] Không xoá được hàng đã đặt khỏi giỏ: ' + (err?.message || err));
+    }
+  }
+
+  static async createOrder(
+    buyerId: string,
+    payload: any,
+  ): Promise<OrderResponse> {
+    const buyerObjectId = toBuyerObjectId(buyerId);
+
+    const address = payload.shippingAddress || payload.shipping_address;
+    if (
+      !address?.recipient_name ||
+      !address?.phone ||
+      !address?.address_detail
+    ) {
+      throw new Error("Thiếu địa chỉ giao hàng");
+    }
+
+    const {
+      shopId,
+      orderItems,
+      subtotal,
+      platformFee,
+      effectiveCommissionRate,
+      totalPrintingCost,
+      hasPodItem,
+      shippingFee,
+      paymentMethod,
+      productCoupon,
+      shippingCoupon,
+      totals,
+      sellerPayoutAmount,
+    } = await OrdersService.buildOrderDraft(buyerId, payload);
+
+    if (hasPodItem && paymentMethod === "COD") {
+      throw new Error(
+        "Sản phẩm in theo yêu cầu (POD) phải thanh toán trước, không hỗ trợ COD. Vui lòng chọn payOS.",
+      );
+    }
 
     // Giữ kho trước, rồi mới giữ lượt voucher; bước nào hỏng thì hoàn lại những gì đã giữ.
     await reserveVariantStock(orderItems);
@@ -348,6 +466,11 @@ export class OrdersService {
     } catch (err) {
       await rollback();
       throw err;
+    }
+
+    // Đặt từ giỏ: bỏ các dòng đã mua khỏi giỏ ngay trên server (Mua ngay thì giữ nguyên giỏ).
+    if (payload.source === 'cart') {
+      await OrdersService.removeOrderedItemsFromCart(buyerObjectId, orderItems);
     }
 
     // Phát thông báo Realtime cho Người mua & Người bán

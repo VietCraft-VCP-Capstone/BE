@@ -1,4 +1,7 @@
 import { Router, Response } from 'express';
+import mongoose from 'mongoose';
+import { Shop } from '../infrastructure/models/shop.model';
+import { DealsService } from '../application/deals.service';
 import { ProductsService, ValidationError, ForbiddenError, ProductActor } from '../application/product.service';
 import { SearchProductsParams } from '../application/product.dto';
 import { BlankClient } from '../application/blank-client.service';
@@ -59,7 +62,7 @@ router.get('/search', optionalAuthenticate, async (req: AuthenticatedRequest, re
     try {
         const {
             q, search, category, productType, craftType, location,
-            rating, minPrice, maxPrice, sort, page, pageSize, limit, inStockOnly
+            rating, minPrice, maxPrice, sort, page, pageSize, limit, inStockOnly, shopId, onSale
         } = req.query;
 
         const str = (v: any) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined);
@@ -80,6 +83,8 @@ router.get('/search', optionalAuthenticate, async (req: AuthenticatedRequest, re
             pageSize: num(pageSize),
             limit: num(limit),
             inStockOnly: bool(inStockOnly),
+            shopId: str(shopId),
+            onSale: bool(onSale),
             userId: req.user?.id
         };
 
@@ -122,6 +127,48 @@ router.get('/meta/categories', async (req, res) => {
         res.json(await ProductsService.listActiveCategories());
     } catch (error: any) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+router.get('/meta/home-stats', async (_req, res) => {
+    try {
+        res.json(await ProductsService.getHomeStats());
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tải số liệu trang chủ.' });
+    }
+});
+
+// Giá tốt với mã: danh sách có phân trang, và tra cứu cho một nhóm sản phẩm.
+router.get('/deals', async (req, res) => {
+    try {
+        res.json(await DealsService.list(Number(req.query.page) || 1, Number(req.query.limit) || 20));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tải sản phẩm giá tốt.' });
+    }
+});
+
+router.get('/deals/lookup', async (req, res) => {
+    try {
+        const raw = typeof req.query.ids === 'string' ? req.query.ids : '';
+        res.json(await DealsService.lookup(raw.split(',').map(s => s.trim()).filter(Boolean)));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tra cứu giá tốt.' });
+    }
+});
+
+router.get('/meta/featured-categories', async (req, res) => {
+    try {
+        res.json(await ProductsService.getFeaturedCategories(Number(req.query.limit) || 6));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi tải danh mục nổi bật.' });
+    }
+});
+
+router.get('/meta/popular-searches', async (req, res) => {
+    try {
+        res.json(await ProductsService.getPopularSearches(Number(req.query.limit) || 6));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Lỗi khi lấy từ khoá tìm nhiều.' });
     }
 });
 
@@ -220,10 +267,7 @@ router.post('/preview-mockup', authenticate, requireRole(['seller', 'admin']), a
             req.user!.id,
             req.body?.blankId,
             req.body?.designPlacements || [],
-            {
-                colorHex: req.body?.colorHex,
-                colors: req.body?.colors
-            }
+            { colors: req.body?.colors }
         );
         res.json(result);
     } catch (error: any) {
@@ -305,9 +349,14 @@ router.get('/:id/related', async (req, res) => {
     }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', optionalAuthenticate, async (req: AuthenticatedRequest, res) => {
     try {
-        res.json(await ProductsService.getById(req.params.id));
+        const dto: any = await ProductsService.getById(req.params.id);
+        // Chi tiết sản phẩm được cache chung cho mọi người; cờ chủ shop tính riêng theo người đang xem
+        // để giao diện thay nút mua bằng "Quản lý sản phẩm" khi người bán xem hàng của chính mình.
+        const isOwner = Boolean(req.user?.id && dto?.shopInfo?.id && mongoose.Types.ObjectId.isValid(req.user.id)
+            && await Shop.exists({ _id: dto.shopInfo.id, owner_id: new mongoose.Types.ObjectId(req.user.id) }));
+        res.json({ ...dto, isOwner });
     } catch (error: any) {
         res.status(404).json({ error: error.message || 'Không tìm thấy sản phẩm.' });
     }

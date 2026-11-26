@@ -39,7 +39,16 @@ router.post('/calculate-shipping', async (req: Request, res: Response) => {
     }
 });
 
-router.post('/', authenticate, async (req: AuthenticatedRequest, res) => {
+router.post('/quote', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res) => {
+    try {
+        const quote = await OrdersService.quoteOrder(req.user!.id, req.body);
+        res.json(quote);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Không tính được tiền đơn hàng.' });
+    }
+});
+
+router.post('/', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res) => {
     try {
         const buyerId = req.user!.id;
         const order = await OrdersService.createOrder(buyerId, req.body);

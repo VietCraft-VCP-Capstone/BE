@@ -21,6 +21,7 @@ import { designsRouter } from '../modules/design/presentation/design.router';
 import { chatRouter } from '../modules/chat';
 import { notificationRouter } from '../modules/notification';
 import { uploadRouter } from '../modules/upload';
+import { newsletterRouter } from '../modules/newsletter';
 
 const router = Router();
 
@@ -59,6 +60,7 @@ router.use('/promotions', promotionRouter);
 
 router.use('/designs', designsRouter);
 router.use('/upload', uploadRouter);
+router.use('/newsletter', newsletterRouter);
 router.use('/chat', chatRouter);
 router.get('/notifications/alerts', (req, res, next) => {
     req.url = '/alerts';

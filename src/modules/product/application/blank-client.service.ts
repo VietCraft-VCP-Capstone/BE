@@ -6,8 +6,11 @@ export interface BlankVariation {
     color?: string;
     size?: string;
     material?: string;
+    color_hex?: string;
     base_cost: number;
 }
+/** Ảnh thật xưởng chụp cho một màu ở một mặt in (ưu tiên hơn ảnh đổi màu tự động). */
+export interface BlankColorImage { color: string; area_key: string; image: string }
 export interface Blank {
     _id: string;
     title: string;
@@ -16,7 +19,14 @@ export interface Blank {
     default_image: string;
     dimensions_info?: string;
     variations: BlankVariation[];
-    print_areas?: { key: string; label?: string; image?: string; x: number; y: number; width: number; height: number; surface?: 'flat' | 'wrap'; template_w?: number; template_h?: number; arc?: number }[];
+    print_areas?: {
+        key: string; label?: string; image?: string; x: number; y: number; width: number; height: number;
+        surface?: 'flat' | 'wrap'; template_w?: number; template_h?: number; arc?: number;
+        /** Mask vùng phôi: PNG xám (trắng = phôi) hoặc PNG nền trong suốt. */
+        mask_image?: string;
+        mask_status?: 'auto' | 'confirmed' | 'custom';
+    }[];
+    color_images?: BlankColorImage[];
     is_active?: boolean;
     printer_id?: string;
     printer_name?: string;

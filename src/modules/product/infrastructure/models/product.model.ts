@@ -67,6 +67,7 @@ const LayerSchema = new Schema({
     y: { type: Number, default: 0 },
     scale: { type: Number, default: 1 },
     rotation: { type: Number, default: 0 },
+    flip_h: { type: Boolean },
     // image
     design_id: { type: Schema.Types.ObjectId, ref: 'Design' },
     // text

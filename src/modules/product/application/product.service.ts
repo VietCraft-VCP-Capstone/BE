@@ -10,7 +10,8 @@ import { tagsService } from '../../tags/application/tags.service';
 import { Design } from '../../design/infrastructure/models/design.model';
 import { generateSlug } from '../../../shared/utils/slug';
 import { BlankClient, Blank } from './blank-client.service';
-import { generateMockup, generateMockupLayers, generateWrapMockup, resolveColorHex } from './mockup.service';
+import { generateMockup } from './mockup.service';
+import { RenderColor, RenderedColor, RenderPlacement, renderColorMockups } from './mockup-render.service';
 import { normalizeRole } from '../../../app/middleware/auth.middleware';
 import {
     ProductItemResponseDTO,
@@ -28,7 +29,7 @@ import { SearchLog } from '../../analytics/infrastructure/models/search-log.mode
 import { BannedKeyword } from '../../analytics/infrastructure/models/banned-keyword.model';
 import { ProductEvent } from '../../analytics/infrastructure/models/product-event.model';
 import { shouldLogSearch, rankSuggestions, SUGGEST_PROJECTION } from './product-search.helpers';
-import { buildKeywordSuggestions, fetchLoggedKeywords, fetchPopularKeywords } from './suggest-keywords';
+import { buildKeywordSuggestions, fetchLoggedKeywords, fetchPopularKeywords, fetchPopularSearches } from './suggest-keywords';
 import { getTrendingKeywords as fetchTrendingKeywords } from './trending-keywords';
 import { buildTermsMatch, buildSearchPipeline } from './product-search.pipeline';
 import { findSearchHits } from './atlas-search';
@@ -37,6 +38,8 @@ import { RecommendService } from './recommend/recommend.service';
 import { normalizeVi, nfcLower, escapeRegex, accentInsensitive, extractSearchTerms } from '../../../shared/utils/vietnamese-search.util';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
+import { ShopService } from './shop.service';
+import { R06_DELIVERED_WINDOW_HOURS } from '../../order/application/return-policy';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
 import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
@@ -57,6 +60,15 @@ function getColorHex(colorName: string): string {
     if (lower.includes('vàng') || lower.includes('yellow')) return '#EAB308';
     if (lower.includes('xám') || lower.includes('gray')) return '#9CA3AF';
     return '#8B5CF6';
+}
+
+/** Điểm sản phẩm tính thẳng từ reviews (bỏ review bị báo cáo), cùng công thức với Review.recalculateRatings. */
+async function liveProductRating(productId: mongoose.Types.ObjectId): Promise<{ averageRating: number; ratingCount: number }> {
+    const [row] = await mongoose.connection.collection('reviews').aggregate([
+        { $match: { product_id: productId, is_reported: { $ne: true } } },
+        { $group: { _id: null, avg: { $avg: '$rating' }, n: { $sum: 1 } } },
+    ]).toArray();
+    return row ? { averageRating: Number(row.avg.toFixed(1)), ratingCount: row.n } : { averageRating: 0, ratingCount: 0 };
 }
 
 function mapToProductItemResponse(
@@ -104,36 +116,12 @@ function mapToProductItemResponse(
         ?? undefined;
     const baseRank = product.display_rank ?? product.stock_alert_threshold ?? 1;
 
-    let engagementTrend = customTrend;
-    if (!engagementTrend || engagementTrend.length < 2) {
-        // Fallback tự nhiên theo seed _id sản phẩm: mỗi sản phẩm có một biên độ dao động riêng biệt
-        const pidStr = product._id?.toString() || 'default_seed';
-        let seed = 0;
-        for (let i = 0; i < pidStr.length; i++) {
-            seed = ((seed << 5) - seed + pidStr.charCodeAt(i)) | 0;
-        }
-        seed = Math.abs(seed);
-        const base = Math.max(10, (seed % 35) + Math.min(soldCount * 2, 40));
-        const pattern = seed % 5;
-        engagementTrend = Array.from({ length: 7 }, (_, d) => {
-            const jitter = ((seed * (d + 2) * 13) % 9) - 4;
-            let val = base;
-            if (pattern === 0) val = Math.round(base * (0.65 + (d / 6) * 0.75)) + jitter; // Tăng trưởng mạnh
-            else if (pattern === 1) val = Math.round(base * (0.8 + (d / 6) * 0.4)) + jitter;  // Tăng trưởng vừa
-            else if (pattern === 2) val = Math.round(base * (0.9 + Math.sin(d * 1.3) * 0.25)) + jitter; // Dao động tự nhiên
-            else if (pattern === 3) val = Math.round(base * (1.0 + ((d % 2 === 0 ? 1 : -1) * 0.12))) + jitter; // Đi ngang
-            else val = Math.round(base * (1.15 - (d / 6) * 0.35)) + jitter; // Giảm nhẹ
-            return Math.max(1, val);
-        });
-    }
+    // Tương tác 7 ngày gần nhất lấy từ sự kiện thật (mapMany truyền vào). Không có sự kiện nghĩa là
+    // không ai tương tác: trả về 7 điểm 0 thay vì tự sinh đường cong (quy tắc chống fix cứng số liệu).
+    const engagementTrend = customTrend && customTrend.length >= 2 ? customTrend : Array(7).fill(0);
 
-    const inventoryTrends: InventoryTrendPointDTO[] = [
-        { date: 'Jan 21', stock: Math.round(totalStock * 1.6) },
-        { date: 'Mar 3', stock: Math.round(totalStock * 1.4) },
-        { date: 'Jul 9', stock: Math.round(totalStock * 1.2) },
-        { date: 'Oct 25', stock: Math.round(totalStock * 1.1) },
-        { date: 'Jan 20', stock: totalStock }
-    ];
+    // Chưa lưu lịch sử tồn kho theo thời gian, nên không trả điểm nào — giao diện hiện "chưa có dữ liệu".
+    const inventoryTrends: InventoryTrendPointDTO[] = [];
 
     const location = product.location || (product.tags && product.tags[0]) || '';
 
@@ -240,7 +228,9 @@ export interface ProductActor {
     role: string;
 }
 
-export const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
+// Sản phẩm khách được thấy: đã đăng, không bị ẩn, đã qua kiểm duyệt (cùng luật với trang tìm kiếm).
+// listing_status không lọc ở đây để link cũ của sản phẩm ngừng bán vẫn mở được và hiện "ngừng bán".
+export const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true }, moderation_status: 'APPROVED' } as const;
 
 export class ProductsService {
 
@@ -807,7 +797,8 @@ export class ProductsService {
         const limit = n > 0 ? Math.min(48, n) : 12;
 
         // Chỉ ghi lịch sử ở trang 1 với sort mặc định, tránh thổi phồng khi lọc/phân trang
-        const logId = shouldLogSearch(q, page, params) ? new mongoose.Types.ObjectId() : undefined;
+        // Tìm trong một gian hàng không tính vào lịch sử/xu hướng tìm kiếm toàn sàn.
+        const logId = !params.shopId && shouldLogSearch(q, page, params) ? new mongoose.Types.ObjectId() : undefined;
 
         const match: any = {
             status: 'PUBLISHED',
@@ -820,10 +811,24 @@ export class ProductsService {
         const andConditions: any[] = hits ? [{ _id: { $in: hits.ids } }] : buildTermsMatch(terms);
 
         if (params.category && params.category !== 'ALL' && params.category !== 'Tất cả danh mục') {
-            const rawCat = params.category.trim();
-            andConditions.push(/^[0-9a-fA-F]{24}$/.test(rawCat)
-                ? { category_ids: new mongoose.Types.ObjectId(rawCat) }
-                : { categories: { $regex: escapeRegex(rawCat), $options: 'i' } });
+            const rawCat = params.category.trim().normalize('NFC');
+            if (/^[0-9a-fA-F]{24}$/.test(rawCat)) {
+                andConditions.push({ category_ids: new mongoose.Types.ObjectId(rawCat) });
+            } else {
+                // Sản phẩm mới chỉ lưu category_ids; trường chuỗi `categories` là dữ liệu cũ.
+                // Đổi tên/slug danh mục ra id để lọc được cả hai loại.
+                const exact = new RegExp(`^${escapeRegex(rawCat)}$`, 'i');
+                const cats = await Category.find({ $or: [{ name: exact }, { slug: rawCat.toLowerCase() }] }).select('_id').lean();
+                andConditions.push({ $or: [
+                    ...(cats.length ? [{ category_ids: { $in: cats.map((c: any) => c._id) } }] : []),
+                    { categories: { $regex: escapeRegex(rawCat), $options: 'i' } },
+                ] });
+            }
+        }
+
+        if (params.shopId) {
+            if (!mongoose.Types.ObjectId.isValid(params.shopId)) return { items: [], total: 0, page, limit, totalPages: 1 };
+            match.shop_id = new mongoose.Types.ObjectId(params.shopId);
         }
 
         const pType = params.productType || params.craftType;
@@ -850,6 +855,11 @@ export class ProductsService {
         if (params.inStockOnly === true || params.inStockOnly === 'true') {
             // POD in theo yêu cầu, luôn sẵn sàng phục vụ
             priceStock.$or = [{ product_type: { $ne: 'READY_TO_SHIP' } }, { _totalStock: { $gt: 0 } }];
+        }
+
+        if (params.onSale === true || params.onSale === 'true') {
+            // Đang giảm giá: giá gốc người bán khai cao hơn giá bán thấp nhất hiện tại.
+            priceStock.$expr = { $gt: [{ $ifNull: ['$original_price', 0] }, '$_minPrice'] };
         }
 
         if (andConditions.length > 0) {
@@ -965,6 +975,15 @@ export class ProductsService {
         };
     }
 
+    /** Từ khoá người dùng VietCraft thật sự tìm gần đây (khác getTrendingKeywords là xu hướng thị trường). */
+    static async getPopularSearches(limit = 6): Promise<string[]> {
+        const n = Math.min(12, Math.max(1, Math.floor(limit) || 6));
+        return cacheService.getOrSet(`vietcraft:search:popular:${n}`, async () => {
+            const banned = await BannedKeyword.distinct('keyword');
+            return fetchPopularSearches(n, banned as string[]);
+        }, 600);
+    }
+
     static async getTrendingKeywords(limit = 8): Promise<string[]> {
         return fetchTrendingKeywords(limit);
     }
@@ -993,12 +1012,24 @@ export class ProductsService {
             const mp = await MongoProduct.findOne(query).lean();
             if (!mp) throw new Error('Không tìm thấy sản phẩm.');
 
-            const [variants, shop, sold] = await Promise.all([
+            const [variants, shop, sold, productRating, shopRatings] = await Promise.all([
                 MongoVariant.find({ product_id: mp._id }).lean(),
                 Shop.findById(mp.shop_id).lean(),
-                getSoldCounts([mp._id])
+                getSoldCounts([mp._id]),
+                liveProductRating(mp._id),
+                mp.shop_id ? ShopService.liveRatings([mp.shop_id]) : Promise.resolve(new Map()),
             ]);
-            return mapToProductItemResponse(mp, variants, shop, sold.get(mp._id.toString()) ?? 0);
+            const dto: any = mapToProductItemResponse(mp, variants, shop, sold.get(mp._id.toString()) ?? 0);
+            // Điểm tính thẳng từ reviews để khớp phần "Đánh giá sản phẩm" và trang shop;
+            // trường lưu sẵn trên products/shops chỉ dùng cho danh sách và có thể lệch.
+            dto.rating = productRating.ratingCount > 0 ? productRating.averageRating : 0;
+            dto.ratingCount = productRating.ratingCount;
+            if (dto.shopInfo && shop) {
+                const sr = shopRatings.get(String(shop._id)) ?? { averageRating: 0, ratingCount: 0 };
+                dto.shopInfo = { ...dto.shopInfo, rating: sr.averageRating, ratingCount: sr.ratingCount, returnPolicy: shop.return_policy || '' };
+            }
+            dto.returnWindowDays = Math.round(R06_DELIVERED_WINDOW_HOURS / 24);
+            return dto;
         };
 
         if (opts.includeHidden) {
@@ -1065,19 +1096,26 @@ export class ProductsService {
                 { $sort: { eligible: -1, score: -1, n: -1 } },
                 { $limit: LIMIT * 4 },
             ]).toArray();
-            const select = 'shop_name slug logo banner listing_count';
-            const ratedShops = await Shop.find({ _id: { $in: rated.map(r => r._id) } }).select(select).lean();
+            const select = 'shop_name slug logo banner description listing_count';
+            // Chỉ shop đang hoạt động mới được quảng bá cho khách (shop đóng/chờ duyệt không có hàng để mua).
+            const active = { status: 'ACTIVE' };
+            const ratedShops = await Shop.find({ ...active, _id: { $in: rated.map(r => r._id) } }).select(select).lean();
             const byId = new Map(ratedShops.map(s => [String(s._id), s]));
             const top = rated
                 .filter(r => byId.has(String(r._id)))
                 .slice(0, LIMIT)
                 .map(r => ({ ...byId.get(String(r._id)), average_rating: Number(r.avg.toFixed(1)), rating_count: r.n }));
             if (top.length < LIMIT) {
-                const rest = await Shop.find({ _id: { $nin: rated.map(r => r._id) } })
+                const rest = await Shop.find({ ...active, _id: { $nin: rated.map(r => r._id) } })
                     .select(select).sort({ listing_count: -1 }).limit(LIMIT - top.length).lean();
                 top.push(...rest.map(s => ({ ...s, average_rating: 0, rating_count: 0 })));
             }
-            return top;
+            const counts = await MongoProduct.aggregate([
+                { $match: { ...PUBLIC_QUERY, shop_id: { $in: top.map((s: any) => s._id) } } },
+                { $group: { _id: '$shop_id', n: { $sum: 1 } } },
+            ]);
+            const countBy = new Map(counts.map(c => [String(c._id), c.n as number]));
+            return top.map((s: any) => ({ ...s, listing_count: countBy.get(String(s._id)) ?? 0 }));
         }, 600);
     }
 
@@ -1094,8 +1132,10 @@ export class ProductsService {
         let variantsToWrite: VariantInput[] = data.variants;
         let podFields: any = {};
         if (data.isPod && data.blank) {
+            const hasPicked = Array.isArray(payload.images) && payload.images.length > 0;
             const built = await ProductsService.buildPodArtifacts(
                 data.blank, data.podVariants!, data.designPlacements!, data.category?._id?.toString() ?? null,
+                !hasPicked, ProductsService.cleanColorImages(payload.colorImages, payload.images),
             );
             images = (Array.isArray(payload.images) && payload.images.length > 0)
                 ? payload.images
@@ -1405,7 +1445,11 @@ export class ProductsService {
         podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[],
         placements: any[],
         /** Danh mục chính của sản phẩm — quyết định mức hoa hồng áp cho biến thể POD. */
-        categoryId: string | null
+        categoryId: string | null,
+        /** false khi người bán đã chọn ảnh ở bước xem trước: khỏi render lại. */
+        renderImages = true,
+        /** Ảnh mockup người bán chọn cho từng màu -> gắn vào biến thể để khách chọn màu thấy đúng ảnh. */
+        colorImages: Record<string, string> = {}
     ): Promise<{ images: string[]; variants: VariantInput[] }> {
 
         const ids = new Set<string>();
@@ -1420,34 +1464,19 @@ export class ProductsService {
         const designUrl = (id: string) => designs.find(d => d._id.toString() === String(id))?.file_url;
 
         const mockups: string[] = [];
-        for (const p of placements) {
-            const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-            const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
-            const blankImage = rawImage || blank.default_image;
-
-            if (Array.isArray(p.layers) && p.layers.length) {
-
-                const layers = p.layers.map((l: any) => l.type === 'image'
-                    ? { ...l, designUrl: designUrl(l.design_id) }
-                    : l
-                ).filter((l: any) => l.type !== 'image' || l.designUrl);
-                if (area && (area as any).surface === 'wrap') {
-                    mockups.push(await generateWrapMockup(blankImage, layers, {
-                        x: p.area?.x ?? area.x,
-                        y: p.area?.y ?? area.y,
-                        width: p.area?.width ?? area.width,
-                        height: p.area?.height ?? area.height,
-                        template_w: (area as any).template_w || 2475,
-                        template_h: (area as any).template_h || 1155,
-                        arc: (area as any).arc || 1.35,
-                    }));
-                } else {
-                    mockups.push(await generateMockupLayers(blankImage, layers));
-                }
-            } else if (p.design_id) {
-
-                const url = designUrl(p.design_id);
+        if (renderImages) {
+            const renderPlacements = ProductsService.toRenderPlacements(blank, placements, l => designUrl(l.design_id));
+            if (renderPlacements.length) {
+                const [first] = await renderColorMockups(renderPlacements, ProductsService.blankRenderColors(blank, []).slice(0, 1));
+                mockups.push(...(first?.images || []).map(i => i.url));
+            }
+            // Dữ liệu cũ chỉ có 1 thiết kế đơn (không layers)
+            for (const p of placements) {
+                if (Array.isArray(p.layers) && p.layers.length) continue;
+                const url = p.design_id ? designUrl(p.design_id) : undefined;
                 if (!url) continue;
+                const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
+                const blankImage = (typeof area?.image === 'string' && area.image.trim()) ? area.image : blank.default_image;
                 mockups.push(await generateMockup(blankImage, url, area, { x: p.x, y: p.y, scale: p.scale, rotation: p.rotation }));
             }
         }
@@ -1461,6 +1490,7 @@ export class ProductsService {
             return {
                 sku: pv.sku,
                 color: pv.color || vari?.color || 'Màu mặc định',
+                ...(colorImages[(pv.color || vari?.color || '').trim()] ? { mockup_image: colorImages[(pv.color || vari?.color || '').trim()] } : {}),
                 size: pv.size || vari?.size || 'Freesize',
                 material: pv.material || vari?.material || (blank as any)?.material || 'Cotton',
                 base_cost: baseCost,
@@ -1471,103 +1501,114 @@ export class ProductsService {
         return { images, variants };
     }
 
+    /** Ảnh mockup theo màu người bán gửi lên: { "Đen": url }. Chỉ nhận chuỗi, tối đa 50 màu. */
+    private static cleanColorImages(raw: unknown, allowed: unknown): Record<string, string> {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+        // Chỉ nhận ảnh nằm trong bộ ảnh sản phẩm người bán đã chọn, không nhận URL tuỳ ý
+        const allowedSet = new Set(Array.isArray(allowed) ? allowed.filter(x => typeof x === 'string') : []);
+        const out: Record<string, string> = {};
+        for (const [k, v] of Object.entries(raw as Record<string, unknown>).slice(0, 50)) {
+            if (k.trim() && typeof v === 'string' && allowedSet.has(v)) out[k.trim()] = v;
+        }
+        return out;
+    }
+
+    /** Các màu khác nhau của phôi, kèm mã màu và ảnh thật theo mặt in do xưởng khai báo. */
+    private static blankRenderColors(blank: Blank, requested: { color?: string; color_hex?: string }[]): RenderColor[] {
+        const fromBlank = (blank.variations || []).map(v => ({ color: v.color || 'Mặc định', color_hex: v.color_hex }));
+        const source = requested.length ? requested : fromBlank;
+        const seen = new Set<string>();
+        const out: RenderColor[] = [];
+        for (const item of source) {
+            const name = (item.color || 'Mặc định').trim();
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            // Mã màu theo khai báo của xưởng; mã client gửi chỉ dùng khi xưởng không có
+            const printerHex = (blank.variations || []).find(v => (v.color || '').trim() === name)?.color_hex;
+            const photoByArea: Record<string, string> = {};
+            for (const ci of blank.color_images || []) {
+                if ((ci.color || '').trim() === name && ci.area_key && ci.image) photoByArea[ci.area_key] = ci.image;
+            }
+            out.push({ color: name, hex: printerHex || item.color_hex, photoByArea });
+        }
+        return out;
+    }
+
+    /** Placement từ client -> đầu vào bộ render (vùng in, ảnh phôi, mask, layers đã có URL thiết kế). */
+    private static toRenderPlacements(
+        blank: Blank,
+        designPlacements: any[],
+        designUrlOf: (layer: any) => string | undefined,
+    ): RenderPlacement[] {
+        const out: RenderPlacement[] = [];
+        for (const p of (designPlacements || [])) {
+            if (!Array.isArray(p.layers) || !p.layers.length) continue;
+            const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
+            const baseImage = (typeof area?.image === 'string' && area.image.trim()) ? area.image : blank.default_image;
+            if (!baseImage) continue;
+            const layers = p.layers
+                .map((l: any) => l.type === 'image' ? { ...l, designUrl: designUrlOf(l) } : l)
+                .filter((l: any) => l.type !== 'image' || l.designUrl);
+            if (!layers.length) continue;
+            const box = {
+                x: Number(p.area?.x ?? area?.x ?? 200),
+                y: Number(p.area?.y ?? area?.y ?? 200),
+                width: Number(p.area?.width ?? area?.width ?? 400),
+                height: Number(p.area?.height ?? area?.height ?? 400),
+            };
+            const surface: 'flat' | 'wrap' = area?.surface === 'wrap' ? 'wrap' : 'flat';
+            out.push({
+                areaKey: p.print_area_key,
+                label: area?.label,
+                baseImage,
+                maskImage: area?.mask_image,
+                maskStatus: area?.mask_status,
+                surface,
+                box,
+                wrap: surface === 'wrap' ? {
+                    ...box,
+                    template_w: area?.template_w || 2475,
+                    template_h: area?.template_h || 1155,
+                    arc: area?.arc || 1.35,
+                } : undefined,
+                layers,
+            });
+        }
+        return out;
+    }
+
     static async previewMockups(
         sellerId: string,
         blankId: string,
         designPlacements: any[],
-        options?: { colorHex?: string; colors?: { color?: string; color_hex?: string; sku?: string }[] }
-    ): Promise<{ images: string[]; byColor: { color: string; color_hex?: string; images: string[] }[] }> {
+        options?: { colors?: { color?: string; color_hex?: string }[] }
+    ): Promise<{ images: string[]; byColor: (RenderedColor & { image_urls: string[] })[] }> {
         if (!blankId) throw new ValidationError(['thiếu blankId']);
         const blank = await BlankClient.getBlank(blankId, sellerId);
         if (!blank) throw new ValidationError(['phôi không tồn tại']);
+        if (!Array.isArray(designPlacements) || designPlacements.length > 10) throw new ValidationError(['vị trí in không hợp lệ']);
 
         const ids = new Set<string>();
-        for (const p of (designPlacements || [])) {
-            if (p.design_id) ids.add(String(p.design_id));
+        for (const p of designPlacements) {
             for (const l of (p.layers || [])) if (l.type === 'image' && l.design_id) ids.add(String(l.design_id));
         }
         const validIds = [...ids].filter(id => mongoose.Types.ObjectId.isValid(id));
-        const designs = validIds.length > 0
-            ? await Design.find({ _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+        // Chỉ dùng thiết kế của chính người bán (không nhận URL tuỳ ý từ client)
+        const designs = validIds.length > 0 && mongoose.Types.ObjectId.isValid(sellerId)
+            ? await Design.find({
+                _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) },
+                seller_id: new mongoose.Types.ObjectId(sellerId),
+            }).lean()
             : [];
-        const ownedUrl = (id: string) => {
-            const d = designs.find(x => x._id.toString() === String(id));
-            if (!d) return undefined;
-            if (d.seller_id.toString() !== String(sellerId)) return undefined;
-            return d.file_url;
-        };
+        const ownedUrl = (l: any) => designs.find(d => d._id.toString() === String(l.design_id))?.file_url;
 
-        const renderPlacements = async (colorHex?: string): Promise<string[]> => {
-            const out: string[] = [];
-            for (const p of (designPlacements || [])) {
-                const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-                const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
-                const blankImage = rawImage || blank.default_image;
-                if (!Array.isArray(p.layers) || !p.layers.length) continue;
-                const layers = p.layers.map((l: any) => l.type === 'image' ? { ...l, designUrl: ownedUrl(l.design_id) || l.designUrl || l.design?.file_url } : l)
-                    .filter((l: any) => l.type !== 'image' || l.designUrl);
-                if (!layers.length) continue;
-                if (area && (area as any).surface === 'wrap') {
-                    out.push(await generateWrapMockup(blankImage, layers, {
-                        x: p.area?.x ?? area.x,
-                        y: p.area?.y ?? area.y,
-                        width: p.area?.width ?? area.width,
-                        height: p.area?.height ?? area.height,
-                        template_w: (area as any).template_w || 2475,
-                        template_h: (area as any).template_h || 1155,
-                        arc: (area as any).arc || 1.35,
-                    }, colorHex));
-                } else {
-                    out.push(await generateMockupLayers(blankImage, layers, colorHex));
-                }
-            }
-            return out;
-        };
+        const placements = ProductsService.toRenderPlacements(blank, designPlacements, ownedUrl);
+        if (!placements.length) throw new ValidationError(['chưa có thiết kế nào trên phôi']);
 
-        // Danh sách màu sắc từ options hoặc từ biến thể của phôi do printer khai báo
-        const inputColors = (options?.colors && Array.isArray(options.colors) && options.colors.length > 0)
-            ? options.colors
-            : (blank.variations && blank.variations.length > 0)
-                ? blank.variations.map(v => ({ color: v.color || 'Mặc định', color_hex: (v as any).color_hex || resolveColorHex(v.color) }))
-                : [];
-
-        const distinctColors: { color: string; color_hex?: string }[] = [];
-        const seenColors = new Set<string>();
-        for (const item of inputColors) {
-            const name = (item.color || 'Mặc định').trim();
-            if (name && !seenColors.has(name)) {
-                seenColors.add(name);
-                distinctColors.push({
-                    color: name,
-                    color_hex: item.color_hex || resolveColorHex(name)
-                });
-            }
-        }
-
-        const byColor: { color: string; color_hex?: string; images: string[] }[] = [];
-        if (distinctColors.length > 0) {
-            for (const c of distinctColors) {
-                const colorImgs = await renderPlacements(c.color_hex);
-                byColor.push({
-                    color: c.color,
-                    color_hex: c.color_hex,
-                    images: colorImgs.length ? colorImgs : [blank.default_image]
-                });
-            }
-        } else {
-            const defaultImgs = await renderPlacements(options?.colorHex);
-            byColor.push({
-                color: 'Mặc định',
-                color_hex: options?.colorHex,
-                images: defaultImgs.length ? defaultImgs : [blank.default_image]
-            });
-        }
-
-        const allImages = byColor.flatMap(c => c.images);
-        return {
-            images: allImages.length ? allImages : [blank.default_image],
-            byColor
-        };
+        const requested = Array.isArray(options?.colors) ? options!.colors.slice(0, 40) : [];
+        const rendered = await renderColorMockups(placements, ProductsService.blankRenderColors(blank, requested));
+        const byColor = rendered.map(c => ({ ...c, image_urls: c.images.map(i => i.url) }));
+        return { images: byColor.flatMap(c => c.image_urls), byColor };
     }
 
 
@@ -1860,6 +1901,57 @@ export class ProductsService {
         await ProductsService.invalidateProductCache(id);
 
         return { product: await ProductsService.getById(id, { includeHidden: true }), warnings };
+    }
+
+    /**
+     * Danh mục có nhiều sản phẩm đang bán nhất, kèm số sản phẩm thật và ảnh bìa lấy từ sản phẩm
+     * được đánh giá nhiều nhất trong danh mục. Dùng cho trang chủ khách vãng lai.
+     */
+    static async getFeaturedCategories(limit = 6): Promise<Array<{ _id: string; name: string; slug: string; product_count: number; cover_image: string | null }>> {
+        const n = Math.min(24, Math.max(1, Math.floor(Number(limit)) || 6));
+        return cacheService.getOrSet(`vietcraft:categories:featured:${n}`, async () => {
+            const grouped = await MongoProduct.aggregate([
+                { $match: { status: 'PUBLISHED', is_hidden: { $ne: true }, listing_status: 'ACTIVE', moderation_status: 'APPROVED' } },
+                { $project: {
+                    category_ids: 1, rating_count: 1, created_at: 1,
+                    cover: { $arrayElemAt: ['$images', 0] },
+                    has_cover: { $gt: [{ $size: { $ifNull: ['$images', []] } }, 0] },
+                } },
+                // Sản phẩm có ảnh + nhiều đánh giá đứng đầu để $first chọn ra ảnh bìa đẹp nhất.
+                { $sort: { has_cover: -1, rating_count: -1, created_at: -1 } },
+                { $unwind: '$category_ids' },
+                { $group: { _id: '$category_ids', product_count: { $sum: 1 }, cover: { $first: '$cover' } } },
+                { $sort: { product_count: -1 } },
+                { $limit: n * 3 },
+            ], { allowDiskUse: true });
+            if (grouped.length === 0) return [];
+            const cats: any[] = await Category.find({
+                _id: { $in: grouped.map(g => g._id) },
+                is_active: true, status: { $ne: 'banned' }, review_status: { $ne: 'banned' },
+            }).select('name slug').lean();
+            const byId = new Map(cats.map(c => [String(c._id), c]));
+            return grouped
+                .filter(g => byId.has(String(g._id)))
+                .slice(0, n)
+                .map(g => {
+                    const c = byId.get(String(g._id));
+                    const cover = typeof g.cover === 'string' && g.cover.trim() !== '' ? g.cover : null;
+                    return { _id: String(c._id), name: c.name, slug: c.slug, product_count: g.product_count, cover_image: cover };
+                });
+        }, 600);
+    }
+
+    /** Số liệu cho khối mở đầu trang chủ: tổng sản phẩm đang bán và số lên kệ trong 7 ngày qua. */
+    static async getHomeStats(): Promise<{ totalProducts: number; newThisWeek: number }> {
+        return cacheService.getOrSet('vietcraft:products:home-stats', async () => {
+            const base = { ...PUBLIC_QUERY, listing_status: 'ACTIVE' };
+            const since = new Date(Date.now() - 7 * 86_400_000);
+            const [totalProducts, newThisWeek] = await Promise.all([
+                MongoProduct.countDocuments(base),
+                MongoProduct.countDocuments({ ...base, created_at: { $gte: since } }),
+            ]);
+            return { totalProducts, newThisWeek };
+        }, 300);
     }
 
     static async listActiveCategories() {

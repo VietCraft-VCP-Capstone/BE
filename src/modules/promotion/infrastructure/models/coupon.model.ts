@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { cacheService } from '../../../../shared/services/cache.service';
 
 export type CouponDiscountType = 'PERCENTAGE' | 'FIXED_AMOUNT' | 'FREE_SHIPPING' | 'FLASH_SALE' | 'BUNDLE';
 export type CouponApplicableScope = 'ALL' | 'SPECIFIC_PRODUCTS';
@@ -57,6 +58,18 @@ const CouponSchema = new Schema<ICoupon>({
 
 CouponSchema.index({ code: 1, is_active: 1 });
 CouponSchema.index({ shop_id: 1, is_active: 1 });
+
+// Mã thay đổi (tạo, sửa, xoá, tăng lượt dùng) thì danh sách "Giá tốt với mã" phải tính lại ngay,
+// không đợi cache hết hạn. Khoá cache trùng với DealsService.
+export const DEALS_CACHE_KEY = 'vietcraft:deals:ranked';
+const dropDealsCache = () => { cacheService.del(DEALS_CACHE_KEY).catch(() => {}); };
+CouponSchema.post('save', dropDealsCache);
+CouponSchema.post('findOneAndUpdate', dropDealsCache);
+CouponSchema.post('updateOne', dropDealsCache);
+CouponSchema.post('updateMany', dropDealsCache);
+CouponSchema.post('findOneAndDelete', dropDealsCache);
+CouponSchema.post('deleteOne', dropDealsCache);
+CouponSchema.post('deleteMany', dropDealsCache);
 
 export const Coupon = mongoose.model<ICoupon>('Coupon', CouponSchema, 'coupons');
 
