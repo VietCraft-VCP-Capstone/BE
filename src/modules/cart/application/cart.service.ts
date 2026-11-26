@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import { Cart } from '../infrastructure/models/cart.model';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
-import { PRODUCT_POPULATE, toUserObjectId, VARIANT_POPULATE } from '../utils';
+import { applySelection, normalizeItemIds, PRODUCT_POPULATE, toUserObjectId, VARIANT_POPULATE } from '../utils';
 import { EventService } from '../../analytics/application/event.service';
 import { assertNotOwnProduct } from '../../product/application/purchase-guard';
 
@@ -217,6 +217,32 @@ export class CartService {
         item.is_selected = isSelected;
         item.updated_at = new Date();
         await cart.save();
+        return this.getCart(userId);
+    }
+
+    /** Đặt cả tập dòng được chọn trong 1 lần lưu (thay cho N lệnh bật/tắt song song dễ ghi đè nhau). */
+    static async setSelection(userId: string, rawIds: unknown) {
+        const ownerId = toUserObjectId(userId);
+        const selectedIds = normalizeItemIds(rawIds);
+        const cart = await Cart.findOne({ user_id: ownerId });
+        if (!cart) return this.getCart(userId);
+
+        if (applySelection(cart.items as any[], selectedIds) > 0) {
+            await cart.save();
+        }
+        return this.getCart(userId);
+    }
+
+    /** Xoá nhiều dòng trong 1 lệnh. Id không còn trong giỏ thì bỏ qua (thao tác lặp lại vẫn an toàn). */
+    static async removeItems(userId: string, rawIds: unknown) {
+        const ownerId = toUserObjectId(userId);
+        const ids = normalizeItemIds(rawIds).filter(id => mongoose.Types.ObjectId.isValid(id));
+        if (ids.length > 0) {
+            await Cart.updateOne(
+                { user_id: ownerId },
+                { $pull: { items: { _id: { $in: ids.map(id => new mongoose.Types.ObjectId(id)) } } } } as any,
+            );
+        }
         return this.getCart(userId);
     }
 

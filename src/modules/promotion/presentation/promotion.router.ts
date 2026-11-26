@@ -55,7 +55,8 @@ router.get('/available', optionalAuthenticate, async (req, res) => {
                 items = JSON.parse(req.query.items);
             } catch (e) {}
         }
-        const coupons = await PromotionService.getAvailableCoupons(shopId, subtotal, productId, items);
+        const buyerId = (req as AuthenticatedRequest).user?.id;
+        const coupons = await PromotionService.getAvailableCoupons(shopId, subtotal, productId, items, buyerId);
         res.json(coupons);
     } catch (error: any) {
         res.status(500).json({ error: error.message || 'Lỗi khi tải danh sách voucher khả dụng.' });
@@ -72,7 +73,8 @@ router.post('/apply', authenticate, async (req, res) => {
             Number(shippingFee) || 0,
             shopId,
             productId,
-            items
+            items,
+            (req as AuthenticatedRequest).user?.id
         );
 
         if (!result.valid) {
