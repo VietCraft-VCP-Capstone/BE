@@ -1,3 +1,5 @@
+import { baselineDailyRate, RATE_WINDOW_DAYS, vnDayEnd, vnDayStart } from './seasonal-math';
+
 // Nhật ký dự báo mùa vụ: mỗi tuần lưu một bản "nếu bán như ngày thường" cho kỳ dịp,
 // sau lễ so với số đơn thực tế để seller thấy độ chính xác thật của hệ thống.
 
@@ -60,4 +62,49 @@ export function forecastAccuracy(logs: ForecastLogLike[], actual: number): Forec
         }));
     const hits = items.filter(i => i.verdict === 'within').length;
     return { n: items.length, hits, coverage_pct: Math.round((100 * hits) / items.length), actual, items };
+}
+
+export interface ForecastSnapshot {
+    iso_week: string;
+    made_at: Date;
+    days_to_event: number;
+    window_start: Date;
+    window_end: Date;
+    window_days: number;
+    baseline_daily_rate: number;
+    baseline_orders: number;
+    baseline_days: number;
+    expected: Interval;
+}
+
+/**
+ * Bản dự báo "nếu bán như ngày thường" của một kỳ: nhịp nền trước ngày mở bán × số ngày của kỳ.
+ * Null khi đã qua lễ hoặc chưa đủ nhịp nền. Dùng chung cho trang (BE) và job ghi log hằng tuần.
+ */
+export function buildForecastSnapshot(
+    orders: any[],
+    m: { traction_start?: string; event_date?: string },
+    now: Date,
+): ForecastSnapshot | null {
+    if (!m.traction_start || !m.event_date) return null;
+    const winStart = vnDayStart(m.traction_start.slice(0, 10));
+    const winEnd = vnDayEnd(m.event_date.slice(0, 10));
+    const todayVn = new Date(now.getTime() + 7 * 3600_000).toISOString().slice(0, 10);
+    const daysToEvent = Math.round((Date.parse(m.event_date.slice(0, 10)) - Date.parse(todayVn)) / 86400000);
+    if (daysToEvent < 0) return null;
+    const baseline = baselineDailyRate(orders, winStart, RATE_WINDOW_DAYS);
+    if (baseline.rate == null) return null;
+    const windowDays = Math.max(7, Math.round((winEnd.getTime() - winStart.getTime()) / 86400000));
+    return {
+        iso_week: isoWeekKeyVn(now),
+        made_at: now,
+        days_to_event: daysToEvent,
+        window_start: winStart,
+        window_end: winEnd,
+        window_days: windowDays,
+        baseline_daily_rate: baseline.rate,
+        baseline_orders: baseline.orders,
+        baseline_days: baseline.coverage_days,
+        expected: poissonInterval(baseline.rate * windowDays),
+    };
 }

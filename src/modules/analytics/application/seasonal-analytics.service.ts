@@ -28,7 +28,7 @@ import { PlatformCostConfig } from '../../admin/infrastructure/models/system-con
 import { writableShopId } from './seasonal-access';
 import { isGrounded } from './llm-grounding';
 import { eventYearOf, planLookupKey, planViewFor } from './seasonal-plan';
-import { forecastAccuracy, isoWeekKeyVn, poissonInterval } from './seasonal-forecast-log';
+import { buildForecastSnapshot, forecastAccuracy } from './seasonal-forecast-log';
 import { SeasonalForecastLog } from '../infrastructure/models/seasonal-forecast-log.model';
 import { SeasonalPlan } from '../infrastructure/models/seasonal-plan.model';
 
@@ -452,7 +452,7 @@ Yêu cầu nghiệp vụ:
                     listing_status: { $ne: 'EXPIRED' }
                 }).select('_id title slug images categories category_ids tags product_type original_price stock_alert_threshold source_idea_id').lean().catch(() => [])
                 : Promise.resolve([] as any[]),
-            (data.events && Array.isArray(data.events))
+            (Array.isArray(data.pod_blanks) || Array.isArray(data.events))
                 ? BlankClient.listBlanks(req.user?.id).catch(() => [] as Blank[])
                 : Promise.resolve([] as Blank[]),
             // ~13 tháng đơn để phủ cùng kỳ năm trước; lọc "đơn hợp lệ" bằng isValidDemandOrder bên dưới
@@ -478,34 +478,41 @@ Yêu cầu nghiệp vụ:
         const detectedName: string = aiCategory.name || 'Toàn ngành hàng TMĐT';
         data.seller_category = { slug: detectedSlug, name: detectedName, source: aiCategory.source || 'none' };
 
-        if (data.events && Array.isArray(data.events)) {
-            for (const event of data.events) {
-                if (event.pod_blanks && Array.isArray(event.pod_blanks)) {
-                    for (const pb of event.pod_blanks) {
-                        const bt = (pb.blank_type || '').toLowerCase();
-                        const matched = sellerBlanks.find(b => {
-                            const bId = (b._id || '').toLowerCase();
-                            const bCat = (b.category || '').toLowerCase();
-                            if (bt.includes('tshirt') || bt.includes('áo')) return bId.includes('tshirt') || bCat.includes('thời trang');
-                            if (bt.includes('mug') || bt.includes('cốc') || bt.includes('ly')) return bId.includes('mug') || bCat.includes('gia dụng') || bCat.includes('quà');
-                            if (bt.includes('tote') || bt.includes('túi')) return bId.includes('tote') || bCat.includes('phụ kiện');
-                            if (bt.includes('canvas') || bt.includes('tranh') || bt.includes('khung')) return bId.includes('frame') || bCat.includes('trang trí');
-                            return false;
-                        });
-                        if (matched) {
-                            pb.matched_blank = {
-                                _id: matched._id,
-                                title: matched.title,
-                                category: matched.category,
-                                default_image: matched.default_image,
-                                base_cost: matched.variations?.[0]?.base_cost || 0,
-                                printer_name: matched.printer_name || 'Xưởng in liên kết',
-                                is_connected: true
-                            };
-                        }
+        // Gắn phôi của xưởng liên kết cho gợi ý phôi POD: cả danh sách chính (trang mùa vụ) lẫn events[0] (bảng điều khiển)
+        const podBlankLists: any[][] = [
+            Array.isArray(data.pod_blanks) ? data.pod_blanks : [],
+            ...((Array.isArray(data.events) ? data.events : []).map((e: any) => (Array.isArray(e.pod_blanks) ? e.pod_blanks : []))),
+        ];
+        if (podBlankLists.some(l => l.length > 0)) {
+            for (const list of podBlankLists) {
+                for (const pb of list) {
+                    const bt = (pb.blank_type || '').toLowerCase();
+                    const matched = sellerBlanks.find(b => {
+                        const bId = (b._id || '').toLowerCase();
+                        const bCat = (b.category || '').toLowerCase();
+                        if (bt.includes('tshirt') || bt.includes('áo')) return bId.includes('tshirt') || bCat.includes('thời trang');
+                        if (bt.includes('mug') || bt.includes('cốc') || bt.includes('ly')) return bId.includes('mug') || bCat.includes('gia dụng') || bCat.includes('quà');
+                        if (bt.includes('tote') || bt.includes('túi')) return bId.includes('tote') || bCat.includes('phụ kiện');
+                        if (bt.includes('canvas') || bt.includes('tranh') || bt.includes('khung')) return bId.includes('frame') || bCat.includes('trang trí');
+                        return false;
+                    });
+                    if (matched) {
+                        pb.matched_blank = {
+                            _id: matched._id,
+                            title: matched.title,
+                            category: matched.category,
+                            default_image: matched.default_image,
+                            base_cost: matched.variations?.[0]?.base_cost || 0,
+                            printer_name: matched.printer_name || 'Xưởng in liên kết',
+                            is_connected: true
+                        };
                     }
                 }
+            }
+        }
 
+        if (Array.isArray(data.events)) {
+            for (const event of data.events) {
                 const evName = (event.name || '').toLowerCase();
                 const evWords: string[] = evName.split(/\s+/).filter(Boolean);
                 event.matching_shop_products = shopProducts.filter((p: any) => {
@@ -515,7 +522,9 @@ Yêu cầu nghiệp vụ:
                     return evWords.some((w: string) => w.length > 2 && (pTitle.includes(w) || pTags.some((t: string) => t.includes(w)) || pCats.some((c: string) => c.includes(w))));
                 }).slice(0, 4);
             }
+        }
 
+        if (sellerBlanks.length > 0) {
             data.all_seller_blanks = sellerBlanks.map(b => ({
                 _id: b._id,
                 title: b.title,
@@ -723,28 +732,18 @@ Yêu cầu nghiệp vụ:
         const logShopId = writableShopId(viewer);
         const logYear = eventYearOf(activeCamp);
         const campPhase: string = activeCamp?.timing?.current_phase || activeCamp?.occasion_window?.current_phase || '';
-        const daysToEventNow = Number(activeCamp?.timing?.days_to_event ?? activeCamp?.occasion_window?.days_to_peak ?? NaN);
-        if (logShopId && logYear && campId && shopDailyRate != null && campPhase !== 'post_event' && Number.isFinite(daysToEventNow) && daysToEventNow >= 0) {
-            const shopOid = new mongoose.Types.ObjectId(logShopId);
-            const isoWeek = isoWeekKeyVn(new Date());
-            await SeasonalForecastLog.updateOne(
-                { shop_id: shopOid, event_key: campId, event_year: logYear, iso_week: isoWeek },
-                {
-                    $setOnInsert: {
-                        made_at: new Date(),
-                        days_to_event: daysToEventNow,
-                        window_start: winStart,
-                        window_end: winEnd,
-                        baseline_daily_rate: shopDailyRate,
-                        baseline_orders: baseline.orders,
-                        baseline_days: baseline.coverage_days,
-                        window_days: windowDays,
-                        expected: poissonInterval(shopDailyRate * windowDays),
-                        search_uplift: uplift?.value ?? null,
-                    },
-                },
-                { upsert: true },
-            ).catch(() => null);
+        if (logShopId && logYear && campId && campPhase !== 'post_event') {
+            const snap = buildForecastSnapshot(shopRealOrders, {
+                traction_start: activeCamp?.occasion_window?.traction_start || launchWin.traction_start,
+                event_date: activeCamp?.occasion_window?.event_date || launchWin.peak_date,
+            }, new Date());
+            if (snap) {
+                await SeasonalForecastLog.updateOne(
+                    { shop_id: new mongoose.Types.ObjectId(logShopId), event_key: campId, event_year: logYear, iso_week: snap.iso_week },
+                    { $setOnInsert: { ...snap, search_uplift: uplift?.value ?? null } },
+                    { upsert: true },
+                ).catch(() => null);
+            }
         }
         if (logShopId && logYear && campId && campPhase === 'post_event') {
             const logs = await SeasonalForecastLog.find({
