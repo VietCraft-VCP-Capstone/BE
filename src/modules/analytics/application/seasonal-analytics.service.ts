@@ -26,7 +26,10 @@ import {
 } from './seasonal-math';
 import { PlatformCostConfig } from '../../admin/infrastructure/models/system-config.model';
 import { writableShopId } from './seasonal-access';
+import { isGrounded } from './llm-grounding';
 import { eventYearOf, planLookupKey, planViewFor } from './seasonal-plan';
+import { forecastAccuracy, isoWeekKeyVn, poissonInterval } from './seasonal-forecast-log';
+import { SeasonalForecastLog } from '../infrastructure/models/seasonal-forecast-log.model';
 import { SeasonalPlan } from '../infrastructure/models/seasonal-plan.model';
 
 const ORDER_LOOKBACK_DAYS = 400;
@@ -274,13 +277,15 @@ Yêu cầu trả về JSON array đúng 3 phần tử:
                         concept: String(item.concept || '').replace(/[*_#]/g, '').trim(),
                         target_price_vnd: price,
                         estimated_cost_vnd: estCost,
-                        expected_margin_pct: Math.max(15, marginPct),
+                        expected_margin_pct: marginPct,
                         tags: Array.isArray(item.tags) ? item.tags.map((t: any) => String(t).trim()).filter(Boolean).slice(0, 5) : kwNames.slice(0, 3),
                         why_it_fits_shop: String(item.why_it_fits_shop || '').replace(/[*_#]/g, '').trim(),
                         source_type: 'llm_scoped' as const,
                         draft_basis: draftBasis,
                     };
-                }).filter(x => x.title && x.concept);
+                }).filter((x, idx) => x.title && x.concept
+                    // LLM chỉ diễn giải: số trong câu chữ phải có trong dữ liệu đầu vào (hoặc là giá chính nó đề xuất)
+                    && isGrounded([x.title, x.concept, x.why_it_fits_shop], { params, draftBasis, price: x.target_price_vnd, raw: parsed[idx]?.target_price_vnd }));
                 if (ideas.length > 0) {
                     SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: ideas, expiresAt: Date.now() + 1800 * 1000 });
                     await cacheService.set(redisKey, ideas, 86400).catch(() => {});
@@ -344,7 +349,7 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
                     title: String(it.title || '').replace(/[*_#]/g, '').trim(),
                     desc: String(it.desc || '').replace(/[*_#]/g, '').trim(),
                     traitKey: String(it.traitKey || 'ordersGrowth').trim(),
-                })).filter(it => it.title && it.desc);
+                })).filter(it => it.title && it.desc && isGrounded([it.title, it.desc], params));
                 if (cleaned.length > 0) {
                     SeasonalAnalyticsService.traitActionsCache.set(cacheKey, { data: cleaned, expiresAt: Date.now() + 1800 * 1000 });
                     return cleaned;
@@ -413,6 +418,11 @@ Yêu cầu nghiệp vụ:
                     title: String(parsed.title).replace(/[*_#]/g, '').trim(),
                     advice: String(parsed.advice).replace(/[*_#]/g, '').trim()
                 };
+                if (!isGrounded([result.title, result.advice], params)) {
+                    // Có số không lấy từ dữ liệu đầu vào → bỏ, dùng gợi ý theo quy tắc
+                    SeasonalAnalyticsService.geminiAdvisoryCache.set(cacheKey, { data: null, expiresAt: Date.now() + 3600 * 1000 });
+                    return null;
+                }
                 SeasonalAnalyticsService.geminiAdvisoryCache.set(cacheKey, { data: result, expiresAt: Date.now() + 3600 * 1000 });
                 return result;
             }
@@ -708,6 +718,41 @@ Yêu cầu nghiệp vụ:
             search_uplift: uplift?.value ?? null,
             missing: baseline.missing,
         };
+
+        // Nhật ký dự báo: trước lễ, mỗi tuần lưu một bản "nếu bán như ngày thường"; sau lễ đối chiếu với thực tế
+        const logShopId = writableShopId(viewer);
+        const logYear = eventYearOf(activeCamp);
+        const campPhase: string = activeCamp?.timing?.current_phase || activeCamp?.occasion_window?.current_phase || '';
+        const daysToEventNow = Number(activeCamp?.timing?.days_to_event ?? activeCamp?.occasion_window?.days_to_peak ?? NaN);
+        if (logShopId && logYear && campId && shopDailyRate != null && campPhase !== 'post_event' && Number.isFinite(daysToEventNow) && daysToEventNow >= 0) {
+            const shopOid = new mongoose.Types.ObjectId(logShopId);
+            const isoWeek = isoWeekKeyVn(new Date());
+            await SeasonalForecastLog.updateOne(
+                { shop_id: shopOid, event_key: campId, event_year: logYear, iso_week: isoWeek },
+                {
+                    $setOnInsert: {
+                        made_at: new Date(),
+                        days_to_event: daysToEventNow,
+                        window_start: winStart,
+                        window_end: winEnd,
+                        baseline_daily_rate: shopDailyRate,
+                        baseline_orders: baseline.orders,
+                        baseline_days: baseline.coverage_days,
+                        window_days: windowDays,
+                        expected: poissonInterval(shopDailyRate * windowDays),
+                        search_uplift: uplift?.value ?? null,
+                    },
+                },
+                { upsert: true },
+            ).catch(() => null);
+        }
+        if (logShopId && logYear && campId && campPhase === 'post_event') {
+            const logs = await SeasonalForecastLog.find({
+                shop_id: new mongoose.Types.ObjectId(logShopId), event_key: campId, event_year: logYear,
+            }).select('days_to_event expected made_at').lean().catch(() => [] as any[]);
+            const review = forecastAccuracy(logs as any[], campRealOrders.length);
+            data.forecast_review = review ? { ...review, event_key: campId, event_year: logYear } : null;
+        }
 
         // Kiểm tra chiến dịch đã phát sinh lưu lượng thật từ product_events hoặc đơn hàng chưa
         const hasActualTraffic = actualViews > 0 || actualAddCart > 0 || actualOrders > 0;
