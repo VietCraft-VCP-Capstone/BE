@@ -60,6 +60,7 @@ export class AiGatewayService {
         shopId: string;
         query?: Record<string, string>;
         body?: Record<string, unknown>;
+        timeoutMs?: number;
     }): Promise<AiResponse> {
         if (!config.aiGatewaySecret) {
             return { status: 503, body: { error: 'ai_gateway_not_configured' } };
@@ -76,18 +77,22 @@ export class AiGatewayService {
             'X-Shop-Id': options.shopId,
             'X-Debug-Shop-Id': options.shopId,
         };
-        const hasBody = Boolean(options.body && Object.keys(options.body).length > 0 && options.method !== 'GET');
-        if (hasBody) headers['Content-Type'] = 'application/json';
+        // fetch ném lỗi nếu GET kèm body; router luôn có req.body = {} nên chỉ gửi body cho POST/DELETE.
+        const guiBody = options.body !== undefined && options.method !== 'GET';
+        if (guiBody) headers['Content-Type'] = 'application/json';
 
-        const timeoutMs = process.env.AI_TIMEOUT_MS
-            ? Number(process.env.AI_TIMEOUT_MS)
-            : Math.max(config.aiTimeoutMs || 5000, 20000);
+        // Route nào cần lâu hơn (nhận diện ảnh, lần đầu gợi ý giá) truyền timeoutMs riêng; còn lại dùng mặc định.
+        const timeoutMs = options.timeoutMs
+            ?? (process.env.AI_TIMEOUT_MS
+                ? Number(process.env.AI_TIMEOUT_MS)
+                : Math.max(config.aiTimeoutMs || 5000, 20000));
+
 
         try {
             const response = await fetch(url, {
                 method: options.method,
                 headers,
-                body: hasBody ? JSON.stringify(options.body) : undefined,
+                body: guiBody ? JSON.stringify(options.body) : undefined,
                 signal: AbortSignal.timeout(timeoutMs),
             });
             const text = await response.text();
@@ -112,7 +117,7 @@ export class AiGatewayService {
     static async ping(): Promise<boolean> {
         try {
             const response = await fetch(new URL('/health', config.aiAnalyticsUrl), {
-                signal: AbortSignal.timeout(1500),
+                signal: AbortSignal.timeout(5000),
             });
             return response.ok;
         } catch {

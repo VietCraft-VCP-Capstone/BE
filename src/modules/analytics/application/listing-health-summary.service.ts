@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { ListingHealthScore } from '../../product/infrastructure/models/listing-health-score.model';
 import { buildMeta, ok, insufficient, Envelope } from './envelope';
+import { HEALTH_VERSION, VN_OFFSET_MS } from './listing-health.service';
 
 
 export interface HealthSummaryPoint {
@@ -20,22 +21,23 @@ export async function healthSummary(shopId: string, days: number): Promise<{ htt
         database: 'vietcraft',
         collection: 'listing_health_scores',
         mode: 'live',
-        model_version: extra.model_version || 'health-1.0',
+        model_version: extra.model_version || HEALTH_VERSION,
         computed_at: extra.computed_at ?? null,
         sample_size: extra.sample_size ?? 0,
     });
 
     if (!mongoose.Types.ObjectId.isValid(shopId)) {
-        return { httpStatus: 200, body: insufficient('Cần thiết lập gian hàng thật trước khi xem điểm sức khoẻ listing.', meta()) };
+        return { httpStatus: 200, body: insufficient('Cần thiết lập gian hàng thật trước khi xem độ hoàn thiện trang sản phẩm.', meta()) };
     }
 
     const products = await Product.find({ shop_id: shopId, seed_ref: { $exists: false }, is_hidden: { $ne: true } }).select('_id').lean();
-    const since = new Date();
+    const since = new Date(Date.now() + VN_OFFSET_MS);
     since.setUTCHours(0, 0, 0, 0);
     since.setUTCDate(since.getUTCDate() - (days - 1));
 
     const rows = products.length === 0 ? [] : await ListingHealthScore.aggregate([
         { $match: { product_id: { $in: products.map(p => p._id) }, date: { $gte: since }, score: { $ne: null } } },
+        { $sort: { date: -1, computed_at: -1 } },
         {
             $group: {
                 _id: '$date',

@@ -65,3 +65,6 @@ desktop.ini
 # POD uploaded designs/mockups (local storage)
 uploads/
 storage/
+
+# Test chỉ chạy tại máy, không đưa lên repo
+tests/

@@ -1,5 +1,4 @@
 import mongoose, { Schema, Document } from 'mongoose';
-import { normalizeVi } from '../../../../shared/utils/vietnamese-search.util';
 
 export interface IBankInfo {
     bank_code: string;
@@ -24,7 +23,6 @@ export type ReputationTier = 'TRUSTED' | 'NORMAL' | 'WARNING' | 'RESTRICTED';
 export interface IShop extends Document {
     owner_id: mongoose.Types.ObjectId;
     shop_name: string;
-    shop_name_norm?: string;
     slug: string;
     status: 'ACTIVE' | 'INACTIVE' | 'CLOSED' | 'PENDING';
     logo?: string;
@@ -52,15 +50,15 @@ export interface IShop extends Document {
 }
 
 const BankInfoSchema = new Schema<IBankInfo>({
-    bank_code: { type: String, required: true },
-    account_number: { type: String, required: true },
-    account_holder: { type: String, required: true }
+    bank_code: { type: String, required: false },
+    account_number: { type: String, required: false },
+    account_holder: { type: String, required: false }
 }, { _id: false });
 
 const PrinterPartnerSchema = new Schema<IPrinterPartner>({
     printer_id: { type: String },
-    printer_name: { type: String, required: true },
-    api_url: { type: String, required: true },
+    printer_name: { type: String, required: false },
+    api_url: { type: String, required: false },
     api_key: { type: String },
     seller_printing_email: { type: String },
     webhook_secret: { type: String },
@@ -72,7 +70,6 @@ const PrinterPartnerSchema = new Schema<IPrinterPartner>({
 const ShopSchema = new Schema<IShop>({
     owner_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true, index: true },
     shop_name: { type: String, required: true },
-    shop_name_norm: { type: String, index: true },
     slug: { type: String, required: true, unique: true, index: true },
     status: {
         type: String,
@@ -109,13 +106,5 @@ const ShopSchema = new Schema<IShop>({
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
-ShopSchema.pre('save', function (next) {
-    if (this.isModified('shop_name') || !this.shop_name_norm) {
-        this.shop_name_norm = normalizeVi(this.shop_name || '');
-    }
-    next();
-});
-
-ShopSchema.index({ shop_name_norm: 1 });
 
 export const Shop = mongoose.model<IShop>('Shop', ShopSchema, 'shops');

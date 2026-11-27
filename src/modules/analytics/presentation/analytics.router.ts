@@ -6,7 +6,7 @@ const router = Router();
 
 router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
-        const { product_id, session_id } = req.body;
+        const { product_id, session_id, traffic_source } = req.body;
         const userAgent = req.get('user-agent') || '';
         const ipAddress = req.ip || req.socket.remoteAddress || '';
         const userId = req.user?.id;
@@ -21,7 +21,8 @@ router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedReque
             'view',
             userAgent,
             ipAddress,
-            userId
+            userId,
+            traffic_source
         );
 
         res.json({ success: recorded });
@@ -33,7 +34,7 @@ router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedReque
 
 router.post('/events/add-to-cart', optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
-        const { product_id, session_id } = req.body;
+        const { product_id, session_id, traffic_source } = req.body;
         const userAgent = req.get('user-agent') || '';
         const ipAddress = req.ip || req.socket.remoteAddress || '';
         const userId = req.user?.id;
@@ -48,7 +49,8 @@ router.post('/events/add-to-cart', optionalAuthenticate, async (req: Authenticat
             'add_to_cart',
             userAgent,
             ipAddress,
-            userId
+            userId,
+            traffic_source
         );
 
         res.json({ success: recorded });

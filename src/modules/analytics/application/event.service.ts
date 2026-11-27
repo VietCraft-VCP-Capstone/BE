@@ -1,8 +1,16 @@
 import mongoose from 'mongoose';
-import { ProductEvent } from '../infrastructure/models/product-event.model';
+import { ProductEvent, type TrafficSource } from '../infrastructure/models/product-event.model';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { Shop } from '../../product/infrastructure/models/shop.model';
 import { logger } from '../../../shared/utils/logger';
+
+const VALID_TRAFFIC_SOURCES = new Set<TrafficSource>(['organic', 'campaign', 'social', 'direct', 'repeat']);
+
+const normalizeTrafficSource = (raw?: string): TrafficSource | undefined => {
+    if (!raw) return undefined;
+    const clean = String(raw).trim().toLowerCase() as TrafficSource;
+    return VALID_TRAFFIC_SOURCES.has(clean) ? clean : undefined;
+};
 
 const BOT_PATTERNS = [
     /bot/i,
@@ -33,7 +41,8 @@ export class EventService {
         eventType: 'view' | 'add_to_cart',
         userAgent: string,
         ipAddress: string,
-        userId?: string
+        userId?: string,
+        trafficSource?: string
     ): Promise<boolean> {
         try {
             if (!mongoose.Types.ObjectId.isValid(productId)) {
@@ -76,6 +85,7 @@ export class EventService {
             }
 
             const now = new Date();
+            const normalizedSource = normalizeTrafficSource(trafficSource);
             const dedupeKey = `${sessionId}:${productId}:${eventType}:${Math.floor(now.getTime() / DEDUPE_WINDOW_MS)}`;
             const result = await ProductEvent.updateOne(
                 { dedupe_key: dedupeKey },
@@ -85,6 +95,7 @@ export class EventService {
                         product_id: new mongoose.Types.ObjectId(productId),
                         session_id: sessionId,
                         event_type: eventType,
+                        ...(normalizedSource ? { traffic_source: normalizedSource } : {}),
                         user_id: userId ? new mongoose.Types.ObjectId(userId) : undefined,
                         user_agent: userAgent,
                         ip_address: ipAddress,

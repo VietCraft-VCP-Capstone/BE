@@ -1,5 +1,4 @@
 import mongoose, { Schema, Document } from 'mongoose';
-import { normalizeVi, nfcLower, buildPrefixes } from '../../../../shared/utils/vietnamese-search.util';
 
 export interface IDimensions {
     length: number;
@@ -21,6 +20,7 @@ export interface IProduct extends Document {
     unpublish_reason?: string;
     images: string[];
     tags: string[];
+    materials: string[];
     categories: string[];
     tag_ids: mongoose.Types.ObjectId[];
     category_ids: mongoose.Types.ObjectId[];
@@ -35,6 +35,8 @@ export interface IProduct extends Document {
     moderation_status: 'PENDING' | 'APPROVED' | 'REJECTED';
     rejection_reason?: string;
     is_hidden: boolean;
+    // 'SKU': seller khai bảng phân loại (mẫu × size, giá/kho riêng từng dòng) thay vì màu + chia đều kho.
+    variant_mode?: 'SKU';
     // POD: phôi in (id bên Printer) + cách đặt design lên phôi.
     blank_id?: string;
     printer_id?: string;
@@ -50,16 +52,8 @@ export interface IProduct extends Document {
     }[];
     average_rating?: number;
     rating_count?: number;
-    title_norm?: string;
-    title_lc?: string;
-    title_prefixes?: string[];
-    tags_norm?: string[];
-    categories_norm?: string[];
-    description_norm?: string;
-    min_price?: number;
-    max_price?: number;
-    total_stock?: number;
-    sold_count?: number;
+    // ID ý tưởng mùa vụ (F38 Seasonal) mà seller dùng để tạo sản phẩm này
+    source_idea_id?: string;
     // Do script seed ghi thẳng; khai báo để query lọc seed_ref có kiểu.
     seed_ref?: string;
     created_at: Date;
@@ -73,6 +67,7 @@ const LayerSchema = new Schema({
     y: { type: Number, default: 0 },
     scale: { type: Number, default: 1 },
     rotation: { type: Number, default: 0 },
+    flip_h: { type: Boolean },
     // image
     design_id: { type: Schema.Types.ObjectId, ref: 'Design' },
     // text
@@ -141,6 +136,7 @@ const ProductSchema = new Schema<IProduct>({
     unpublish_reason: { type: String },
     images: { type: [String], default: [] },
     tags: { type: [String], index: true, default: [] },
+    materials: { type: [String], default: [] },
     categories: { type: [String], default: [] },
     tag_ids: { type: [{ type: Schema.Types.ObjectId, ref: 'Tag' }], index: true, default: [] },
     category_ids: { type: [{ type: Schema.Types.ObjectId, ref: 'Category' }], index: true, default: [] },
@@ -158,61 +154,23 @@ const ProductSchema = new Schema<IProduct>({
     },
     rejection_reason: { type: String },
     is_hidden: { type: Boolean, default: false },
+    variant_mode: { type: String, enum: ['SKU'] },
     blank_id: { type: String, index: true },
     printer_id: { type: String, index: true },
     printer_name: { type: String },
     design_placements: { type: [DesignPlacementSchema], default: [] },
     average_rating: { type: Number, default: 5.0, min: 0, max: 5, index: true },
     rating_count: { type: Number, default: 0 },
-    title_norm: { type: String },
-    title_lc: { type: String },
-    title_prefixes: { type: [String], default: [] },
-    tags_norm: { type: [String], default: [] },
-    categories_norm: { type: [String], default: [] },
-    description_norm: { type: String },
-    min_price: { type: Number, default: 0 },
-    max_price: { type: Number, default: 0 },
-    total_stock: { type: Number, default: 0 },
-    sold_count: { type: Number, default: 0 }
+    source_idea_id: { type: String, index: true, sparse: true }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
-ProductSchema.pre('save', function (next) {
-    if (this.isModified('title') || !this.title_norm) {
-        this.title_norm = normalizeVi(this.title || '');
-        this.title_lc = nfcLower(this.title || '');
-        this.title_prefixes = buildPrefixes(this.title_norm);
-    }
-    if (this.isModified('tags') || !this.tags_norm || this.tags_norm.length === 0) {
-        this.tags_norm = Array.isArray(this.tags) ? this.tags.map(t => normalizeVi(t)).filter(Boolean) : [];
-    }
-    if (this.isModified('categories') || !this.categories_norm || this.categories_norm.length === 0) {
-        this.categories_norm = Array.isArray(this.categories) ? this.categories.map(c => normalizeVi(c)).filter(Boolean) : [];
-    }
-    if (this.isModified('description') || !this.description_norm) {
-        this.description_norm = normalizeVi(this.description || '');
-    }
-    next();
-});
-
-ProductSchema.index(
-    { title_norm: 'text', tags_norm: 'text', categories_norm: 'text', description_norm: 'text' },
-    {
-        name: 'ProductTextSearchIndex',
-        weights: { title_norm: 10, tags_norm: 5, categories_norm: 3, description_norm: 1 },
-        default_language: 'none'
-    }
-);
 ProductSchema.index({ status: 1, is_hidden: 1, created_at: -1 });
 ProductSchema.index({ status: 1, is_hidden: 1, categories: 1 });
-ProductSchema.index({ status: 1, is_hidden: 1, min_price: 1 });
-ProductSchema.index({ status: 1, is_hidden: 1, total_stock: 1 });
-ProductSchema.index({ title_prefixes: 1 });
-ProductSchema.index({ title_norm: 1 });
-ProductSchema.index({ tags_norm: 1 });
-ProductSchema.index({ categories_norm: 1 });
 ProductSchema.index({ shop_id: 1, status: 1 });
 ProductSchema.index({ listing_status: 1, status: 1 });
+ProductSchema.index({ updated_at: 1 });
+ProductSchema.index({ is_hidden: 1, updated_at: 1 });
 
 export const Product = mongoose.model<IProduct>('Product', ProductSchema, 'products');

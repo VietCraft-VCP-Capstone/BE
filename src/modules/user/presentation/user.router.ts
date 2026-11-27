@@ -11,7 +11,8 @@ router.get('/profile', authenticate, requireRole(['buyer', 'seller', 'admin']), 
         const profile = await UserService.getProfile(userId);
         res.json(profile);
     } catch (error: any) {
-        res.status(500).json({ error: error.message });
+        const status = error.message === 'Không tìm thấy người dùng' ? 401 : 500;
+        res.status(status).json({ error: error.message });
     }
 });
 

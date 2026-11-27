@@ -14,63 +14,63 @@ const LOOKBACK_MS = 24 * 60 * 60 * 1000;
 /**
  * Job đối soát thanh toán và tự động hủy đơn quá hạn:
  * 1. Định kỳ đối soát trạng thái đơn PayOS còn PENDING.
- * 2. Tự động hủy các đơn thanh toán trả trước (PAYOS/VNPAY) quá 30 phút chưa thanh toán,
+ * 2. Tự động hủy các đơn thanh toán trả trước (PAYOS) quá 30 phút chưa thanh toán,
  *    hoàn lại số lượng tồn kho (stock) và nhả lại lượt dùng voucher.
  */
 export class PayosPaymentReconcileJob {
     private static timer: NodeJS.Timeout | undefined;
     private static running = false;
 
-    static start(intervalMs = 60_000): void {
-        if (this.timer) return;
-        this.timer = setInterval(() => void this.runOnce(), intervalMs);
-        this.timer.unref();
-    }
+        static start(intervalMs = 60_000): void {
+            if (this.timer) return;
+            this.timer = setInterval(() => void this.runOnce(), intervalMs);
+            this.timer.unref();
+        }
 
-    static stop(): void {
-        if (this.timer) clearInterval(this.timer);
-        this.timer = undefined;
-    }
+        static stop(): void {
+            if (this.timer) clearInterval(this.timer);
+            this.timer = undefined;
+        }
 
-    /** Trả về số đơn vừa được ghi nhận đã thanh toán hoặc đã hủy. */
-    static async runOnce(now = new Date()): Promise<number> {
-        if (!isMongoReady() || this.running) return 0;
-        this.running = true;
-        let processedCount = 0;
-        try {
-            // 1. Đối soát các đơn PayOS PENDING còn trong thời hạn 30 phút
-            if (payosService.configured()) {
-                const pendingPayos = await Order.find({
-                    payment_method: 'PAYOS',
-                    payment_status: 'PENDING',
-                    order_status: { $ne: 'CANCELLED' },
-                    'payos_order_codes.0': { $exists: true },
-                    created_at: {
-                        $gte: new Date(now.getTime() - UNPAID_EXPIRE_MS),
-                        $lte: now
-                    },
-                }).select('_id order_code').limit(30).lean();
+        /** Trả về số đơn vừa được ghi nhận đã thanh toán hoặc đã hủy. */
+        static async runOnce(now = new Date()): Promise<number> {
+            if (!isMongoReady() || this.running) return 0;
+            this.running = true;
+            let processedCount = 0;
+            try {
+                // 1. Đối soát các đơn PayOS PENDING còn trong thời hạn 30 phút
+                if (payosService.configured()) {
+                    const pendingPayos = await Order.find({
+                        payment_method: 'PAYOS',
+                        payment_status: 'PENDING',
+                        order_status: { $ne: 'CANCELLED' },
+                        'payos_order_codes.0': { $exists: true },
+                        created_at: {
+                            $gte: new Date(now.getTime() - UNPAID_EXPIRE_MS),
+                            $lte: now
+                        },
+                    }).select('_id order_code').limit(30).lean();
 
-                for (const order of pendingPayos) {
-                    try {
-                        const { paymentStatus } = await payosService.syncPayment({ orderId: String(order._id) });
-                        if (paymentStatus === 'PAID') processedCount += 1;
-                    } catch (error) {
-                        logger.error(`[PAYOS PAYMENT RECONCILE] #${order.order_code}: ${error instanceof Error ? error.message : error}`);
+                    for (const order of pendingPayos) {
+                        try {
+                            const { paymentStatus } = await payosService.syncPayment({ orderId: String(order._id) });
+                            if (paymentStatus === 'PAID') processedCount += 1;
+                        } catch (error) {
+                            logger.error(`[PAYOS PAYMENT RECONCILE] #${order.order_code}: ${error instanceof Error ? error.message : error}`);
+                        }
                     }
                 }
-            }
 
-            // 2. Tự động hủy các đơn trả trước (PAYOS / VNPAY) quá 30 phút chưa thanh toán
-            const expiredUnpaidOrders = await Order.find({
-                payment_method: { $in: ['PAYOS', 'VNPAY'] },
-                payment_status: 'PENDING',
-                order_status: { $in: ['ORDERED', 'PENDING_DESIGN', 'PENDING_APPROVAL'] },
-                created_at: {
-                    $lt: new Date(now.getTime() - UNPAID_EXPIRE_MS),
-                    $gte: new Date(now.getTime() - LOOKBACK_MS)
-                }
-            }).limit(30);
+                // 2. Tự động hủy các đơn trả trước (PAYOS) quá 30 phút chưa thanh toán
+                const expiredUnpaidOrders = await Order.find({
+                    payment_method: 'PAYOS',
+                    payment_status: 'PENDING',
+                    order_status: { $in: ['ORDERED', 'PENDING_DESIGN', 'PENDING_APPROVAL'] },
+                    created_at: {
+                        $lt: new Date(now.getTime() - UNPAID_EXPIRE_MS),
+                        $gte: new Date(now.getTime() - LOOKBACK_MS)
+                    }
+                }).limit(30);
 
             for (const order of expiredUnpaidOrders) {
                 try {

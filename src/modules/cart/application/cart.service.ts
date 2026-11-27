@@ -2,8 +2,9 @@ import mongoose from 'mongoose';
 import { Cart } from '../infrastructure/models/cart.model';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
-import { PRODUCT_POPULATE, toUserObjectId, VARIANT_POPULATE } from '../utils';
+import { applySelection, normalizeItemIds, PRODUCT_POPULATE, toUserObjectId, VARIANT_POPULATE } from '../utils';
 import { EventService } from '../../analytics/application/event.service';
+import { assertNotOwnProduct } from '../../product/application/purchase-guard';
 
 export class CartService {
 
@@ -94,8 +95,9 @@ export class CartService {
         const quantity = Math.max(1, Number(payload.quantity) || 1);
 
         if (!mongoose.Types.ObjectId.isValid(productId)) throw new Error('Sản phẩm không hợp lệ');
-        const product = await Product.findById(productId).select('title listing_status');
+        const product = await Product.findById(productId).select('title listing_status shop_id');
         if (!product) throw new Error('Sản phẩm không tồn tại');
+        await assertNotOwnProduct(userId, product.shop_id);
         if (product.listing_status === 'INACTIVE' || product.listing_status === 'EXPIRED') {
             throw new Error(`Sản phẩm "${product.title}" hiện không bán`);
         }
@@ -215,6 +217,32 @@ export class CartService {
         item.is_selected = isSelected;
         item.updated_at = new Date();
         await cart.save();
+        return this.getCart(userId);
+    }
+
+    /** Đặt cả tập dòng được chọn trong 1 lần lưu (thay cho N lệnh bật/tắt song song dễ ghi đè nhau). */
+    static async setSelection(userId: string, rawIds: unknown) {
+        const ownerId = toUserObjectId(userId);
+        const selectedIds = normalizeItemIds(rawIds);
+        const cart = await Cart.findOne({ user_id: ownerId });
+        if (!cart) return this.getCart(userId);
+
+        if (applySelection(cart.items as any[], selectedIds) > 0) {
+            await cart.save();
+        }
+        return this.getCart(userId);
+    }
+
+    /** Xoá nhiều dòng trong 1 lệnh. Id không còn trong giỏ thì bỏ qua (thao tác lặp lại vẫn an toàn). */
+    static async removeItems(userId: string, rawIds: unknown) {
+        const ownerId = toUserObjectId(userId);
+        const ids = normalizeItemIds(rawIds).filter(id => mongoose.Types.ObjectId.isValid(id));
+        if (ids.length > 0) {
+            await Cart.updateOne(
+                { user_id: ownerId },
+                { $pull: { items: { _id: { $in: ids.map(id => new mongoose.Types.ObjectId(id)) } } } } as any,
+            );
+        }
         return this.getCart(userId);
     }
 

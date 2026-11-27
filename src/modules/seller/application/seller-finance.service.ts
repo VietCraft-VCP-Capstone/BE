@@ -9,6 +9,7 @@ import { PayosRefundGateway, payosPayoutReference, payoutDescription } from '../
 import { logger } from '../../../shared/utils/logger';
 import { toNapasBin } from '../../payment/domain/bank-codes';
 import { decryptField, maskBankAccount } from '../../../shared/utils/crypto.service';
+import { SettlementStatus, settlementStatusOf, openReturnOrderIds, deliveredAt } from './seller-settlement-rule';
 
 export interface SellerFinanceOverview {
     availableBalance: number;
@@ -34,8 +35,15 @@ export interface SellerSettlementItem {
     platformFee: number;
     commissionRate: number;
     netPayout: number;
-    settlementStatus: 'SETTLED' | 'PENDING' | 'CANCELLED';
+    settlementStatus: SettlementStatus;
     itemsCount: number;
+}
+
+function moneyOf(ord: any): { payout: number; platformFee: number } {
+    const fb = ord.financial_breakdown || {};
+    const subtotal = Number(fb.subtotal?.toString() || 0);
+    const platformFee = Number(fb.platform_fee?.toString() || 0);
+    return { payout: Number(fb.seller_payout_amount?.toString() || (subtotal - platformFee)) || 0, platformFee };
 }
 
 export interface SellerWithdrawalItem {
@@ -81,35 +89,23 @@ export class SellerFinanceService {
         }
 
         // 1. Tính toán doanh thu từ các đơn hàng
-        const orderAggregation = await Order.aggregate([
-            {
-                $match: {
-                    shop_id: shopId,
-                    is_simulated: { $ne: true },
-                    order_status: { $ne: 'CANCELLED' }
-                }
-            },
-            {
-                $group: {
-                    _id: '$order_status',
-                    subtotal: { $sum: { $toDouble: '$financial_breakdown.subtotal' } },
-                    platformFee: { $sum: { $toDouble: '$financial_breakdown.platform_fee' } },
-                    payout: { $sum: { $toDouble: '$financial_breakdown.seller_payout' } },
-                }
-            }
+        const [orders, openIds] = await Promise.all([
+            Order.find({ shop_id: shopId, is_simulated: { $ne: true }, order_status: { $ne: 'CANCELLED' } })
+                .select('order_status payment_status refund_status status_history updated_at financial_breakdown').lean(),
+            openReturnOrderIds(ownerId),
         ]);
 
         let settledRevenue = 0;
         let pendingBalance = 0;
         let totalPlatformFee = 0;
 
-        for (const row of orderAggregation) {
-            const status = row._id;
-            const payout = row.payout || (row.subtotal - row.platformFee) || 0;
-            if (status === 'DELIVERED') {
+        for (const ord of orders) {
+            const { payout, platformFee } = moneyOf(ord);
+            const status = settlementStatusOf(ord, openIds);
+            if (status === 'SETTLED') {
                 settledRevenue += payout;
-                totalPlatformFee += (row.platformFee || 0);
-            } else {
+                totalPlatformFee += platformFee;
+            } else if (status === 'PENDING') {
                 pendingBalance += payout;
             }
         }
@@ -177,44 +173,31 @@ export class SellerFinanceService {
             is_simulated: { $ne: true }
         };
 
-        if (params.status === 'SETTLED') {
-            filter.order_status = 'DELIVERED';
-        } else if (params.status === 'PENDING') {
-            filter.order_status = { $in: ['ORDERED', 'PENDING_DESIGN', 'PROCESSING', 'SHIPPING'] };
-        } else if (params.status === 'CANCELLED') {
-            filter.order_status = 'CANCELLED';
-        }
-
         if (params.search?.trim()) {
             filter.order_code = { $regex: params.search.trim(), $options: 'i' };
         }
 
-        const [orders, total] = await Promise.all([
-            Order.find(filter)
-                .sort({ created_at: -1 })
-                .skip(skip)
-                .limit(limit)
-                .lean(),
-            Order.countDocuments(filter)
+        // shortcut: lọc trạng thái giải ngân trong bộ nhớ, chuyển sang aggregate nếu shop có hàng chục nghìn đơn
+        const [all, openIds] = await Promise.all([
+            Order.find(filter).sort({ created_at: -1 }).lean(),
+            openReturnOrderIds(ownerId),
         ]);
+        const rows = all
+            .map(ord => ({ ord, settlementStatus: settlementStatusOf(ord, openIds) }))
+            .filter(r => !params.status || params.status === 'ALL' || r.settlementStatus === params.status);
+        const total = rows.length;
 
-        const items: SellerSettlementItem[] = orders.map(ord => {
+        const items: SellerSettlementItem[] = rows.slice(skip, skip + limit).map(({ ord, settlementStatus }) => {
             const subtotal = Number(ord.financial_breakdown?.subtotal?.toString() || 0);
-            const platformFee = Number(ord.financial_breakdown?.platform_fee?.toString() || 0);
+            const { payout: netPayout, platformFee } = moneyOf(ord);
             const commissionRate = subtotal > 0 ? platformFee / subtotal : 0;
-            const netPayout = Number(ord.financial_breakdown?.seller_payout_amount?.toString() || (subtotal - platformFee));
-
-            let settlementStatus: 'SETTLED' | 'PENDING' | 'CANCELLED' = 'PENDING';
-            if (ord.order_status === 'DELIVERED') settlementStatus = 'SETTLED';
-            else if (ord.order_status === 'CANCELLED') settlementStatus = 'CANCELLED';
-
-            const deliveredHist = ord.status_history?.find(h => h.status === 'DELIVERED');
+            const delivered = ord.order_status === 'DELIVERED' ? deliveredAt(ord) ?? undefined : undefined;
 
             return {
                 orderId: ord._id.toString(),
                 orderCode: ord.order_code,
                 orderDate: ord.created_at,
-                deliveredDate: deliveredHist?.changed_at,
+                deliveredDate: delivered,
                 orderStatus: ord.order_status,
                 subtotal: Math.round(subtotal),
                 platformFee: Math.round(platformFee),

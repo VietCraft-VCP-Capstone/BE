@@ -119,6 +119,7 @@ const podTransitions: readonly TransitionRule[] = [
     { from: 'PRINTER_PROPOSED_REJECTION', action: 'ADMIN_CONFIRM_PROPOSAL', to: 'REJECTED', actor: 'ADMIN' },
     { from: 'APPROVED', action: 'ADMIN_CONFIRM_REFUND', to: 'CONVERTED_TO_REFUND', actor: 'ADMIN' },
     { from: 'AWAITING_ADMIN_REFUND', action: 'ADMIN_CONFIRM_REFUND', to: 'CONVERTED_TO_REFUND', actor: 'ADMIN' },
+    { from: 'AWAITING_ADMIN_REFUND', action: 'PRINTER_CONFIRM_REFUND', to: 'CONVERTED_TO_REFUND', actor: 'PRINTER' },
     { from: 'APPROVED', action: 'STOCK_UNAVAILABLE', to: 'WAITING_BUYER_CHOICE', actor: 'SYSTEM' },
     { from: 'WAITING_BUYER_CHOICE', action: 'BUYER_CHOOSE_WAIT', to: 'WAITING_STOCK', actor: 'BUYER' },
     { from: 'WAITING_BUYER_CHOICE', action: 'BUYER_CHOOSE_REFUND', to: 'AWAITING_ADMIN_REFUND', actor: 'BUYER' },

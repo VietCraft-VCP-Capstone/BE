@@ -77,7 +77,8 @@ const DEFAULT_SETTINGS: SellerSettingsResponseDTO = {
         },
         analytics: {
             weeklyReport: { email: true, app: false },
-            promotions: { email: false, app: true }
+            promotions: { email: false, app: true },
+            performanceAlert: { email: false, app: true }
         }
     },
     updatedAt: new Date().toISOString()
@@ -109,14 +110,15 @@ export class SellerSettingsService {
         if (!shop) {
             shop = await Shop.create({
                 owner_id: ownerId,
-                shop_name: user?.full_name ? `${user.full_name}'s Shop` : DEFAULT_SETTINGS.brand.storeName,
+                shop_name: user?.full_name ? `${user.full_name}'s Shop` : (DEFAULT_SETTINGS.brand.storeName || 'Gian hàng VietCraft'),
                 slug: await resolveUniqueSlug('', ownerId, sellerId.substring(18)),
                 description: DEFAULT_SETTINGS.brand.description,
                 logo: user?.avatar || DEFAULT_SETTINGS.brand.logoUrl,
                 banner: DEFAULT_SETTINGS.brand.bannerUrl,
                 settings: DEFAULT_SETTINGS,
                 listing_count: 0,
-                average_rating: 5.0
+                average_rating: 0,
+                rating_count: 0
             });
         }
 
@@ -199,7 +201,8 @@ export class SellerSettingsService {
 
         const notifications: SellerNotificationSettingsDTO = {
             ...DEFAULT_SETTINGS.notifications,
-            ...(customSettings.notifications || {})
+            ...(customSettings.notifications || {}),
+            analytics: { ...DEFAULT_SETTINGS.notifications.analytics, ...(customSettings.notifications?.analytics || {}) }
         };
 
         return {
@@ -222,7 +225,7 @@ export class SellerSettingsService {
         if (!shop) {
             shop = await Shop.create({
                 owner_id: ownerId,
-                shop_name: payload.brand?.storeName || 'My Shop',
+                shop_name: payload.brand?.storeName || 'Gian hàng VietCraft',
                 slug: await resolveUniqueSlug(payload.brand?.slug || '', ownerId, sellerId.substring(18)),
                 settings: {}
             });

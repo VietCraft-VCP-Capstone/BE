@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { Product as MongoProduct } from '../infrastructure/models/product.model';
-import { ProductVariant as MongoVariant, syncProductDenorm } from '../infrastructure/models/product-variant.model';
+import { ProductVariant as MongoVariant } from '../infrastructure/models/product-variant.model';
 import { Shop } from '../infrastructure/models/shop.model';
 import { User } from '../../user/infrastructure/models/user.model';
 import { Category } from '../../category';
@@ -10,13 +10,15 @@ import { tagsService } from '../../tags/application/tags.service';
 import { Design } from '../../design/infrastructure/models/design.model';
 import { generateSlug } from '../../../shared/utils/slug';
 import { BlankClient, Blank } from './blank-client.service';
-import { generateMockup, generateMockupLayers, generateWrapMockup, resolveColorHex } from './mockup.service';
+import { generateMockup } from './mockup.service';
+import { RenderColor, RenderedColor, RenderPlacement, renderColorMockups } from './mockup-render.service';
 import { normalizeRole } from '../../../app/middleware/auth.middleware';
 import {
     ProductItemResponseDTO,
     ProductFormDataDTO,
     ProductStatus,
     ProductColorVariantDTO,
+    ProductSkuInputDTO,
     InventoryTrendPointDTO,
     ProductFilterQueryDTO,
     PaginatedProductsResponseDTO,
@@ -25,17 +27,25 @@ import {
 } from './product.dto';
 import { SearchLog } from '../../analytics/infrastructure/models/search-log.model';
 import { BannedKeyword } from '../../analytics/infrastructure/models/banned-keyword.model';
+import { ProductEvent } from '../../analytics/infrastructure/models/product-event.model';
 import { shouldLogSearch, rankSuggestions, SUGGEST_PROJECTION } from './product-search.helpers';
-import { buildKeywordSuggestions, fetchLoggedKeywords } from './suggest-keywords';
+import { buildKeywordSuggestions, fetchLoggedKeywords, fetchPopularKeywords, fetchPopularSearches } from './suggest-keywords';
 import { getTrendingKeywords as fetchTrendingKeywords } from './trending-keywords';
-import { buildRelevance, buildSearchPipeline } from './product-search.pipeline';
-import { normalizeVi, nfcLower, hasTone, escapeRegex, extractSearchTerms } from '../../../shared/utils/vietnamese-search.util';
+import { buildTermsMatch, buildSearchPipeline } from './product-search.pipeline';
+import { findSearchHits } from './atlas-search';
+import { getSoldCounts } from './product-sold';
+import { RecommendService } from './recommend/recommend.service';
+import { normalizeVi, nfcLower, escapeRegex, accentInsensitive, extractSearchTerms } from '../../../shared/utils/vietnamese-search.util';
 import { logger } from '../../../shared/utils/logger';
 import { cacheService } from '../../../shared/services/cache.service';
+import { ShopService } from './shop.service';
+import { R06_DELIVERED_WINDOW_HOURS } from '../../order/application/return-policy';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
 import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
 import { contentModerationService } from '../../../shared/services/content-moderation.service';
+import { normalizeMaterials } from '../../../shared/utils/materials';
+import { AiGatewayService } from '../../analytics/application/ai-gateway.service';
 
 function getColorHex(colorName: string): string {
     const lower = (colorName || '').toLowerCase();
@@ -52,7 +62,22 @@ function getColorHex(colorName: string): string {
     return '#8B5CF6';
 }
 
-function mapToProductItemResponse(product: any, variants: any[], shop?: any): ProductItemResponseDTO {
+/** Điểm sản phẩm tính thẳng từ reviews (bỏ review bị báo cáo), cùng công thức với Review.recalculateRatings. */
+async function liveProductRating(productId: mongoose.Types.ObjectId): Promise<{ averageRating: number; ratingCount: number }> {
+    const [row] = await mongoose.connection.collection('reviews').aggregate([
+        { $match: { product_id: productId, is_reported: { $ne: true } } },
+        { $group: { _id: null, avg: { $avg: '$rating' }, n: { $sum: 1 } } },
+    ]).toArray();
+    return row ? { averageRating: Number(row.avg.toFixed(1)), ratingCount: row.n } : { averageRating: 0, ratingCount: 0 };
+}
+
+function mapToProductItemResponse(
+    product: any, 
+    variants: any[], 
+    shop?: any, 
+    soldCount = 0,
+    customTrend?: number[]
+): ProductItemResponseDTO {
     const mainVariant = variants[0];
     const price = mainVariant ? parseFloat(mainVariant.retail_price?.toString() || '0') : 0;
     const totalStock = variants.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
@@ -89,25 +114,14 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
     const originalPrice = product.original_price
         ?? legacyOriginal
         ?? undefined;
-
     const baseRank = product.display_rank ?? product.stock_alert_threshold ?? 1;
-    const engagementTrend = [
-        Math.max(15, (baseRank * 12 + 10) % 90 + 20),
-        Math.max(20, (baseRank * 15 + 15) % 100 + 25),
-        Math.max(30, (baseRank * 22 + 20) % 110 + 35),
-        Math.max(45, (baseRank * 28 + 25) % 120 + 45),
-        Math.max(55, (baseRank * 35 + 30) % 130 + 55),
-        Math.max(70, (baseRank * 40 + 35) % 140 + 70),
-        Math.max(85, (baseRank * 45 + 40) % 150 + 85),
-    ];
 
-    const inventoryTrends: InventoryTrendPointDTO[] = [
-        { date: 'Jan 21', stock: Math.round(totalStock * 1.6) },
-        { date: 'Mar 3', stock: Math.round(totalStock * 1.4) },
-        { date: 'Jul 9', stock: Math.round(totalStock * 1.2) },
-        { date: 'Oct 25', stock: Math.round(totalStock * 1.1) },
-        { date: 'Jan 20', stock: totalStock }
-    ];
+    // Tương tác 7 ngày gần nhất lấy từ sự kiện thật (mapMany truyền vào). Không có sự kiện nghĩa là
+    // không ai tương tác: trả về 7 điểm 0 thay vì tự sinh đường cong (quy tắc chống fix cứng số liệu).
+    const engagementTrend = customTrend && customTrend.length >= 2 ? customTrend : Array(7).fill(0);
+
+    // Chưa lưu lịch sử tồn kho theo thời gian, nên không trả điểm nào — giao diện hiện "chưa có dữ liệu".
+    const inventoryTrends: InventoryTrendPointDTO[] = [];
 
     const location = product.location || (product.tags && product.tags[0]) || '';
 
@@ -142,14 +156,17 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         engagementTrend,
         inventoryTrends,
         variants: mappedVariants,
+        variantMode: product.variant_mode === 'SKU' ? 'SKU' : undefined,
         shopInfo: shop ? {
             id: shop._id.toString(),
             name: shop.shop_name,
             logo: shop.logo,
-            rating: shop.average_rating ?? 5.0,
+            rating: (shop.rating_count ?? 0) > 0 ? (shop.average_rating ?? 0) : 0,
+            ratingCount: shop.rating_count ?? 0,
         } : undefined,
         sellerId: product.shop_id ? product.shop_id.toString() : undefined,
         tags: product.tags || [],
+        materials: product.materials || [],
         rating: (typeof product.rating_count === 'number' && product.rating_count > 0)
             ? (typeof product.average_rating === 'number' ? product.average_rating : 0)
             : 0,
@@ -157,7 +174,7 @@ function mapToProductItemResponse(product: any, variants: any[], shop?: any): Pr
         allowCustomization: Boolean(product.allow_customization),
         customizationType: product.customization_type || 'NONE',
         productType: product.product_type || 'READY_TO_SHIP',
-        soldCount: typeof product.sold_count === 'number' ? product.sold_count : 0,
+        soldCount,
         createdAt: product.created_at ? new Date(product.created_at).toISOString() : new Date().toISOString(),
         updatedAt: product.updated_at ? new Date(product.updated_at).toISOString() : new Date().toISOString(),
     };
@@ -211,7 +228,9 @@ export interface ProductActor {
     role: string;
 }
 
-const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true } } as const;
+// Sản phẩm khách được thấy: đã đăng, không bị ẩn, đã qua kiểm duyệt (cùng luật với trang tìm kiếm).
+// listing_status không lọc ở đây để link cũ của sản phẩm ngừng bán vẫn mở được và hiện "ngừng bán".
+export const PUBLIC_QUERY = { status: 'PUBLISHED', is_hidden: { $ne: true }, moderation_status: 'APPROVED' } as const;
 
 export class ProductsService {
 
@@ -266,7 +285,7 @@ export class ProductsService {
         if (!isPod && (!partial || payload.variants !== undefined || payload.price !== undefined)) {
             if (variants.length === 0) {
                 if (typeof payload.price === 'number') {
-                    variants = [{ price: payload.price, stock: payload.stock ?? 100 }];
+                    variants = [{ price: payload.price, stock: payload.stock ?? 100, material: payload.material }];
                 } else {
                     errors.push('at least one variant is required');
                 }
@@ -415,6 +434,68 @@ export class ProductsService {
         }
     }
 
+    /** Kiểm bảng phân loại seller gửi lên: tên mẫu bắt buộc, giá > 0, kho nguyên >= 0, không trùng (mẫu, size). */
+    static normalizeSkus(raw: unknown): ProductSkuInputDTO[] {
+        if (!Array.isArray(raw) || raw.length === 0) throw new ValidationError(['Bảng phân loại phải có ít nhất 1 dòng']);
+        if (raw.length > 200) throw new ValidationError(['Tối đa 200 phân loại cho 1 sản phẩm']);
+        const errors: string[] = [];
+        const seen = new Set<string>();
+        const out = raw.map((r: any, i) => {
+            const option = String(r?.option ?? '').trim().slice(0, 80);
+            const size = String(r?.size ?? '').trim().slice(0, 30) || undefined;
+            const image = typeof r?.image === 'string' && /^(https?:\/\/|\/)/.test(r.image) ? r.image : undefined;
+            const price = Number(r?.price);
+            const stock = Number(r?.stock);
+            const label = [option, size].filter(Boolean).join(' / ') || `dòng ${i + 1}`;
+            if (!option) errors.push(`Phân loại dòng ${i + 1} chưa có tên mẫu`);
+            if (!Number.isFinite(price) || price <= 0) errors.push(`Giá của "${label}" phải lớn hơn 0`);
+            if (!Number.isInteger(stock) || stock < 0) errors.push(`Kho của "${label}" phải là số nguyên >= 0`);
+            const key = `${option.toLowerCase()}|${(size || '').toLowerCase()}`;
+            if (seen.has(key)) errors.push(`Phân loại "${label}" bị trùng`);
+            seen.add(key);
+            return { option, size, image, price, stock };
+        });
+        if (errors.length) throw new ValidationError(errors);
+        return out;
+    }
+
+    /**
+     * Ghi bảng phân loại thành các dòng product_variants (color = tên mẫu, mockup_image = ảnh mẫu).
+     * Dòng trùng (mẫu, size) với dòng cũ được cập nhật tại chỗ để giữ _id — giỏ hàng/đơn cũ vẫn trỏ đúng SKU.
+     */
+    private static async writeSkus(productId: mongoose.Types.ObjectId, skus: ProductSkuInputDTO[], baseSku: string, commissionPercent: number) {
+        const key = (color?: string, size?: string) => `${(color || '').trim().toLowerCase()}|${(size || '').trim().toLowerCase()}`;
+        const existing = await MongoVariant.find({ product_id: productId }).lean();
+        const byKey = new Map(existing.map(v => [key(v.color, v.size), v]));
+        const kept = new Set<string>();
+        const optionIndex = new Map<string, number>();
+        for (const s of skus) {
+            if (!optionIndex.has(s.option)) optionIndex.set(s.option, optionIndex.size + 1);
+            const fields = {
+                color: s.option,
+                size: s.size,
+                base_cost: mongoose.Types.Decimal128.fromString(Math.round(s.price * 0.7).toString()),
+                retail_price: mongoose.Types.Decimal128.fromString(withCommission(s.price, commissionPercent).toString()),
+                stock_quantity: s.stock,
+                is_active: true,
+            };
+            const old = byKey.get(key(s.option, s.size));
+            if (old) {
+                kept.add(old._id.toString());
+                await MongoVariant.updateOne(
+                    { _id: old._id },
+                    s.image ? { $set: { ...fields, mockup_image: s.image } } : { $set: fields, $unset: { mockup_image: 1 } },
+                );
+            } else {
+                const sku = `${baseSku}-${optionIndex.get(s.option)}${s.size ? '-' + s.size : ''}`;
+                await MongoVariant.create({ product_id: productId, sku, mockup_image: s.image, ...fields });
+            }
+        }
+        const removed = existing.filter(v => !kept.has(v._id.toString())).map(v => v._id);
+        if (removed.length) await MongoVariant.deleteMany({ _id: { $in: removed } });
+        await MongoProduct.updateOne({ _id: productId }, { $set: { variant_mode: 'SKU' } });
+    }
+
     private static async writeVariants(productId: mongoose.Types.ObjectId, variants: VariantInput[]) {
         await MongoVariant.deleteMany({ product_id: productId });
         const docs = variants.map((v, i) => ({
@@ -424,13 +505,12 @@ export class ProductsService {
             size: v.size,
             material: v.material,
             mockup_image: v.mockup_image,
-            base_cost: mongoose.Types.Decimal128.fromString(((v.base_cost ?? (v.price! * 0.6)) || 0).toString()),
+            base_cost: mongoose.Types.Decimal128.fromString((Number(v.base_cost) || 0).toString()),
             retail_price: mongoose.Types.Decimal128.fromString((v.price || 0).toString()),
             stock_quantity: v.stock ?? 100,
             is_active: true,
         }));
         await MongoVariant.insertMany(docs);
-        await syncProductDenorm(productId);
     }
 
     static async resolveProposedTags(names: string[], sellerId: string): Promise<{ docs: { _id: mongoose.Types.ObjectId; name: string }[]; proposed: number }> {
@@ -595,16 +675,60 @@ export class ProductsService {
         const items = await ProductsService.mapMany(docs);
         return { items, total, page, limit, totalPages };
     }
-    private static async mapMany(docs: any[]): Promise<ProductItemResponseDTO[]> {
+    static async mapMany(docs: any[], soldMap?: Map<string, number>): Promise<ProductItemResponseDTO[]> {
         if (docs.length === 0) return [];
 
         const productIds = docs.map(p => p._id);
         const shopIds = [...new Set(docs.map(p => p.shop_id).filter(Boolean).map((s: any) => s.toString()))];
+        const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000);
 
-        const [allVariants, allShops] = await Promise.all([
+        const [allVariants, allShops, sold, eventRows] = await Promise.all([
             MongoVariant.find({ product_id: { $in: productIds } }).lean(),
-            Shop.find({ _id: { $in: shopIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+            Shop.find({ _id: { $in: shopIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean(),
+            soldMap ?? getSoldCounts(productIds),
+            ProductEvent.aggregate([
+                {
+                    $match: {
+                        product_id: { $in: productIds },
+                        created_at: { $gte: sevenDaysAgo }
+                    }
+                },
+                {
+                    $group: {
+                        _id: {
+                            product_id: '$product_id',
+                            day: { $dateToString: { format: '%Y-%m-%d', date: '$created_at' } }
+                        },
+                        count: { $sum: 1 }
+                    }
+                }
+            ]).catch(() => [])
         ]);
+
+        const dayKeys: string[] = [];
+        const now = new Date();
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date(now.getTime() - i * 86_400_000);
+            dayKeys.push(d.toISOString().slice(0, 10));
+        }
+
+        const eventsByProductDay = new Map<string, Map<string, number>>();
+        for (const row of (eventRows || [])) {
+            const pid = row._id?.product_id?.toString();
+            const day = row._id?.day;
+            if (pid && day) {
+                if (!eventsByProductDay.has(pid)) eventsByProductDay.set(pid, new Map());
+                eventsByProductDay.get(pid)!.set(day, row.count);
+            }
+        }
+
+        const realTrendsByProduct = new Map<string, number[]>();
+        for (const [pid, dayMap] of eventsByProductDay.entries()) {
+            const points = dayKeys.map(k => dayMap.get(k) || 0);
+            if (points.some(p => p > 0)) {
+                realTrendsByProduct.set(pid, points);
+            }
+        }
 
         const variantsByProductId = new Map<string, any[]>();
         for (const v of allVariants) {
@@ -616,11 +740,16 @@ export class ProductsService {
         const shopsById = new Map<string, any>();
         for (const s of allShops) shopsById.set(s._id.toString(), s);
 
-        return docs.map(mp => mapToProductItemResponse(
-            mp,
-            variantsByProductId.get(mp._id.toString()) || [],
-            shopsById.get(mp.shop_id?.toString())
-        ));
+        return docs.map(mp => {
+            const pid = mp._id.toString();
+            return mapToProductItemResponse(
+                mp,
+                variantsByProductId.get(pid) || [],
+                shopsById.get(mp.shop_id?.toString()),
+                sold.get(pid) ?? 0,
+                realTrendsByProduct.get(pid)
+            );
+        });
     }
 
     public static async invalidateProductCache(productId?: string): Promise<void> {
@@ -661,15 +790,15 @@ export class ProductsService {
     }
 
     static async search(params: SearchProductsParams): Promise<PaginatedProductsResponseDTO> {
-        const q = (typeof params.q === 'string' ? params.q : '').slice(0, 100).trim();
-        const norm = normalizeVi(q);
-        const terms = extractSearchTerms(q, 8);
+        const q = nfcLower(typeof params.q === 'string' ? params.q : '').slice(0, 100);
+        const terms = [...new Set(q.split(/\s+/).filter(Boolean))].slice(0, 8);
         const page = Math.max(1, Number(params.page) || 1);
-        const limit = Math.min(48, Math.max(1, Number(params.limit || params.pageSize) || 12));
-        const useText = terms.length > 0;
+        const n = Math.floor(Number(params.limit || params.pageSize));
+        const limit = n > 0 ? Math.min(48, n) : 12;
 
         // Chỉ ghi lịch sử ở trang 1 với sort mặc định, tránh thổi phồng khi lọc/phân trang
-        const logId = shouldLogSearch(q, page, params) ? new mongoose.Types.ObjectId() : undefined;
+        // Tìm trong một gian hàng không tính vào lịch sử/xu hướng tìm kiếm toàn sàn.
+        const logId = !params.shopId && shouldLogSearch(q, page, params) ? new mongoose.Types.ObjectId() : undefined;
 
         const match: any = {
             status: 'PUBLISHED',
@@ -678,30 +807,28 @@ export class ProductsService {
             moderation_status: 'APPROVED',
         };
 
-        if (useText) {
-            match.$text = { $search: terms.map(t => `"${t}"`).join(' ') };
-        }
-
-        const andConditions: any[] = [];
+        const hits = q ? await findSearchHits(q) : null;
+        const andConditions: any[] = hits ? [{ _id: { $in: hits.ids } }] : buildTermsMatch(terms);
 
         if (params.category && params.category !== 'ALL' && params.category !== 'Tất cả danh mục') {
-            const rawCat = params.category.trim();
+            const rawCat = params.category.trim().normalize('NFC');
             if (/^[0-9a-fA-F]{24}$/.test(rawCat)) {
-                andConditions.push({
-                    $or: [
-                        { category_ids: new mongoose.Types.ObjectId(rawCat) },
-                        { categories_norm: normalizeVi(rawCat) }
-                    ]
-                });
+                andConditions.push({ category_ids: new mongoose.Types.ObjectId(rawCat) });
             } else {
-                const normCat = normalizeVi(rawCat);
-                andConditions.push({
-                    $or: [
-                        { categories_norm: normCat },
-                        { categories: { $regex: escapeRegex(rawCat), $options: 'i' } }
-                    ]
-                });
+                // Sản phẩm mới chỉ lưu category_ids; trường chuỗi `categories` là dữ liệu cũ.
+                // Đổi tên/slug danh mục ra id để lọc được cả hai loại.
+                const exact = new RegExp(`^${escapeRegex(rawCat)}$`, 'i');
+                const cats = await Category.find({ $or: [{ name: exact }, { slug: rawCat.toLowerCase() }] }).select('_id').lean();
+                andConditions.push({ $or: [
+                    ...(cats.length ? [{ category_ids: { $in: cats.map((c: any) => c._id) } }] : []),
+                    { categories: { $regex: escapeRegex(rawCat), $options: 'i' } },
+                ] });
             }
+        }
+
+        if (params.shopId) {
+            if (!mongoose.Types.ObjectId.isValid(params.shopId)) return { items: [], total: 0, page, limit, totalPages: 1 };
+            match.shop_id = new mongoose.Types.ObjectId(params.shopId);
         }
 
         const pType = params.productType || params.craftType;
@@ -718,65 +845,41 @@ export class ProductsService {
             match.rating_count = { $gt: 0 };
         }
 
+        const priceStock: any = {};
         if (params.minPrice != null && params.minPrice !== '') {
-            match.max_price = { $gte: Number(params.minPrice) };
+            priceStock._maxPrice = { $gte: Number(params.minPrice) };
         }
-
         if (params.maxPrice != null && params.maxPrice !== '') {
-            match.min_price = { $lte: Number(params.maxPrice) };
+            priceStock._minPrice = { $lte: Number(params.maxPrice) };
+        }
+        if (params.inStockOnly === true || params.inStockOnly === 'true') {
+            // POD in theo yêu cầu, luôn sẵn sàng phục vụ
+            priceStock.$or = [{ product_type: { $ne: 'READY_TO_SHIP' } }, { _totalStock: { $gt: 0 } }];
         }
 
-        if (params.inStockOnly === true || params.inStockOnly === 'true') {
-            andConditions.push({
-                $or: [
-                    { product_type: 'POD_TEMPLATE' }, // POD là in theo yêu cầu, luôn sẵn sàng phục vụ
-                    { total_stock: { $gt: 0 } },
-                    { listing_status: 'ACTIVE', product_type: { $ne: 'READY_TO_SHIP' } }
-                ]
-            });
+        if (params.onSale === true || params.onSale === 'true') {
+            // Đang giảm giá: giá gốc người bán khai cao hơn giá bán thấp nhất hiện tại.
+            priceStock.$expr = { $gt: [{ $ifNull: ['$original_price', 0] }, '$_minPrice'] };
         }
 
         if (andConditions.length > 0) {
             match.$and = andConditions;
         }
 
-        const queryHasTone = hasTone(q);
-        const qLower = nfcLower(q);
-
-        const relevance = buildRelevance({ norm, qLower, queryHasTone, withTextScore: useText });
-
         const SORTS: Record<string, any> = {
             relevance:   { _relevance: -1, created_at: -1 },
             newest:      { created_at: -1 },
-            price_asc:   { min_price: 1, created_at: -1 },
-            price_desc:  { max_price: -1, created_at: -1 },
+            price_asc:   { _minPrice: 1, created_at: -1 },
+            price_desc:  { _maxPrice: -1, created_at: -1 },
             rating_desc: { _rating: -1, rating_count: -1, created_at: -1 },
-            best_seller: { sold_count: -1, created_at: -1 },
+            best_seller: { _sold: -1, created_at: -1 },
         };
 
-        const sortStage = SORTS[params.sort as string] ?? SORTS.relevance;
-
-        let [res] = await MongoProduct.aggregate(
-            buildSearchPipeline(match, relevance, sortStage, page, limit),
+        const sortKey = SORTS[params.sort as string] ? String(params.sort) : 'relevance';
+        const [res] = await MongoProduct.aggregate(
+            buildSearchPipeline({ match, q, priceStock, sort: SORTS[sortKey], withSold: sortKey === 'best_seller', page, limit, searchHits: hits ?? undefined }),
             { allowDiskUse: true }
         );
-
-        // Fallback khi 0 kết quả: nếu total === 0 và có terms, chạy lại với title_prefixes
-        if ((res?.total?.[0]?.n ?? 0) === 0 && useText) {
-            const fallbackMatch = { ...match };
-            delete fallbackMatch.$text;
-            fallbackMatch.title_prefixes = { $all: terms.map(t => t.slice(0, 10)) };
-
-            const fallbackRelevance = buildRelevance({ norm, qLower, queryHasTone, withTextScore: false });
-            const [fallbackRes] = await MongoProduct.aggregate(
-                buildSearchPipeline(fallbackMatch, fallbackRelevance, sortStage, page, limit),
-                { allowDiskUse: true }
-            );
-
-            if ((fallbackRes?.total?.[0]?.n ?? 0) > 0) {
-                res = fallbackRes;
-            }
-        }
 
         const rawDocs = res?.items || [];
         const total = res?.total?.[0]?.n ?? 0;
@@ -786,7 +889,6 @@ export class ProductsService {
             SearchLog.create({
                 _id: logId,
                 keyword: q,
-                keyword_norm: norm,
                 result_count: total,
                 user_id: params.userId && mongoose.Types.ObjectId.isValid(params.userId) ? new mongoose.Types.ObjectId(params.userId) : undefined
             }).catch(() => {});
@@ -797,15 +899,14 @@ export class ProductsService {
     }
 
     static async suggest(queryStr?: string, userId?: string): Promise<SuggestResultDTO> {
-        const q = (typeof queryStr === 'string' ? queryStr : '').slice(0, 60).trim();
+        const q = nfcLower(typeof queryStr === 'string' ? queryStr : '').slice(0, 60);
         const norm = normalizeVi(q);
         if (!norm) {
             return { keywords: [], shops: [], categories: [] };
         }
-        const terms = extractSearchTerms(q, 4).map(t => t.slice(0, 12));
-        const safeRegex = escapeRegex(norm);
-        const slugQ = norm.replace(/\s+/g, '-');
-        const safeSlugQ = escapeRegex(slugQ);
+        const terms = extractSearchTerms(q, 4);
+        const qRegex = { $regex: accentInsensitive(q), $options: 'i' };
+        const safeSlugQ = escapeRegex(norm.replace(/\s+/g, '-'));
 
         const restrictedShopIds = await Shop.find({ reputation_tier: 'RESTRICTED' }).distinct('_id');
         const prodBase: any = {
@@ -815,28 +916,21 @@ export class ProductsService {
             moderation_status: 'APPROVED',
             shop_id: { $nin: restrictedShopIds },
         };
-        const prefixOr = [
-            { title_prefixes: norm },
-            { title_prefixes: { $all: terms } },
-            { tags_norm: { $all: terms } },
-            { categories_norm: { $all: terms } },
-            { title_norm: { $regex: '^' + safeRegex } }
-        ];
-
-        const [textHits, matchingShops, matchingCategories, loggedKeywords, banned] = await Promise.all([
+        const atlas = await findSearchHits(q);
+        const [hits, matchingShops, matchingCategories, loggedKeywords, popularKeywords, banned] = await Promise.all([
             MongoProduct.find(
-                { ...prodBase, $text: { $search: terms.map(t => `"${t}"`).join(' ') } },
-                { ...SUGGEST_PROJECTION, score: { $meta: 'textScore' } }
+                atlas ? { ...prodBase, _id: { $in: atlas.ids.slice(0, 50) } } : { ...prodBase, $or: [{ title: qRegex }, { tags: qRegex }, { categories: qRegex }] },
+                SUGGEST_PROJECTION
             )
-                .sort({ score: { $meta: 'textScore' } })
+                .sort({ rating_count: -1, created_at: -1 })
                 .limit(20)
                 .lean(),
 
             Shop.find({
                 reputation_tier: { $ne: 'RESTRICTED' },
-                status: 'ACTIVE',
+                status: { $nin: ['CLOSED', 'INACTIVE'] },
                 $or: [
-                    { shop_name_norm: { $regex: '^' + safeRegex } },
+                    { shop_name: qRegex },
                     { slug: { $regex: '^' + safeSlugQ } }
                 ]
             })
@@ -848,7 +942,7 @@ export class ProductsService {
             Category.find({
                 is_active: true,
                 $or: [
-                    { name_norm: { $regex: '^' + safeRegex } },
+                    { name: qRegex },
                     { slug: { $regex: '^' + safeSlugQ } }
                 ]
             })
@@ -856,23 +950,15 @@ export class ProductsService {
                 .limit(3)
                 .lean(),
 
-            userId && mongoose.Types.ObjectId.isValid(userId) ? fetchLoggedKeywords(norm, userId) : [],
+            userId && mongoose.Types.ObjectId.isValid(userId) ? fetchLoggedKeywords(q, userId) : [],
+            fetchPopularKeywords(q),
             BannedKeyword.distinct('keyword')
         ]);
 
-        // Pha 2: bù bằng tiền tố (gõ dở từ cuối, từ khớp một phần), bỏ các sản phẩm đã có ở pha 1
-        const need = 20 - textHits.length;
-        const prefixHits = need > 0
-            ? await MongoProduct.find({ ...prodBase, $or: prefixOr, _id: { $nin: textHits.map((p: any) => p._id) } }, SUGGEST_PROJECTION)
-                .sort({ sold_count: -1 })
-                .limit(need)
-                .lean()
-            : [];
-
-        const ranked = rankSuggestions([...textHits, ...prefixHits], norm, terms, 20);
+        const ranked = rankSuggestions(hits, norm, terms, 20);
 
         return {
-            keywords: buildKeywordSuggestions(q, loggedKeywords, ranked.map((p: any) => p.title), banned),
+            keywords: buildKeywordSuggestions(q, [...loggedKeywords, ...popularKeywords], ranked.map((p: any) => p.title), banned),
             shops: matchingShops.map((s: any) => ({
                 id: s._id.toString(),
                 name: s.shop_name,
@@ -887,6 +973,15 @@ export class ProductsService {
                 slug: c.slug
             }))
         };
+    }
+
+    /** Từ khoá người dùng VietCraft thật sự tìm gần đây (khác getTrendingKeywords là xu hướng thị trường). */
+    static async getPopularSearches(limit = 6): Promise<string[]> {
+        const n = Math.min(12, Math.max(1, Math.floor(limit) || 6));
+        return cacheService.getOrSet(`vietcraft:search:popular:${n}`, async () => {
+            const banned = await BannedKeyword.distinct('keyword');
+            return fetchPopularSearches(n, banned as string[]);
+        }, 600);
     }
 
     static async getTrendingKeywords(limit = 8): Promise<string[]> {
@@ -917,11 +1012,24 @@ export class ProductsService {
             const mp = await MongoProduct.findOne(query).lean();
             if (!mp) throw new Error('Không tìm thấy sản phẩm.');
 
-            const [variants, shop] = await Promise.all([
+            const [variants, shop, sold, productRating, shopRatings] = await Promise.all([
                 MongoVariant.find({ product_id: mp._id }).lean(),
-                Shop.findById(mp.shop_id).lean()
+                Shop.findById(mp.shop_id).lean(),
+                getSoldCounts([mp._id]),
+                liveProductRating(mp._id),
+                mp.shop_id ? ShopService.liveRatings([mp.shop_id]) : Promise.resolve(new Map()),
             ]);
-            return mapToProductItemResponse(mp, variants, shop);
+            const dto: any = mapToProductItemResponse(mp, variants, shop, sold.get(mp._id.toString()) ?? 0);
+            // Điểm tính thẳng từ reviews để khớp phần "Đánh giá sản phẩm" và trang shop;
+            // trường lưu sẵn trên products/shops chỉ dùng cho danh sách và có thể lệch.
+            dto.rating = productRating.ratingCount > 0 ? productRating.averageRating : 0;
+            dto.ratingCount = productRating.ratingCount;
+            if (dto.shopInfo && shop) {
+                const sr = shopRatings.get(String(shop._id)) ?? { averageRating: 0, ratingCount: 0 };
+                dto.shopInfo = { ...dto.shopInfo, rating: sr.averageRating, ratingCount: sr.ratingCount, returnPolicy: shop.return_policy || '' };
+            }
+            dto.returnWindowDays = Math.round(R06_DELIVERED_WINDOW_HOURS / 24);
+            return dto;
         };
 
         if (opts.includeHidden) {
@@ -965,38 +1073,49 @@ export class ProductsService {
     static async getRelated(id: string, category?: string, limit = 4): Promise<ProductItemResponseDTO[]> {
         if (!mongoose.Types.ObjectId.isValid(id)) return [];
         const cacheKey = `vietcraft:products:related:${id}:${category || 'auto'}:${limit}`;
-        return cacheService.getOrSet(cacheKey, async () => {
-            const self = new mongoose.Types.ObjectId(id);
-
-            let cat = category;
-            if (!cat) {
-                const p = await MongoProduct.findById(self).select('categories').lean();
-                cat = p?.categories?.[0];
-            }
-
-            const base: any = { ...PUBLIC_QUERY, listing_status: 'ACTIVE', _id: { $ne: self } };
-            let docs = await MongoProduct.find(cat ? { ...base, categories: cat } : base)
-                .limit(limit).lean();
-
-            if (docs.length < limit) {
-                const extra = await MongoProduct.find({
-                    ...base,
-                    _id: { $nin: [self, ...docs.map(p => p._id)] }
-                }).limit(limit - docs.length).lean();
-                docs = [...docs, ...extra];
-            }
-
-            return ProductsService.mapMany(docs);
-        }, 600);
+        return cacheService.getOrSet(cacheKey, () => RecommendService.related(id, category, limit), 600);
     }
 
     static async getFeaturedShops(): Promise<any[]> {
         return cacheService.getOrSet('vietcraft:shops:featured', async () => {
-            return Shop.find()
-                .select('shop_name slug logo banner average_rating listing_count')
-                .sort({ average_rating: -1, listing_count: -1 })
-                .limit(5)
-                .lean();
+            // Công thức IMDb: WR = (C*m + n*avg)/(C + n), m = điểm chung của sàn, C = số lượt tối thiểu.
+            // Shop đủ C lượt xếp trước; shop ít lượt chỉ lấp chỗ trống, sau đó tới shop chưa có đánh giá (theo số sản phẩm).
+            const LIMIT = 5;
+            const MIN_REVIEWS = 3;
+            const reviews = mongoose.connection.collection('reviews');
+            const match = { $match: { is_reported: { $ne: true } } };
+            const [all] = await reviews.aggregate([match, { $group: { _id: null, m: { $avg: '$rating' } } }]).toArray();
+            const m = all?.m ?? 0;
+            const rated = await reviews.aggregate([
+                match,
+                { $group: { _id: '$shop_id', avg: { $avg: '$rating' }, n: { $sum: 1 } } },
+                { $addFields: {
+                    eligible: { $gte: ['$n', MIN_REVIEWS] },
+                    score: { $divide: [{ $add: [MIN_REVIEWS * m, { $multiply: ['$n', '$avg'] }] }, { $add: [MIN_REVIEWS, '$n'] }] },
+                } },
+                { $sort: { eligible: -1, score: -1, n: -1 } },
+                { $limit: LIMIT * 4 },
+            ]).toArray();
+            const select = 'shop_name slug logo banner description listing_count';
+            // Chỉ shop đang hoạt động mới được quảng bá cho khách (shop đóng/chờ duyệt không có hàng để mua).
+            const active = { status: 'ACTIVE' };
+            const ratedShops = await Shop.find({ ...active, _id: { $in: rated.map(r => r._id) } }).select(select).lean();
+            const byId = new Map(ratedShops.map(s => [String(s._id), s]));
+            const top = rated
+                .filter(r => byId.has(String(r._id)))
+                .slice(0, LIMIT)
+                .map(r => ({ ...byId.get(String(r._id)), average_rating: Number(r.avg.toFixed(1)), rating_count: r.n }));
+            if (top.length < LIMIT) {
+                const rest = await Shop.find({ ...active, _id: { $nin: rated.map(r => r._id) } })
+                    .select(select).sort({ listing_count: -1 }).limit(LIMIT - top.length).lean();
+                top.push(...rest.map(s => ({ ...s, average_rating: 0, rating_count: 0 })));
+            }
+            const counts = await MongoProduct.aggregate([
+                { $match: { ...PUBLIC_QUERY, shop_id: { $in: top.map((s: any) => s._id) } } },
+                { $group: { _id: '$shop_id', n: { $sum: 1 } } },
+            ]);
+            const countBy = new Map(counts.map(c => [String(c._id), c.n as number]));
+            return top.map((s: any) => ({ ...s, listing_count: countBy.get(String(s._id)) ?? 0 }));
         }, 600);
     }
 
@@ -1013,8 +1132,10 @@ export class ProductsService {
         let variantsToWrite: VariantInput[] = data.variants;
         let podFields: any = {};
         if (data.isPod && data.blank) {
+            const hasPicked = Array.isArray(payload.images) && payload.images.length > 0;
             const built = await ProductsService.buildPodArtifacts(
                 data.blank, data.podVariants!, data.designPlacements!, data.category?._id?.toString() ?? null,
+                !hasPicked, ProductsService.cleanColorImages(payload.colorImages, payload.images),
             );
             images = (Array.isArray(payload.images) && payload.images.length > 0)
                 ? payload.images
@@ -1041,6 +1162,10 @@ export class ProductsService {
         }
         images = await ProductsService.sanitizeImages(images);
 
+        const sourceIdeaId = typeof (payload.source_idea_id ?? payload.sourceIdeaId) === 'string'
+            ? String(payload.source_idea_id ?? payload.sourceIdeaId).trim().slice(0, 120) || undefined
+            : undefined;
+
         const mp = await MongoProduct.create({
             shop_id: shop._id,
             shipping_profile_id: new mongoose.Types.ObjectId(),
@@ -1053,12 +1178,14 @@ export class ProductsService {
             categories: [data.category.name],
             category_ids: [data.category._id],
             tags: allTags.map(t => t.name),
+            materials: normalizeMaterials(payload.materials),
             tag_ids: allTags.map(t => t._id),
             weight_g: payload.weight_g ?? 500,
             dimensions_cm: payload.dimensions_cm ?? { length: 10, width: 10, height: 10 },
             status: 'PUBLISHED',
             listing_status: 'ACTIVE',
             moderation_status: 'APPROVED',
+            ...(sourceIdeaId ? { source_idea_id: sourceIdeaId } : {}),
             ...podFields,
         });
 
@@ -1130,6 +1257,7 @@ export class ProductsService {
 
         const totalStock = Number(payload.stock) || 0;
         if (totalStock < 0) throw new ValidationError(['Tồn kho không được âm']);
+        const skus = payload.skus !== undefined ? ProductsService.normalizeSkus(payload.skus) : null;
         const catalog = await ProductsService.resolveFlatCatalog(payload, sellerId, { required: true });
         const tags = catalog.tags || [];
 
@@ -1145,6 +1273,11 @@ export class ProductsService {
         }
         const images = await ProductsService.sanitizeImages(rawImages);
 
+        const rawSourceIdea = (payload as any).source_idea_id ?? (payload as any).sourceIdeaId;
+        const sourceIdeaId = typeof rawSourceIdea === 'string'
+            ? rawSourceIdea.trim().slice(0, 120) || undefined
+            : undefined;
+
         const mp = await MongoProduct.create({
             shop_id: shop._id,
             shipping_profile_id: new mongoose.Types.ObjectId(),
@@ -1157,6 +1290,7 @@ export class ProductsService {
             categories: [catalog.category!.name],
             category_ids: [catalog.category!._id],
             tags: tags.map(t => t.name),
+            materials: normalizeMaterials(payload.materials),
             tag_ids: tags.map(t => t._id),
             weight_g: 500,
             dimensions_cm: { length: 10, width: 10, height: 10 },
@@ -1166,19 +1300,22 @@ export class ProductsService {
             status: 'PUBLISHED',
             listing_status: payload.status === 'OUT_OF_STOCK' ? 'ACTIVE' : (payload.status || 'ACTIVE'),
             moderation_status: 'APPROVED',
+            ...(sourceIdeaId ? { source_idea_id: sourceIdeaId } : {}),
         });
 
         const baseSku = payload.sku || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
         // Giá người bán nhập là giá họ nhận; niêm yết lên sàn là giá đó cộng hoa hồng.
         // Mức hoa hồng tra theo danh mục chính + loại sản phẩm, không phải mức phẳng của sàn.
-        const listPrice = withCommission(
-            basePrice,
-            await CommissionSetting.resolvePercent(catalog.category!._id.toString(), 'READY_TO_SHIP'),
-        );
-        await ProductsService.writeVariants(
-            mp._id,
-            ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
-        );
+        const commissionPercent = await CommissionSetting.resolvePercent(catalog.category!._id.toString(), 'READY_TO_SHIP');
+        const listPrice = withCommission(basePrice, commissionPercent);
+        if (skus) {
+            await ProductsService.writeSkus(mp._id, skus, baseSku, commissionPercent);
+        } else {
+            await ProductsService.writeVariants(
+                mp._id,
+                ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
+            );
+        }
         if (tags.length) {
             await Tag.updateMany({ _id: { $in: tags.map(t => t._id) } }, { $inc: { product_count: 1 } });
         }
@@ -1271,14 +1408,27 @@ export class ProductsService {
     }
 
 
-    static async create(sellerId: string, payload: any): Promise<ProductItemResponseDTO> {
+    private static syncHealth(productId: string, shopId: string): void {
+        AiGatewayService.call({ method: 'POST', path: `/api/analytics/listings/${productId}/sync`, shopId })
+            .then(res => {
+                if (res.status >= 400 || res.body?.meta?.status === 'insufficient_data') {
+                    logger.warn(`AI health sync failed for product ${productId}: HTTP ${res.status} ${res.body?.meta?.reason ?? res.body?.error ?? ''}`);
+                }
+            })
+            .catch(err => logger.warn(`AI health sync failed for product ${productId}: ${err?.message}`));
+    }
 
+    static async create(sellerId: string, payload: any): Promise<ProductItemResponseDTO> {
         const isStructured = payload?.blankId !== undefined
             || Array.isArray(payload?.designPlacements)
             || Array.isArray(payload?.variants);
-        return isStructured
+        const result = await (isStructured
             ? ProductsService.createStructured(sellerId, payload)
-            : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO);
+            : ProductsService.createSimple(sellerId, payload as ProductFormDataDTO));
+        if (result?.id) {
+            ProductsService.syncHealth(String(result.id), String(result.shopInfo?.id || result.sellerId || ''));
+        }
+        return result;
     }
 
     /**
@@ -1295,7 +1445,11 @@ export class ProductsService {
         podVariants: { sku: string; color?: string; size?: string; material?: string; base_cost?: number; markup: number; stock: number }[],
         placements: any[],
         /** Danh mục chính của sản phẩm — quyết định mức hoa hồng áp cho biến thể POD. */
-        categoryId: string | null
+        categoryId: string | null,
+        /** false khi người bán đã chọn ảnh ở bước xem trước: khỏi render lại. */
+        renderImages = true,
+        /** Ảnh mockup người bán chọn cho từng màu -> gắn vào biến thể để khách chọn màu thấy đúng ảnh. */
+        colorImages: Record<string, string> = {}
     ): Promise<{ images: string[]; variants: VariantInput[] }> {
 
         const ids = new Set<string>();
@@ -1310,34 +1464,19 @@ export class ProductsService {
         const designUrl = (id: string) => designs.find(d => d._id.toString() === String(id))?.file_url;
 
         const mockups: string[] = [];
-        for (const p of placements) {
-            const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-            const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
-            const blankImage = rawImage || blank.default_image;
-
-            if (Array.isArray(p.layers) && p.layers.length) {
-
-                const layers = p.layers.map((l: any) => l.type === 'image'
-                    ? { ...l, designUrl: designUrl(l.design_id) }
-                    : l
-                ).filter((l: any) => l.type !== 'image' || l.designUrl);
-                if (area && (area as any).surface === 'wrap') {
-                    mockups.push(await generateWrapMockup(blankImage, layers, {
-                        x: p.area?.x ?? area.x,
-                        y: p.area?.y ?? area.y,
-                        width: p.area?.width ?? area.width,
-                        height: p.area?.height ?? area.height,
-                        template_w: (area as any).template_w || 2475,
-                        template_h: (area as any).template_h || 1155,
-                        arc: (area as any).arc || 1.35,
-                    }));
-                } else {
-                    mockups.push(await generateMockupLayers(blankImage, layers));
-                }
-            } else if (p.design_id) {
-
-                const url = designUrl(p.design_id);
+        if (renderImages) {
+            const renderPlacements = ProductsService.toRenderPlacements(blank, placements, l => designUrl(l.design_id));
+            if (renderPlacements.length) {
+                const [first] = await renderColorMockups(renderPlacements, ProductsService.blankRenderColors(blank, []).slice(0, 1));
+                mockups.push(...(first?.images || []).map(i => i.url));
+            }
+            // Dữ liệu cũ chỉ có 1 thiết kế đơn (không layers)
+            for (const p of placements) {
+                if (Array.isArray(p.layers) && p.layers.length) continue;
+                const url = p.design_id ? designUrl(p.design_id) : undefined;
                 if (!url) continue;
+                const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
+                const blankImage = (typeof area?.image === 'string' && area.image.trim()) ? area.image : blank.default_image;
                 mockups.push(await generateMockup(blankImage, url, area, { x: p.x, y: p.y, scale: p.scale, rotation: p.rotation }));
             }
         }
@@ -1351,6 +1490,7 @@ export class ProductsService {
             return {
                 sku: pv.sku,
                 color: pv.color || vari?.color || 'Màu mặc định',
+                ...(colorImages[(pv.color || vari?.color || '').trim()] ? { mockup_image: colorImages[(pv.color || vari?.color || '').trim()] } : {}),
                 size: pv.size || vari?.size || 'Freesize',
                 material: pv.material || vari?.material || (blank as any)?.material || 'Cotton',
                 base_cost: baseCost,
@@ -1361,103 +1501,114 @@ export class ProductsService {
         return { images, variants };
     }
 
+    /** Ảnh mockup theo màu người bán gửi lên: { "Đen": url }. Chỉ nhận chuỗi, tối đa 50 màu. */
+    private static cleanColorImages(raw: unknown, allowed: unknown): Record<string, string> {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+        // Chỉ nhận ảnh nằm trong bộ ảnh sản phẩm người bán đã chọn, không nhận URL tuỳ ý
+        const allowedSet = new Set(Array.isArray(allowed) ? allowed.filter(x => typeof x === 'string') : []);
+        const out: Record<string, string> = {};
+        for (const [k, v] of Object.entries(raw as Record<string, unknown>).slice(0, 50)) {
+            if (k.trim() && typeof v === 'string' && allowedSet.has(v)) out[k.trim()] = v;
+        }
+        return out;
+    }
+
+    /** Các màu khác nhau của phôi, kèm mã màu và ảnh thật theo mặt in do xưởng khai báo. */
+    private static blankRenderColors(blank: Blank, requested: { color?: string; color_hex?: string }[]): RenderColor[] {
+        const fromBlank = (blank.variations || []).map(v => ({ color: v.color || 'Mặc định', color_hex: v.color_hex }));
+        const source = requested.length ? requested : fromBlank;
+        const seen = new Set<string>();
+        const out: RenderColor[] = [];
+        for (const item of source) {
+            const name = (item.color || 'Mặc định').trim();
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            // Mã màu theo khai báo của xưởng; mã client gửi chỉ dùng khi xưởng không có
+            const printerHex = (blank.variations || []).find(v => (v.color || '').trim() === name)?.color_hex;
+            const photoByArea: Record<string, string> = {};
+            for (const ci of blank.color_images || []) {
+                if ((ci.color || '').trim() === name && ci.area_key && ci.image) photoByArea[ci.area_key] = ci.image;
+            }
+            out.push({ color: name, hex: printerHex || item.color_hex, photoByArea });
+        }
+        return out;
+    }
+
+    /** Placement từ client -> đầu vào bộ render (vùng in, ảnh phôi, mask, layers đã có URL thiết kế). */
+    private static toRenderPlacements(
+        blank: Blank,
+        designPlacements: any[],
+        designUrlOf: (layer: any) => string | undefined,
+    ): RenderPlacement[] {
+        const out: RenderPlacement[] = [];
+        for (const p of (designPlacements || [])) {
+            if (!Array.isArray(p.layers) || !p.layers.length) continue;
+            const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
+            const baseImage = (typeof area?.image === 'string' && area.image.trim()) ? area.image : blank.default_image;
+            if (!baseImage) continue;
+            const layers = p.layers
+                .map((l: any) => l.type === 'image' ? { ...l, designUrl: designUrlOf(l) } : l)
+                .filter((l: any) => l.type !== 'image' || l.designUrl);
+            if (!layers.length) continue;
+            const box = {
+                x: Number(p.area?.x ?? area?.x ?? 200),
+                y: Number(p.area?.y ?? area?.y ?? 200),
+                width: Number(p.area?.width ?? area?.width ?? 400),
+                height: Number(p.area?.height ?? area?.height ?? 400),
+            };
+            const surface: 'flat' | 'wrap' = area?.surface === 'wrap' ? 'wrap' : 'flat';
+            out.push({
+                areaKey: p.print_area_key,
+                label: area?.label,
+                baseImage,
+                maskImage: area?.mask_image,
+                maskStatus: area?.mask_status,
+                surface,
+                box,
+                wrap: surface === 'wrap' ? {
+                    ...box,
+                    template_w: area?.template_w || 2475,
+                    template_h: area?.template_h || 1155,
+                    arc: area?.arc || 1.35,
+                } : undefined,
+                layers,
+            });
+        }
+        return out;
+    }
+
     static async previewMockups(
         sellerId: string,
         blankId: string,
         designPlacements: any[],
-        options?: { colorHex?: string; colors?: { color?: string; color_hex?: string; sku?: string }[] }
-    ): Promise<{ images: string[]; byColor: { color: string; color_hex?: string; images: string[] }[] }> {
+        options?: { colors?: { color?: string; color_hex?: string }[] }
+    ): Promise<{ images: string[]; byColor: (RenderedColor & { image_urls: string[] })[] }> {
         if (!blankId) throw new ValidationError(['thiếu blankId']);
         const blank = await BlankClient.getBlank(blankId, sellerId);
         if (!blank) throw new ValidationError(['phôi không tồn tại']);
+        if (!Array.isArray(designPlacements) || designPlacements.length > 10) throw new ValidationError(['vị trí in không hợp lệ']);
 
         const ids = new Set<string>();
-        for (const p of (designPlacements || [])) {
-            if (p.design_id) ids.add(String(p.design_id));
+        for (const p of designPlacements) {
             for (const l of (p.layers || [])) if (l.type === 'image' && l.design_id) ids.add(String(l.design_id));
         }
         const validIds = [...ids].filter(id => mongoose.Types.ObjectId.isValid(id));
-        const designs = validIds.length > 0
-            ? await Design.find({ _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean()
+        // Chỉ dùng thiết kế của chính người bán (không nhận URL tuỳ ý từ client)
+        const designs = validIds.length > 0 && mongoose.Types.ObjectId.isValid(sellerId)
+            ? await Design.find({
+                _id: { $in: validIds.map(id => new mongoose.Types.ObjectId(id)) },
+                seller_id: new mongoose.Types.ObjectId(sellerId),
+            }).lean()
             : [];
-        const ownedUrl = (id: string) => {
-            const d = designs.find(x => x._id.toString() === String(id));
-            if (!d) return undefined;
-            if (d.seller_id.toString() !== String(sellerId)) return undefined;
-            return d.file_url;
-        };
+        const ownedUrl = (l: any) => designs.find(d => d._id.toString() === String(l.design_id))?.file_url;
 
-        const renderPlacements = async (colorHex?: string): Promise<string[]> => {
-            const out: string[] = [];
-            for (const p of (designPlacements || [])) {
-                const area = blank.print_areas?.find(a => a.key === p.print_area_key) || null;
-                const rawImage = (area && (area as any).image && typeof (area as any).image === 'string' && (area as any).image.trim() !== '') ? (area as any).image : blank.default_image;
-                const blankImage = rawImage || blank.default_image;
-                if (!Array.isArray(p.layers) || !p.layers.length) continue;
-                const layers = p.layers.map((l: any) => l.type === 'image' ? { ...l, designUrl: ownedUrl(l.design_id) || l.designUrl || l.design?.file_url } : l)
-                    .filter((l: any) => l.type !== 'image' || l.designUrl);
-                if (!layers.length) continue;
-                if (area && (area as any).surface === 'wrap') {
-                    out.push(await generateWrapMockup(blankImage, layers, {
-                        x: p.area?.x ?? area.x,
-                        y: p.area?.y ?? area.y,
-                        width: p.area?.width ?? area.width,
-                        height: p.area?.height ?? area.height,
-                        template_w: (area as any).template_w || 2475,
-                        template_h: (area as any).template_h || 1155,
-                        arc: (area as any).arc || 1.35,
-                    }, colorHex));
-                } else {
-                    out.push(await generateMockupLayers(blankImage, layers, colorHex));
-                }
-            }
-            return out;
-        };
+        const placements = ProductsService.toRenderPlacements(blank, designPlacements, ownedUrl);
+        if (!placements.length) throw new ValidationError(['chưa có thiết kế nào trên phôi']);
 
-        // Danh sách màu sắc từ options hoặc từ biến thể của phôi do printer khai báo
-        const inputColors = (options?.colors && Array.isArray(options.colors) && options.colors.length > 0)
-            ? options.colors
-            : (blank.variations && blank.variations.length > 0)
-                ? blank.variations.map(v => ({ color: v.color || 'Mặc định', color_hex: (v as any).color_hex || resolveColorHex(v.color) }))
-                : [];
-
-        const distinctColors: { color: string; color_hex?: string }[] = [];
-        const seenColors = new Set<string>();
-        for (const item of inputColors) {
-            const name = (item.color || 'Mặc định').trim();
-            if (name && !seenColors.has(name)) {
-                seenColors.add(name);
-                distinctColors.push({
-                    color: name,
-                    color_hex: item.color_hex || resolveColorHex(name)
-                });
-            }
-        }
-
-        const byColor: { color: string; color_hex?: string; images: string[] }[] = [];
-        if (distinctColors.length > 0) {
-            for (const c of distinctColors) {
-                const colorImgs = await renderPlacements(c.color_hex);
-                byColor.push({
-                    color: c.color,
-                    color_hex: c.color_hex,
-                    images: colorImgs.length ? colorImgs : [blank.default_image]
-                });
-            }
-        } else {
-            const defaultImgs = await renderPlacements(options?.colorHex);
-            byColor.push({
-                color: 'Mặc định',
-                color_hex: options?.colorHex,
-                images: defaultImgs.length ? defaultImgs : [blank.default_image]
-            });
-        }
-
-        const allImages = byColor.flatMap(c => c.images);
-        return {
-            images: allImages.length ? allImages : [blank.default_image],
-            byColor
-        };
+        const requested = Array.isArray(options?.colors) ? options!.colors.slice(0, 40) : [];
+        const rendered = await renderColorMockups(placements, ProductsService.blankRenderColors(blank, requested));
+        const byColor = rendered.map(c => ({ ...c, image_urls: c.images.map(i => i.url) }));
+        return { images: byColor.flatMap(c => c.image_urls), byColor };
     }
 
 
@@ -1486,6 +1637,7 @@ export class ProductsService {
         } else if (payload.thumbnail && Array.isArray(mp.images) && mp.images.includes(payload.thumbnail)) {
             mp.images = [payload.thumbnail, ...mp.images.filter((img: string) => img !== payload.thumbnail)];
         }
+        if (payload.materials !== undefined) mp.materials = normalizeMaterials(payload.materials);
         if (payload.categoryId !== undefined && data.category) {
             mp.categories = [data.category.name];
             mp.category_ids = [data.category._id];
@@ -1511,6 +1663,7 @@ export class ProductsService {
     }
 
     private static async updateSimple(mp: any, actor: ProductActor, payload: Partial<ProductFormDataDTO>): Promise<ProductItemResponseDTO> {
+        const skus = payload.skus !== undefined ? ProductsService.normalizeSkus(payload.skus) : null;
         if (payload.price !== undefined) {
             const basePrice = Number(payload.price);
             if (isNaN(basePrice) || basePrice <= 0) {
@@ -1546,6 +1699,7 @@ export class ProductsService {
             mp.slug = await ProductsService.uniqueSlug(payload.title, mp._id.toString());
         }
         if (payload.description !== undefined) mp.description = payload.description;
+        if (payload.materials !== undefined) mp.materials = normalizeMaterials(payload.materials);
         if (!catalog.category && payload.category !== undefined) mp.categories = [payload.category];
         if (payload.location !== undefined) mp.location = payload.location;
         if (payload.rank !== undefined) mp.display_rank = payload.rank;
@@ -1567,9 +1721,15 @@ export class ProductsService {
                 mp.images = await ProductsService.sanitizeImages([payload.thumbnail]);
             }
         }
+        if (!skus && ((payload.colors && payload.colors.length > 0) || (payload.sizes && payload.sizes.length > 0))) {
+            mp.variant_mode = undefined; // quay về kiểu màu + chia đều kho
+        }
         await mp.save();
 
-        if ((payload.colors && payload.colors.length > 0) || (payload.sizes && payload.sizes.length > 0)) {
+        if (skus) {
+            const baseSku = payload.sku || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
+            await ProductsService.writeSkus(mp._id, skus, baseSku, await ProductsService.resolveProductCommission(mp));
+        } else if ((payload.colors && payload.colors.length > 0) || (payload.sizes && payload.sizes.length > 0)) {
             const existing = await MongoVariant.find({ product_id: mp._id }).lean();
             const baseSku = payload.sku || existing[0]?.sku?.replace(/-\d+$/, '') || `VC-PRD-${mp._id.toString().substring(18).toUpperCase()}`;
             const totalStock = payload.stock !== undefined
@@ -1597,13 +1757,14 @@ export class ProductsService {
                 const netPrice = Number(payload.price);
                 const grossPrice = withCommission(netPrice, await ProductsService.resolveProductCommission(mp));
                 updates.retail_price = mongoose.Types.Decimal128.fromString(grossPrice.toString());
-                updates.base_cost = mongoose.Types.Decimal128.fromString((netPrice * 0.7).toFixed(0));
+                if ((payload as any).base_cost !== undefined) {
+                    updates.base_cost = mongoose.Types.Decimal128.fromString(Number((payload as any).base_cost || 0).toFixed(0));
+                }
             }
             if (payload.stock !== undefined) updates.stock_quantity = Number(payload.stock);
             if (payload.sku !== undefined) updates.sku = payload.sku;
             if (Object.keys(updates).length > 0) {
                 await MongoVariant.updateMany({ product_id: mp._id }, updates);
-                await syncProductDenorm(mp._id);
             }
         }
 
@@ -1626,6 +1787,7 @@ export class ProductsService {
             : ProductsService.updateSimple(mp, actor, payload as Partial<ProductFormDataDTO>));
 
         await ProductsService.invalidateProductCache(id);
+        ProductsService.syncHealth(id, mp.shop_id ? String(mp.shop_id) : (result?.shopInfo?.id || ''));
         return result;
     }
 
@@ -1640,7 +1802,6 @@ export class ProductsService {
         mp.listing_status = 'INACTIVE';
         await mp.save();
         await MongoVariant.updateMany({ product_id: mp._id }, { $set: { is_active: false } });
-        await syncProductDenorm(mp._id);
         await Shop.updateOne({ _id: mp.shop_id }, { $inc: { listing_count: -1 } });
 
         await ProductsService.invalidateProductCache(id);
@@ -1657,7 +1818,6 @@ export class ProductsService {
             { $set: { is_hidden: true, status: 'UNPUBLISHED', listing_status: 'INACTIVE' } }
         );
         await MongoVariant.updateMany({ product_id: { $in: scoped } }, { $set: { is_active: false } });
-        await Promise.all(scoped.map(id => syncProductDenorm(id)));
 
         await ProductsService.invalidateProductCache();
         logger.info(`Batch soft deleted ${result.modifiedCount} products by ${actor.id}`);
@@ -1743,12 +1903,80 @@ export class ProductsService {
         return { product: await ProductsService.getById(id, { includeHidden: true }), warnings };
     }
 
+    /**
+     * Danh mục có nhiều sản phẩm đang bán nhất, kèm số sản phẩm thật và ảnh bìa lấy từ sản phẩm
+     * được đánh giá nhiều nhất trong danh mục. Dùng cho trang chủ khách vãng lai.
+     */
+    static async getFeaturedCategories(limit = 6): Promise<Array<{ _id: string; name: string; slug: string; product_count: number; cover_image: string | null }>> {
+        const n = Math.min(24, Math.max(1, Math.floor(Number(limit)) || 6));
+        return cacheService.getOrSet(`vietcraft:categories:featured:${n}`, async () => {
+            const grouped = await MongoProduct.aggregate([
+                { $match: { status: 'PUBLISHED', is_hidden: { $ne: true }, listing_status: 'ACTIVE', moderation_status: 'APPROVED' } },
+                { $project: {
+                    category_ids: 1, rating_count: 1, created_at: 1,
+                    cover: { $arrayElemAt: ['$images', 0] },
+                    has_cover: { $gt: [{ $size: { $ifNull: ['$images', []] } }, 0] },
+                } },
+                // Sản phẩm có ảnh + nhiều đánh giá đứng đầu để $first chọn ra ảnh bìa đẹp nhất.
+                { $sort: { has_cover: -1, rating_count: -1, created_at: -1 } },
+                { $unwind: '$category_ids' },
+                { $group: { _id: '$category_ids', product_count: { $sum: 1 }, cover: { $first: '$cover' } } },
+                { $sort: { product_count: -1 } },
+                { $limit: n * 3 },
+            ], { allowDiskUse: true });
+            if (grouped.length === 0) return [];
+            const cats: any[] = await Category.find({
+                _id: { $in: grouped.map(g => g._id) },
+                is_active: true, status: { $ne: 'banned' }, review_status: { $ne: 'banned' },
+            }).select('name slug').lean();
+            const byId = new Map(cats.map(c => [String(c._id), c]));
+            return grouped
+                .filter(g => byId.has(String(g._id)))
+                .slice(0, n)
+                .map(g => {
+                    const c = byId.get(String(g._id));
+                    const cover = typeof g.cover === 'string' && g.cover.trim() !== '' ? g.cover : null;
+                    return { _id: String(c._id), name: c.name, slug: c.slug, product_count: g.product_count, cover_image: cover };
+                });
+        }, 600);
+    }
+
+    /** Số liệu cho khối mở đầu trang chủ: tổng sản phẩm đang bán và số lên kệ trong 7 ngày qua. */
+    static async getHomeStats(): Promise<{ totalProducts: number; newThisWeek: number }> {
+        return cacheService.getOrSet('vietcraft:products:home-stats', async () => {
+            const base = { ...PUBLIC_QUERY, listing_status: 'ACTIVE' };
+            const since = new Date(Date.now() - 7 * 86_400_000);
+            const [totalProducts, newThisWeek] = await Promise.all([
+                MongoProduct.countDocuments(base),
+                MongoProduct.countDocuments({ ...base, created_at: { $gte: since } }),
+            ]);
+            return { totalProducts, newThisWeek };
+        }, 300);
+    }
+
     static async listActiveCategories() {
         return categoryService.listActive();
     }
 
-    static async listTags() {
-        return tagsService.listApproved();
+    /**
+     * Thẻ đã duyệt; có `categoryId` thì kèm `related_count` = số sản phẩm cùng nhóm danh mục đang dùng thẻ,
+     * để form chỉ gợi ý thẻ hợp ngành (điện thoại không bị gợi ý thẻ áo quần).
+     * shortcut: nhóm = danh mục gốc + con trực tiếp (cây 2 cấp); cây sâu hơn thì gom theo cả nhánh.
+     */
+    static async listTags(categoryId?: string) {
+        const tags: any[] = await tagsService.listApproved();
+        if (!categoryId || !mongoose.Types.ObjectId.isValid(categoryId)) return tags;
+        const cat: any = await Category.findById(categoryId).select('parent_id').lean();
+        if (!cat) return tags;
+        const rootId = cat.parent_id || cat._id;
+        const family = await Category.find({ $or: [{ _id: rootId }, { parent_id: rootId }] }).select('_id').lean();
+        const counts = await MongoProduct.aggregate([
+            { $match: { category_ids: { $in: family.map((c: any) => c._id) } } },
+            { $unwind: '$tag_ids' },
+            { $group: { _id: '$tag_ids', n: { $sum: 1 } } },
+        ]);
+        const byId = new Map(counts.map(c => [String(c._id), c.n as number]));
+        return tags.map(t => ({ ...t, related_count: byId.get(String(t._id)) ?? 0 }));
     }
 }
 

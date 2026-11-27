@@ -1,29 +1,19 @@
 import mongoose from 'mongoose';
 import { Product } from '../../product/infrastructure/models/product.model';
 import { Tag } from '../../tags/infrastructure/models/tag.model';
-import { ListingHealthScore, IAxis, ITodo, IConversionDetail } from '../../product/infrastructure/models/listing-health-score.model';
+import { ListingHealthScore, IAxis, ITodo, ICoverage, IBlocker, IRecommendation } from '../../product/infrastructure/models/listing-health-score.model';
 import { buildMeta, ok, insufficient, Envelope } from './envelope';
-import { EMPTY_SALES, HealthInputs, ListingProductInfo, ListingSales, healthInputs, salesByProduct } from './listing-sales';
+import { EMPTY_SALES, ListingSales, salesByProduct } from './listing-sales';
+import { AiGatewayService } from './ai-gateway.service';
 
 
 const COLLECTION = 'listing_health_scores';
-const MODEL_VERSION_FALLBACK = 'health-1.0';
+export const HEALTH_VERSION = 'health-5.0';
+const MODEL_VERSION_FALLBACK = HEALTH_VERSION;
+const STALE_REFRESH_LIMIT = 20;
+export const VN_OFFSET_MS = 7 * 3_600_000;
 
 export type HealthStatus = 'good' | 'needs_improvement' | 'poor';
-
-export interface HealthDetailData {
-    product_id: string;
-    title: string | null;
-    score: number | null;
-    status: HealthStatus | null;
-    axes: IAxis;
-    axes_missing: string[];
-    todos: ITodo[];
-    conversion_detail: IConversionDetail | null;
-    inputs: HealthInputs;
-    product: ListingProductInfo;
-    sales: ListingSales;
-}
 
 export interface HealthListItem {
     product_id: string;
@@ -31,6 +21,9 @@ export interface HealthListItem {
     thumbnail: string | null;
     score: number | null;
     status: HealthStatus | null;
+    coverage: ICoverage | null;
+    blockers: IBlocker[];
+    top_recommendation: IRecommendation | null;
     axes: IAxis;
     axes_missing: string[];
     computed_at: string | null;
@@ -78,6 +71,8 @@ type OwnedProduct = {
     description?: string;
     tags?: string[];
     tag_ids?: mongoose.Types.ObjectId[];
+    categories?: string[];
+    category_ids?: mongoose.Types.ObjectId[];
     product_type?: string;
     updated_at?: Date;
 };
@@ -92,7 +87,7 @@ export class ListingHealthService {
         | { denied: { httpStatus: number; body: { error: string; resource?: string } } }
     > {
         const product = await Product.findById(productId)
-            .select('_id shop_id title images description tags tag_ids product_type updated_at')
+            .select('_id shop_id title images description tags tag_ids categories category_ids product_type updated_at')
             .lean();
         if (!product) {
             return { denied: { httpStatus: 404, body: { error: 'not_found', resource: 'listing' } } };
@@ -103,71 +98,6 @@ export class ListingHealthService {
         return { product: product as OwnedProduct };
     }
 
-    static async detail(productId: string, shopId: string): Promise<{ httpStatus: number; body: Envelope<HealthDetailData> | { error: string; field?: string; resource?: string } }> {
-        if (!this.isValidObjectId(productId)) {
-            return { httpStatus: 400, body: { error: 'invalid_param', field: 'id' } };
-        }
-
-        if (!this.isValidObjectId(shopId)) {
-            return {
-                httpStatus: 200,
-                body: insufficient(
-                    'Cần thiết lập gian hàng thật trước khi xem điểm sức khoẻ listing.',
-                    metaForListing(productId, {}),
-                ),
-            };
-        }
-
-        const owned = await this.ownedProduct(productId, shopId);
-        if ('denied' in owned) return owned.denied;
-        const { product } = owned;
-
-        const record = await ListingHealthScore.findOne({ product_id: product._id })
-            .sort({ date: -1 })
-            .lean();
-
-        if (!record || record.score === null || record.score === undefined) {
-            return {
-                httpStatus: 200,
-                body: insufficient(
-                    'Chưa đủ dữ liệu để chấm điểm sức khoẻ cho sản phẩm này.',
-                    metaForListing(productId, {
-                        computed_at: record?.computed_at ?? null,
-                        model_version: record?.model_version,
-                        confidence: 'low',
-                    }),
-                ),
-            };
-        }
-
-        const [{ inputs, info }, sales] = await Promise.all([
-            healthInputs(product, record.content_changed_at),
-            salesByProduct([product._id]),
-        ]);
-        const data: HealthDetailData = {
-            product_id: productId,
-            title: product.title ?? null,
-            score: record.score,
-            status: record.status as HealthStatus | null,
-            axes: record.axes || {},
-            axes_missing: record.axes_missing || [],
-            todos: record.todos || [],
-            conversion_detail: record.conversion_detail ?? null,
-            inputs,
-            product: info,
-            sales: sales.get(String(product._id)) ?? { ...EMPTY_SALES },
-        };
-
-        return {
-            httpStatus: 200,
-            body: ok(data, metaForListing(productId, {
-                computed_at: record.computed_at,
-                model_version: record.model_version,
-                confidence: (record.axes_missing || []).length > 0 ? 'medium' : 'high',
-            })),
-        };
-    }
-
     static async history(productId: string, shopId: string, days: number): Promise<{ httpStatus: number; body: Envelope<HealthHistoryPoint[]> | { error: string; field?: string; resource?: string } }> {
         if (!this.isValidObjectId(productId)) {
             return { httpStatus: 400, body: { error: 'invalid_param', field: 'id' } };
@@ -176,7 +106,7 @@ export class ListingHealthService {
             return {
                 httpStatus: 200,
                 body: insufficient(
-                    'Cần thiết lập gian hàng thật trước khi xem lịch sử điểm sức khoẻ.',
+                    'Cần thiết lập gian hàng thật trước khi xem lịch sử độ hoàn thiện trang sản phẩm.',
                     metaForListing(productId, {}),
                 ),
             };
@@ -185,12 +115,13 @@ export class ListingHealthService {
         const owned = await this.ownedProduct(productId, shopId);
         if ('denied' in owned) return owned.denied;
 
-        const since = new Date();
+        const since = new Date(Date.now() + VN_OFFSET_MS);
         since.setUTCHours(0, 0, 0, 0);
         since.setUTCDate(since.getUTCDate() - (days - 1));
 
         const rows = await ListingHealthScore.find({
             product_id: owned.product._id,
+            model_version: HEALTH_VERSION,
             date: { $gte: since },
             score: { $ne: null },
         })
@@ -231,7 +162,7 @@ export class ListingHealthService {
             return {
                 httpStatus: 200,
                 body: insufficient(
-                    'Cần thiết lập gian hàng thật trước khi xem điểm sức khoẻ listing.',
+                    'Cần thiết lập gian hàng thật trước khi xem độ hoàn thiện trang sản phẩm.',
                     buildMeta({ scope: 'shop', scope_id: null, database: 'vietcraft', collection: COLLECTION, mode: 'live' }),
                 ),
             };
@@ -243,17 +174,20 @@ export class ListingHealthService {
 
         const productIds = products.map(p => p._id);
 
-        const latestByProduct = new Map<string, { score: number | null; status: HealthStatus | null; axes: IAxis; axes_missing: string[]; computed_at: Date | string | null; model_version?: string; todos: ITodo[] }>();
+        const latestByProduct = new Map<string, { score: number | null; status: HealthStatus | null; coverage: ICoverage | null; blockers: IBlocker[]; recommendations: IRecommendation[]; axes: IAxis; axes_missing: string[]; computed_at: Date | string | null; model_version?: string; todos: ITodo[] }>();
 
-        if (productIds.length > 0) {
+        const loadLatest = async (ids: typeof productIds) => {
             const rows = await ListingHealthScore.aggregate([
-                { $match: { product_id: { $in: productIds } } },
-                { $sort: { date: -1 } },
+                { $match: { product_id: { $in: ids } } },
+                { $sort: { date: -1, computed_at: -1 } },
                 {
                     $group: {
                         _id: '$product_id',
                         score: { $first: '$score' },
                         status: { $first: '$status' },
+                        coverage: { $first: '$coverage' },
+                        blockers: { $first: '$blockers' },
+                        recommendations: { $first: '$recommendations' },
                         axes: { $first: '$axes' },
                         axes_missing: { $first: '$axes_missing' },
                         computed_at: { $first: '$computed_at' },
@@ -266,6 +200,9 @@ export class ListingHealthService {
                 latestByProduct.set(String(row._id), {
                     score: row.score ?? null,
                     status: row.status ?? null,
+                    coverage: row.coverage ?? null,
+                    blockers: Array.isArray(row.blockers) ? row.blockers : [],
+                    recommendations: Array.isArray(row.recommendations) ? row.recommendations : [],
                     axes: row.axes || {},
                     axes_missing: row.axes_missing || [],
                     computed_at: row.computed_at ?? null,
@@ -273,11 +210,25 @@ export class ListingHealthService {
                     todos: Array.isArray(row.todos) ? row.todos : [],
                 });
             }
+        };
+
+        if (productIds.length > 0) {
+            await loadLatest(productIds);
+            const stale = productIds
+                .filter(pid => latestByProduct.get(String(pid))?.model_version !== HEALTH_VERSION)
+                .slice(0, STALE_REFRESH_LIMIT);
+            if (stale.length > 0) {
+                await Promise.all(stale.map(pid => AiGatewayService.call({ method: 'GET', path: `/api/analytics/listings/${pid}/health`, shopId })));
+                await loadLatest(stale);
+            }
+            for (const [pid, row] of latestByProduct) {
+                if (row.model_version !== HEALTH_VERSION) latestByProduct.delete(pid);
+            }
         }
 
         const tagIds = products.flatMap(p => p.tag_ids ?? []);
-        const tagDocs = tagIds.length ? await Tag.find({ _id: { $in: tagIds } }).select('_id name status').lean() : [];
-        const tagById = new Map(tagDocs.map(t => [String(t._id), { name: t.name, pending: t.status === 'pending' }]));
+        const tagDocs = tagIds.length ? await Tag.find({ _id: { $in: tagIds } }).select('_id name status review_status').lean() : [];
+        const tagById = new Map(tagDocs.map(t => [String(t._id), { name: t.name, pending: t.status === 'pending' || t.review_status === 'pending' }]));
         const tagsOf = (p: (typeof products)[number]) =>
             p.tag_ids?.length
                 ? p.tag_ids.map(id => tagById.get(String(id))).filter((t): t is { name: string; pending: boolean } => Boolean(t))
@@ -293,6 +244,9 @@ export class ListingHealthService {
                 thumbnail: Array.isArray(p.images) && p.images.length > 0 ? p.images[0] : null,
                 score: latest?.score ?? null,
                 status: latest?.status ?? null,
+                coverage: latest?.coverage ?? null,
+                blockers: latest?.blockers ?? [],
+                top_recommendation: latest?.recommendations?.[0] ?? null,
                 axes: latest?.axes ?? {},
                 axes_missing: latest?.axes_missing ?? [],
                 computed_at: latest?.computed_at ? new Date(latest.computed_at).toISOString() : null,

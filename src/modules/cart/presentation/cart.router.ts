@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { CartService } from '../application/cart.service';
-import { authenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 
 const router = Router();
 
@@ -14,11 +14,31 @@ router.get('/', authenticate, async (req: AuthenticatedRequest, res) => {
     }
 });
 
-router.post('/items', authenticate, async (req: AuthenticatedRequest, res) => {
+router.post('/items', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res) => {
     try {
         const userId = req.user!.id;
         const cart = await CartService.addItem(userId, req.body);
         res.status(201).json({ success: true, data: cart });
+    } catch (error: any) {
+        res.status(400).json({ success: false, error: error.message });
+    }
+});
+
+// Đặt đúng tập dòng được chọn: { selectedItemIds: string[] }
+router.put('/selection', authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+        const cart = await CartService.setSelection(req.user!.id, req.body?.selectedItemIds);
+        res.json({ success: true, data: cart });
+    } catch (error: any) {
+        res.status(400).json({ success: false, error: error.message });
+    }
+});
+
+// Xoá nhiều dòng: { itemIds: string[] }
+router.post('/items/bulk-delete', authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+        const cart = await CartService.removeItems(req.user!.id, req.body?.itemIds);
+        res.json({ success: true, data: cart });
     } catch (error: any) {
         res.status(400).json({ success: false, error: error.message });
     }

@@ -291,6 +291,16 @@ export class SellerOrdersService {
         return mapDbOrderToSellerDTO(saved || order.toObject());
     }
 
+    private static assertApprovable(order: any): void {
+        if (order.order_status === 'CANCELLED' || order.fulfillment_status === 'CANCELLED' || order.seller_approval_status === 'REJECTED') {
+            throw new Error('Đơn hàng đã bị huỷ, không thể duyệt hoặc gửi xưởng in.');
+        }
+        // Đơn trả trước (payOS) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
+        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
+            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
+        }
+    }
+
     static async approveOrder(ownerId: string, id: string): Promise<SellerOrderDTO> {
         const shopId = await this.findShopId(ownerId);
         if (!shopId) throw new Error('Không tìm thấy cửa hàng của bạn');
@@ -304,10 +314,7 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
-        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
-        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
-            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
-        }
+        this.assertApprovable(order);
 
         const isPod = Boolean(
             order.is_pod ||
@@ -368,10 +375,7 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
-        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
-        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
-            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
-        }
+        this.assertApprovable(order);
 
         // Cập nhật trạng thái duyệt của người bán
         order.seller_approval_status = 'APPROVED';

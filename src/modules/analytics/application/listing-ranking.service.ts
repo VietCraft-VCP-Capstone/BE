@@ -5,6 +5,7 @@ import { ProductVariant } from '../../product/infrastructure/models/product-vari
 import { Wishlist } from '../../product/infrastructure/models/wishlist.model';
 import { buildMeta, insufficient, ok, Envelope } from './envelope';
 import { EMPTY_SALES, SALES_WINDOW_DAYS, salesByProduct } from './listing-sales';
+import { HEALTH_VERSION } from './listing-health.service';
 import {
     CategoryBench, RANK_METRICS, Rank, RankInsight, RankMetric, RankMetrics, median, rankOf, rankingInsights, rate,
 } from './ranking-insights';
@@ -71,10 +72,10 @@ export async function listingRanking(shopId: string): Promise<{ httpStatus: numb
                 stock: { $sum: { $max: [0, { $ifNull: ['$stock_quantity', 0] }] } },
             } },
         ])),
-        byId<{ score: number | null }>(ListingHealthScore.aggregate([
+        byId<{ score: number | null; warnings: { field?: string | null; message?: string }[] }>(ListingHealthScore.aggregate([
             { $match: { product_id: { $in: mineIds } } },
-            { $sort: { date: -1 } },
-            { $group: { _id: '$product_id', score: { $first: '$score' } } },
+            { $sort: { date: -1, computed_at: -1 } },
+            { $group: { _id: '$product_id', score: { $first: '$score' }, warnings: { $first: '$warnings' } } },
         ])),
     ]);
 
@@ -117,6 +118,7 @@ export async function listingRanking(shopId: string): Promise<{ httpStatus: numb
                 category: cat,
                 stock: p.product_type === 'READY_TO_SHIP' ? variants.get(String(p._id))?.stock ?? 0 : null,
                 score: scores.get(String(p._id))?.score ?? null,
+                titleIssue: scores.get(String(p._id))?.warnings?.find(t => t.field === 'title')?.message ?? null,
             }),
         };
     });

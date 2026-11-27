@@ -21,6 +21,7 @@ import { designsRouter } from '../modules/design/presentation/design.router';
 import { chatRouter } from '../modules/chat';
 import { notificationRouter } from '../modules/notification';
 import { uploadRouter } from '../modules/upload';
+import { newsletterRouter } from '../modules/newsletter';
 
 const router = Router();
 
@@ -48,7 +49,7 @@ router.use('/products', productsRouter);
 router.use('/shops', shopRouter);
 router.use('/orders', ordersRouter);
 const returnClock = { now: () => new Date() };
-router.use('/returns/v3', createReturnRequestRouter({ service: createReturnRequestService(returnClock), authenticate, clock: createReturnClock(returnClock) }));
+router.use('/returns', createReturnRequestRouter({ service: createReturnRequestService(returnClock), authenticate, clock: createReturnClock(returnClock) }));
 router.use('/', refundRequestRouter);
 router.use('/reviews', reviewRouter);
 router.use('/payment', paymentRouter);
@@ -59,7 +60,12 @@ router.use('/promotions', promotionRouter);
 
 router.use('/designs', designsRouter);
 router.use('/upload', uploadRouter);
+router.use('/newsletter', newsletterRouter);
 router.use('/chat', chatRouter);
+router.get('/notifications/alerts', (req, res, next) => {
+    req.url = '/alerts';
+    sellerAnalyticsRouter(req, res, next);
+});
 router.use('/notifications', notificationRouter);
 
 export default router;

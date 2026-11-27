@@ -3,12 +3,21 @@ import { Router, Response } from 'express';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { AiGatewayService, AnalyticsViewer } from '../application/ai-gateway.service';
 import { CompetitorTrackingService, TrackingError } from '../application/competitor-tracking.service';
+import { SeasonalAnalyticsService } from '../application/seasonal-analytics.service';
+import { Shop } from '../../product/infrastructure/models/shop.model';
 import { Product } from '../../product/infrastructure/models/product.model';
-import { BlankClient, Blank } from '../../product/application/blank-client.service';
+import ProductsService from '../../product/application/product.service';
+import { Tag } from '../../tags';
+import { cacheService } from '../../../shared/services/cache.service';
+import { generateSlug } from '../../../shared/utils/slug';
 import { ListingHealthService, HealthStatus } from '../application/listing-health.service';
 import { healthSummary } from '../application/listing-health-summary.service';
+import { searchInsights } from '../application/listing-search-gaps.service';
+import { listingImpact, recordHealthAction } from '../application/listing-impact.service';
 import { listingRanking } from '../application/listing-ranking.service';
 import { parsePreviewBody, PreviewBodyResult } from '../application/health-preview';
+import { parseHealthDraft } from '../application/health-draft';
+import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 
 type Method = 'get' | 'post' | 'delete';
 
@@ -18,32 +27,52 @@ interface GatewayRoute {
     ai: (params: Record<string, string>) => string;
     query?: string[];
     forwardShopIdBody?: boolean;
-    parseBody?: (raw: unknown) => PreviewBodyResult;
+    parseBody?: (raw: unknown) => PreviewBodyResult<Record<string, unknown>>;
+    timeoutMs?: number;
+}
+
+/**
+  Chỉ chuyển tiếp ảnh: `images` (tối đa 6 ảnh cùng sản phẩm, các màu khác nhau) hoặc `image_base64` (1 ảnh,
+  client cũ). Tổng base64 ≤ ~12MB để dưới giới hạn 15MB của express.json; AI kiểm tra lại là ảnh thật.
+ */
+function parseRecognizeImage(raw: unknown): PreviewBodyResult<Record<string, unknown>> {
+    const b = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const images = Array.isArray(b.images) ? b.images : (typeof b.image_base64 === 'string' ? [b.image_base64] : []);
+    if (images.length === 0 || images.length > 6 || images.some(x => typeof x !== 'string' || !x)) {
+        return { invalid: 'images' };
+    }
+    if ((images as string[]).reduce((n, x) => n + x.length, 0) > 12_000_000) return { invalid: 'images' };
+    const mime = typeof b.mime_type === 'string' ? b.mime_type.slice(0, 40) : undefined;
+    return { body: { images, ...(mime ? { mime_type: mime } : {}) } };
 }
 
 const ROUTES: GatewayRoute[] = [
-    { method: 'get', path: '/overview', ai: () => '/api/analytics/shop/overview', query: ['timeRange'] },
+    { method: 'get', path: '/overview', ai: () => '/api/analytics/shop/overview', query: ['timeRange', 'to'] },
+    { method: 'get', path: '/listings/:id/health', ai: p => `/api/analytics/listings/${p.id}/health` },
+    { method: 'post', path: '/listings/health/draft', ai: () => '/api/analytics/listings/health/draft', parseBody: parseHealthDraft },
     { method: 'get', path: '/listings/:id/timeseries', ai: p => `/api/analytics/listings/${p.id}/timeseries`, query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/conversion', ai: p => `/api/analytics/listings/${p.id}/conversion` },
     { method: 'post', path: '/listings/:id/health/preview', ai: p => `/api/analytics/listings/${p.id}/health/preview`, parseBody: parsePreviewBody },
     { method: 'get', path: '/alerts', ai: () => '/api/notifications/alerts', query: ['period'] },
-    { method: 'get', path: '/categories', ai: () => '/api/analytics/shop/categories/revenue', query: ['timeRange'] },
+    { method: 'get', path: '/money', ai: () => '/api/analytics/shop/money', query: ['timeRange', 'from_date', 'to_date'] },
+    { method: 'get', path: '/money/advice', ai: () => '/api/analytics/shop/money/advice', query: ['timeRange', 'from_date', 'to_date'] },
     { method: 'get', path: '/competitors', ai: () => '/api/analytics/competitors', query: ['categoryId'] },
+    { method: 'get', path: '/competitor-brief', ai: () => '/api/analytics/competitor-brief' },
     { method: 'get', path: '/shop-comparison', ai: () => '/api/analytics/shop-comparison' },
     { method: 'get', path: '/tag-gap', ai: () => '/api/analytics/tag-gap', query: ['categoryId'] },
     { method: 'get', path: '/pricing', ai: () => '/api/analytics/pricing', query: ['productType', 'price', 'productId'] },
     { method: 'get', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking' },
     { method: 'post', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
     { method: 'delete', path: '/competitor-tracking', ai: () => '/api/analytics/competitor-tracking', forwardShopIdBody: true },
+    { method: 'delete', path: '/competitor-tracking/:shopId', ai: p => `/api/analytics/competitor-tracking/${p.shopId}`, forwardShopIdBody: true },
     // Dự báo (SRS 3.10)
-    { method: 'get', path: '/forecast/revenue', ai: () => '/api/analytics/forecast/revenue', query: ['window'] },
     { method: 'get', path: '/forecast/seasonal', ai: () => '/api/analytics/forecast/seasonal', query: ['categoryId', 'category_slug', 'campaign_id', 'campaignId', 'keyword'] },
-    { method: 'get', path: '/forecast/niches', ai: () => '/api/analytics/forecast/niches', query: ['categoryId'] },
-    { method: 'get', path: '/forecast/radar', ai: () => '/api/analytics/forecast/radar' },
-    { method: 'get', path: '/forecast/recommendations', ai: () => '/api/analytics/forecast/recommendations' },
     // Gợi ý sản phẩm thông minh (F42)
-    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'productType', 'keywords', 'blankCost'] },
-    { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion' },
+    // timeoutMs cao hơn mặc định: lần gọi đầu tiên sau khi AI service khởi động lại phải fit TF-IDF ~45k dòng, có thể chậm hơn bình thường
+    { method: 'get', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', query: ['categoryId', 'categoryName', 'productType', 'keywords', 'title', 'blankCost', 'targetMargin', 'material'], timeoutMs: 45_000 },
+    { method: 'post', path: '/product/smart-suggestion', ai: () => '/api/v1/product/smart-suggestion', timeoutMs: 45_000 },
+    // Nhận diện sản phẩm từ ảnh (F42): ảnh base64 do FE đã thu nhỏ
+    { method: 'post', path: '/product/recognize-image', ai: () => '/api/v1/product/recognize-image', parseBody: parseRecognizeImage, timeoutMs: 45_000 },   // đọc ảnh có thể ~40s khi phải đổi model
 ];
 
 const MAX_QUERY_LENGTH = 120;
@@ -59,82 +88,7 @@ function pickQuery(source: AuthenticatedRequest['query'], allowed: string[] = []
     return picked;
 }
 
-async function enrichSeasonalData(data: any, req: AuthenticatedRequest, viewer: AnalyticsViewer) {
-    if (!data) return data;
-
-    data.seller_shop_name = viewer.shop_name || 'SNOWKAT';
-    data.seller_category = { slug: 'thoi-trang', name: 'Thời trang Nữ & Set may mặc' };
-    data.is_live_shop = Boolean(viewer.live_shop_id);
-
-    if (!data.events || !Array.isArray(data.events)) return data;
-
-    let sellerBlanks: Blank[] = [];
-    try {
-        sellerBlanks = await BlankClient.listBlanks(req.user?.id);
-    } catch {
-        sellerBlanks = [];
-    }
-
-    let shopProducts: any[] = [];
-    if (viewer.live_shop_id && mongoose.Types.ObjectId.isValid(viewer.live_shop_id)) {
-        try {
-            shopProducts = await Product.find({
-                shop_id: new mongoose.Types.ObjectId(viewer.live_shop_id),
-                listing_status: { $ne: 'EXPIRED' }
-            }).select('_id title slug images categories tags product_type original_price stock_alert_threshold').lean();
-        } catch {
-            shopProducts = [];
-        }
-    }
-
-    for (const event of data.events) {
-        if (event.pod_blanks && Array.isArray(event.pod_blanks)) {
-            for (const pb of event.pod_blanks) {
-                const bt = (pb.blank_type || '').toLowerCase();
-                const matched = sellerBlanks.find(b => {
-                    const bId = (b._id || '').toLowerCase();
-                    const bCat = (b.category || '').toLowerCase();
-                    if (bt.includes('tshirt') || bt.includes('áo')) return bId.includes('tshirt') || bCat.includes('thời trang');
-                    if (bt.includes('mug') || bt.includes('cốc') || bt.includes('ly')) return bId.includes('mug') || bCat.includes('gia dụng') || bCat.includes('quà');
-                    if (bt.includes('tote') || bt.includes('túi')) return bId.includes('tote') || bCat.includes('phụ kiện');
-                    if (bt.includes('canvas') || bt.includes('tranh') || bt.includes('khung')) return bId.includes('frame') || bCat.includes('trang trí');
-                    return false;
-                });
-                if (matched) {
-                    pb.matched_blank = {
-                        _id: matched._id,
-                        title: matched.title,
-                        category: matched.category,
-                        default_image: matched.default_image,
-                        base_cost: matched.variations?.[0]?.base_cost || 0,
-                        printer_name: matched.printer_name || 'Xưởng in liên kết',
-                        is_connected: true
-                    };
-                }
-            }
-        }
-
-        const evName = (event.name || '').toLowerCase();
-        const evWords: string[] = evName.split(/\s+/).filter(Boolean);
-        event.matching_shop_products = shopProducts.filter((p: any) => {
-            const pTitle = (p.title || '').toLowerCase();
-            const pTags: string[] = (p.tags || []).map((t: string) => t.toLowerCase());
-            const pCats: string[] = (p.categories || []).map((c: string) => c.toLowerCase());
-            return evWords.some((w: string) => w.length > 2 && (pTitle.includes(w) || pTags.some((t: string) => t.includes(w)) || pCats.some((c: string) => c.includes(w))));
-        }).slice(0, 4);
-    }
-
-    data.all_seller_blanks = sellerBlanks.map(b => ({
-        _id: b._id,
-        title: b.title,
-        category: b.category,
-        default_image: b.default_image,
-        base_cost: b.variations?.[0]?.base_cost || 0,
-        printer_name: b.printer_name
-    }));
-
-    return data;
-}
+// Toàn bộ nghiệp vụ Seasonal & Gemini AI Advisory đã được tách thành SeasonalAnalyticsService
 
 async function viewerOrReply(req: AuthenticatedRequest, res: Response): Promise<AnalyticsViewer | null> {
     const viewer = await AiGatewayService.resolveViewer(req.user!);
@@ -145,10 +99,7 @@ async function viewerOrReply(req: AuthenticatedRequest, res: Response): Promise<
     return viewer;
 }
 
-/**
- * Thêm / bỏ theo dõi của gian hàng THẬT: BE tự ghi vào follow của sàn, không chuyển sang AI.
- * Service AI chỉ đọc danh sách đó khi trả GET /competitor-tracking.
- */
+// Gian hàng thật: BE ghi follow của sàn, AI chỉ đọc lại khi GET /competitor-tracking.
 async function replyLiveTracking(method: Method, userId: string, target: string, viewer: AnalyticsViewer, res: Response) {
     try {
         const data = method === 'post'
@@ -176,20 +127,39 @@ router.get('/context', async (req: AuthenticatedRequest, res: Response) => {
     }
 });
 
-const HEALTH_STATUSES: HealthStatus[] = ['good', 'needs_improvement', 'poor'];
+const SHOP_SEARCH_MAX = 60;
 
-router.get('/listings/:id/health', async (req: AuthenticatedRequest, res: Response) => {
+router.get('/competitor-tracking/categories', async (_req: AuthenticatedRequest, res: Response) => {
     try {
-        const viewer = await viewerOrReply(req, res);
-        if (!viewer) return;
-
-        const { httpStatus, body } = await ListingHealthService.detail(req.params.id, viewer.analysed_shop_id!);
-        const payload = httpStatus < 400 ? { ...body, viewer } : body;
-        return res.status(httpStatus).json(payload);
+        return res.json({ data: await CompetitorTrackingService.rootCategories() });
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc điểm sức khoẻ listing.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc danh mục.' });
     }
 });
+
+router.get('/competitor-tracking/search', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+        const categoryId = typeof req.query.categoryId === 'string' ? req.query.categoryId : '';
+        // Tìm theo tên, theo danh mục, hoặc cả hai; phải có ít nhất một.
+        if (q.length > SHOP_SEARCH_MAX || (!q && !categoryId)) {
+            return res.status(400).json({ error: 'invalid_param', field: 'q', expected: `1-${SHOP_SEARCH_MAX} ký tự` });
+        }
+        if (categoryId && !/^[a-f0-9]{24}$/i.test(categoryId)) {
+            return res.status(400).json({ error: 'invalid_param', field: 'categoryId' });
+        }
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        // Shop mẫu theo dõi bằng mã shp_* của dữ liệu mồi, không tìm trên sàn.
+        if (viewer.demo) return res.json({ data: [], viewer });
+        const data = await CompetitorTrackingService.searchShops(req.user!.id, q, categoryId || undefined);
+        return res.json({ data, viewer });
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi tìm gian hàng.' });
+    }
+});
+
+const HEALTH_STATUSES: HealthStatus[] = ['good', 'needs_improvement', 'poor'];
 
 const HISTORY_DAYS = [30, 90];
 
@@ -207,7 +177,7 @@ router.get('/listings/:id/health/history', async (req: AuthenticatedRequest, res
         const payload = httpStatus < 400 ? { ...body, viewer } : body;
         return res.status(httpStatus).json(payload);
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc lịch sử điểm sức khoẻ.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc lịch sử độ hoàn thiện trang sản phẩm.' });
     }
 });
 
@@ -229,7 +199,7 @@ router.get('/listings/health', async (req: AuthenticatedRequest, res: Response) 
         const payload = httpStatus < 400 ? { ...body, viewer } : body;
         return res.status(httpStatus).json(payload);
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc danh sách sức khoẻ listing.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc danh sách tối ưu sản phẩm.' });
     }
 });
 
@@ -241,6 +211,39 @@ router.get('/listings/ranking', async (req: AuthenticatedRequest, res: Response)
         return res.status(httpStatus).json({ ...body, viewer });
     } catch (error: any) {
         return res.status(500).json({ error: error?.message || 'Lỗi khi đọc bảng xếp hạng sản phẩm.' });
+    }
+});
+
+router.get('/listings/:id/search-insights', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { httpStatus, body } = await searchInsights(req.params.id, viewer.analysed_shop_id!);
+        return res.status(httpStatus).json(httpStatus < 400 ? { ...body, viewer } : body);
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc từ khoá khách tìm.' });
+    }
+});
+
+router.get('/listings/:id/impact', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { httpStatus, body } = await listingImpact(req.params.id, viewer.analysed_shop_id!);
+        return res.status(httpStatus).json(httpStatus < 400 ? { ...body, viewer } : body);
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc tác động thay đổi nội dung.' });
+    }
+});
+
+router.post('/listings/:id/health/actions', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { httpStatus, body } = await recordHealthAction(req.params.id, viewer.analysed_shop_id!, req.user!.id, req.body);
+        return res.status(httpStatus).json(httpStatus < 400 ? { ...body, viewer } : body);
+    } catch (error: any) {
+        return res.status(500).json({ error: error?.message || 'Lỗi khi ghi nhận thao tác độ hoàn thiện trang sản phẩm.' });
     }
 });
 
@@ -257,7 +260,279 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
         const { httpStatus, body } = await healthSummary(viewer.analysed_shop_id!, days);
         return res.status(httpStatus).json({ ...body, viewer });
     } catch (error: any) {
-        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc điểm sức khoẻ của shop.' });
+        return res.status(500).json({ error: error?.message || 'Lỗi khi đọc độ hoàn thiện trang sản phẩm của shop.' });
+    }
+});
+
+router.post('/listings/health/draft', userRateLimit(20, 60_000, 'Bạn thử quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
+// Mỗi lần nhận diện ảnh tốn hạn mức Gemini
+router.post('/product/recognize-image', userRateLimit(10, 60_000, 'Bạn nhận diện ảnh quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
+
+const ALLOWED_RATINGS = new Set(['good', 'neutral', 'poor']);
+const SAFE_KEY_REGEX = /^[^$\0\r\n]{1,200}$/;
+const MAX_SAVED_IDEAS = 200;
+const MAX_DRAFTS_OR_REVIEWS = 200;
+const MAX_MILESTONES = 1000;
+
+function isSafeKey(value: unknown, maxLen = 200): value is string {
+    return typeof value === 'string' && value.trim().length > 0 && value.length <= maxLen && SAFE_KEY_REGEX.test(value);
+}
+
+function toSafeMapKey(key: string): string {
+    return key.replace(/\./g, '_');
+}
+
+// Bộ lọc nguyên tử: sửa mục đã có luôn được, thêm mục mới chỉ khi bản đồ chưa đạt trần
+function mapCapFilter(shopId: mongoose.Types.ObjectId, map: string, key: string, max: number) {
+    const path = `settings.seasonal_preferences.${map}`;
+    const safeKey = toSafeMapKey(key);
+    return {
+        _id: shopId,
+        $or: [
+            { [`${path}.${safeKey}`]: { $exists: true } },
+            { $expr: { $lt: [{ $size: { $objectToArray: { $ifNull: [`$${path}`, {}] } } }, max] } },
+        ],
+    };
+}
+
+async function limitOrMissing(res: Response, shopId: mongoose.Types.ObjectId, error: string) {
+    return (await Shop.exists({ _id: shopId }))
+        ? res.status(400).json({ success: false, error })
+        : res.status(404).json({ success: false, error: 'shop_not_found' });
+}
+
+// Gắn thẻ từ khóa cơ hội vào các sản phẩm phù hợp của gian hàng
+router.post('/forecast/seasonal/attach-tag', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const cleanTag = typeof req.body?.tag === 'string' ? req.body.tag.trim() : '';
+        const rawIds = Array.isArray(req.body?.product_ids) ? req.body.product_ids : [];
+        if (!cleanTag || cleanTag.length > 64) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'tag' });
+        }
+        const validIds = rawIds
+            .slice(0, 100)
+            .filter((id: unknown) => typeof id === 'string' && mongoose.Types.ObjectId.isValid(id))
+            .map((id: string) => new mongoose.Types.ObjectId(id));
+        if (validIds.length === 0) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'product_ids' });
+        }
+        if (!viewer.live_shop_id || !mongoose.Types.ObjectId.isValid(viewer.live_shop_id)) {
+            return res.status(404).json({ success: false, error: 'shop_not_found' });
+        }
+
+        const slug = generateSlug(cleanTag) || cleanTag.toLowerCase().replace(/\s+/g, '-');
+        let tagDoc = await Tag.findOne({ $or: [{ slug }, { name: cleanTag }] });
+        if (!tagDoc) {
+            tagDoc = await Tag.create({
+                name: cleanTag,
+                slug,
+                status: 'active',
+                review_status: 'approved',
+                product_count: 0,
+            });
+        }
+        const shopOid = new mongoose.Types.ObjectId(viewer.live_shop_id);
+        const needCountUpdate = await Product.countDocuments({
+            _id: { $in: validIds },
+            shop_id: shopOid,
+            tag_ids: { $ne: tagDoc._id },
+        });
+        const result = await Product.updateMany(
+            { _id: { $in: validIds }, shop_id: shopOid },
+            { $addToSet: { tags: cleanTag, tag_ids: tagDoc._id } }
+        );
+        const matchedCount = result.matchedCount ?? 0;
+        const modifiedCount = result.modifiedCount ?? 0;
+        if (matchedCount === 0) {
+            return res.status(404).json({ success: false, error: 'no_matching_products', modified_count: 0 });
+        }
+        if (needCountUpdate > 0) {
+            await Tag.updateOne({ _id: tagDoc._id }, { $inc: { product_count: needCountUpdate } });
+        }
+        await Promise.all([
+            ...validIds.map((id: mongoose.Types.ObjectId) => ProductsService.invalidateProductCache(id.toString())),
+            cacheService.del('vietcraft:tags:approved'),
+            cacheService.del('vietcraft:tags:stats'),
+            cacheService.delByPattern('vietcraft:tags:*'),
+        ]);
+        return res.json({ success: true, modified_count: modifiedCount });
+    } catch (error: any) {
+        return res.status(500).json({ success: false, error: error?.message || 'Lỗi khi gắn thẻ vào sản phẩm.' });
+    }
+});
+
+// Lưu/Bỏ lưu ý tưởng sản phẩm theo dịp (cập nhật nguyên tử vào settings gian hàng)
+router.post('/forecast/seasonal/save-idea', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { idea_id } = req.body || {};
+        if (!isSafeKey(idea_id, 200)) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'idea_id' });
+        }
+        if (!viewer.analysed_shop_id || !mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            return res.status(404).json({ success: false, error: 'shop_not_found' });
+        }
+        const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
+        const existing = await Shop.findOne(
+            { _id: shopId, 'settings.seasonal_preferences.saved_ideas': idea_id },
+            { _id: 1 }
+        ).lean();
+
+        let updated;
+        if (existing) {
+            updated = await Shop.findByIdAndUpdate(
+                shopId,
+                { $pull: { 'settings.seasonal_preferences.saved_ideas': idea_id } },
+                { new: true, select: 'settings.seasonal_preferences.saved_ideas' }
+            ).lean();
+        } else {
+            updated = await Shop.findOneAndUpdate(
+                {
+                    _id: shopId,
+                    [`settings.seasonal_preferences.saved_ideas.${MAX_SAVED_IDEAS - 1}`]: { $exists: false },
+                },
+                { $addToSet: { 'settings.seasonal_preferences.saved_ideas': idea_id } },
+                { new: true, select: 'settings.seasonal_preferences.saved_ideas' }
+            ).lean();
+            if (!updated) {
+                const shopExists = await Shop.exists({ _id: shopId });
+                if (!shopExists) {
+                    return res.status(404).json({ success: false, error: 'shop_not_found' });
+                }
+                return res.status(400).json({ success: false, error: 'saved_ideas_limit_reached' });
+            }
+        }
+        if (!updated) {
+            return res.status(404).json({ success: false, error: 'shop_not_found' });
+        }
+        const savedIdeas: string[] = updated.settings?.seasonal_preferences?.saved_ideas || [];
+        return res.json({ success: true, saved_ideas: savedIdeas });
+    } catch (error: any) {
+        return res.status(500).json({ success: false, error: error?.message || 'Lỗi khi lưu ý tưởng theo dịp.' });
+    }
+});
+
+// Lưu bản chỉnh sửa trực tiếp của seller cho 1 ý tưởng mùa vụ
+router.post('/forecast/seasonal/idea-draft', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { idea_id, title, concept, price_vnd, tags } = req.body || {};
+        if (!isSafeKey(idea_id, 200)) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'idea_id' });
+        }
+        if (!viewer.analysed_shop_id || !mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            return res.status(404).json({ success: false, error: 'shop_not_found' });
+        }
+        const cleanTitle = typeof title === 'string' ? title.trim().slice(0, 200) : '';
+        const cleanConcept = typeof concept === 'string' ? concept.trim().slice(0, 1000) : '';
+        const cleanTags = Array.isArray(tags)
+            ? tags.slice(0, 20).map((t: unknown) => String(t).trim().slice(0, 50)).filter(Boolean)
+            : [];
+        const parsedPrice = Number(price_vnd);
+        const draft = {
+            title: cleanTitle,
+            concept: cleanConcept,
+            price_vnd: Number.isFinite(parsedPrice) && parsedPrice > 0 ? parsedPrice : undefined,
+            tags: cleanTags,
+            updated_at: new Date().toISOString(),
+        };
+
+        const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
+        const safeIdeaKey = toSafeMapKey(idea_id);
+        const updated = await Shop.findOneAndUpdate(
+            mapCapFilter(shopId, 'idea_drafts', safeIdeaKey, MAX_DRAFTS_OR_REVIEWS),
+            {
+                $set: { [`settings.seasonal_preferences.idea_drafts.${safeIdeaKey}`]: draft },
+                $addToSet: { 'settings.seasonal_preferences.saved_ideas': idea_id },
+            },
+            { new: true, select: 'settings.seasonal_preferences' }
+        ).lean();
+        if (!updated) return limitOrMissing(res, shopId, 'idea_drafts_limit_reached');
+        const prefs = updated.settings?.seasonal_preferences || {};
+        const drafts = prefs.idea_drafts || {};
+        return res.json({ success: true, idea_drafts: drafts, saved_ideas: prefs.saved_ideas || [] });
+    } catch (error: any) {
+        return res.status(500).json({ success: false, error: error?.message || 'Lỗi khi lưu bản chỉnh sửa ý tưởng.' });
+    }
+});
+
+// Lưu đánh giá thành quả sau dịp của seller
+router.post('/forecast/seasonal/review', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { camp_id, rating, note } = req.body || {};
+        if (!isSafeKey(camp_id, 80)) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'camp_id' });
+        }
+        if (typeof rating !== 'string' || !ALLOWED_RATINGS.has(rating)) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'rating' });
+        }
+        if (!viewer.analysed_shop_id || !mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            return res.status(404).json({ success: false, error: 'shop_not_found' });
+        }
+        const reviewEntry = {
+            rating,
+            note: typeof note === 'string' ? note.trim().slice(0, 1000) : '',
+            updated_at: new Date().toISOString(),
+        };
+        const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
+        const safeCampKey = toSafeMapKey(camp_id);
+        const updated = await Shop.findOneAndUpdate(
+            mapCapFilter(shopId, 'occasion_reviews', safeCampKey, MAX_DRAFTS_OR_REVIEWS),
+            { $set: { [`settings.seasonal_preferences.occasion_reviews.${safeCampKey}`]: reviewEntry } },
+            { new: true, select: 'settings.seasonal_preferences.occasion_reviews' }
+        ).lean();
+        if (!updated) return limitOrMissing(res, shopId, 'occasion_reviews_limit_reached');
+        return res.json({
+            success: true,
+            occasion_reviews: updated.settings?.seasonal_preferences?.occasion_reviews || {},
+        });
+    } catch (error: any) {
+        return res.status(500).json({ success: false, error: error?.message || 'Lỗi khi lưu đánh giá thành quả.' });
+    }
+});
+
+// Cập nhật tiến độ checklist mốc thời gian (cập nhật nguyên tử vào settings gian hàng)
+router.post('/forecast/seasonal/milestone', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const viewer = await viewerOrReply(req, res);
+        if (!viewer) return;
+        const { milestone_idx, is_done, camp_id, idea_id } = req.body || {};
+        if (typeof milestone_idx !== 'number' || !Number.isInteger(milestone_idx) || milestone_idx < 0 || milestone_idx > 50) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'milestone_idx' });
+        }
+        if (camp_id !== undefined && camp_id !== null && !isSafeKey(camp_id, 80)) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'camp_id' });
+        }
+        if (idea_id !== undefined && idea_id !== null && !isSafeKey(idea_id, 120)) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: 'idea_id' });
+        }
+        if (!viewer.analysed_shop_id || !mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id)) {
+            return res.status(404).json({ success: false, error: 'shop_not_found' });
+        }
+        const keyParts: string[] = [];
+        if (camp_id) keyParts.push(camp_id);
+        if (idea_id) keyParts.push(idea_id);
+        keyParts.push(String(milestone_idx));
+        const key = toSafeMapKey(keyParts.join('_'));
+        const shopId = new mongoose.Types.ObjectId(viewer.analysed_shop_id);
+        const updated = await Shop.findOneAndUpdate(
+            mapCapFilter(shopId, 'checked_milestones', key, MAX_MILESTONES),
+            { $set: { [`settings.seasonal_preferences.checked_milestones.${key}`]: Boolean(is_done) } },
+            { new: true, select: 'settings.seasonal_preferences.checked_milestones' }
+        ).lean();
+        if (!updated) return limitOrMissing(res, shopId, 'checked_milestones_limit_reached');
+        return res.json({
+            success: true,
+            checked_milestones: updated.settings?.seasonal_preferences?.checked_milestones || {},
+        });
+    } catch (error: any) {
+        return res.status(500).json({ success: false, error: error?.message || 'Lỗi khi cập nhật tiến độ mốc.' });
     }
 });
 
@@ -277,7 +552,7 @@ for (const route of ROUTES) {
 
             let body: Record<string, unknown> | undefined;
             if (route.forwardShopIdBody) {
-                const target = req.body?.shop_id;
+                const target = req.params.shopId ?? req.body?.shop_id;
                 if (!AiGatewayService.isValidId(target)) {
                     return res.status(400).json({ error: 'invalid_param', field: 'shop_id' });
                 }
@@ -293,8 +568,7 @@ for (const route of ROUTES) {
             const viewer = await viewerOrReply(req, res);
             if (!viewer) return;
 
-            // Gian hàng thật theo dõi đối thủ bằng follow của sàn. Chỉ shop mẫu mới chuyển sang
-            // service AI (danh sách riêng trong dữ liệu mồi).
+            // Gian hàng thật theo dõi bằng follow của sàn; chỉ shop mẫu mới gọi AI.
             if (route.forwardShopIdBody && !viewer.demo) {
                 return await replyLiveTracking(route.method, req.user!.id, String(body!.shop_id), viewer, res);
             }
@@ -305,6 +579,7 @@ for (const route of ROUTES) {
                 shopId: viewer.analysed_shop_id!,
                 query,
                 body,
+                timeoutMs: route.timeoutMs,
             });
 
             if (result.status === 401) {
@@ -314,7 +589,7 @@ for (const route of ROUTES) {
             // Phản hồi thành công giữ nguyên vỏ {data, meta, error} của hợp đồng AI và gắn thêm
             // `viewer`, để mọi màn hình biết đang xem shop thật hay shop mẫu.
             if (result.status < 400 && result.body && result.body.data && route.path === '/forecast/seasonal') {
-                await enrichSeasonalData(result.body.data, req, viewer);
+                await SeasonalAnalyticsService.enrichSeasonalData(result.body.data, req, viewer);
             }
 
             const payload = result.status < 400 && result.body && typeof result.body === 'object'

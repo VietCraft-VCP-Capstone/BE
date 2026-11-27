@@ -30,6 +30,8 @@ const ProductVariantSchema = new Schema<IProductVariant>({
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
+ProductVariantSchema.index({ updated_at: 1 });
+
 export async function syncProductDenorm(productId: mongoose.Types.ObjectId | string) {
     if (!productId) return;
     try {

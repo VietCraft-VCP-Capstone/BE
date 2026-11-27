@@ -28,6 +28,7 @@ export interface IRefundRequest extends Document {
     sla_deadlines: { seller_deadline: Date; printer_deadline?: Date };
     execution_status: 'NOT_STARTED' | 'PROCESSING' | 'SUCCEEDED' | 'FAILED';
     execution_error?: string;
+    refund_bank_info?: { bank_name: string; account_holder: string; account_number: string };
     created_at: Date;
     updated_at: Date;
 }
@@ -36,6 +37,12 @@ const responseSchema = new Schema({
     decision: { type: String, enum: ['APPROVE', 'REJECT'], required: true },
     note: { type: String, maxlength: 1000 },
     responded_at: { type: Date, required: true },
+}, { _id: false });
+
+const bankInfoSchema = new Schema({
+    bank_name: { type: String, trim: true, maxlength: 100 },
+    account_holder: { type: String, trim: true, maxlength: 100 },
+    account_number: { type: String, trim: true, maxlength: 20 },
 }, { _id: false });
 
 const RefundRequestSchema = new Schema<IRefundRequest>({
@@ -73,6 +80,7 @@ const RefundRequestSchema = new Schema<IRefundRequest>({
     },
     execution_status: { type: String, enum: ['NOT_STARTED', 'PROCESSING', 'SUCCEEDED', 'FAILED'], default: 'NOT_STARTED' },
     execution_error: { type: String },
+    refund_bank_info: { type: bankInfoSchema },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 RefundRequestSchema.index({ status: 1, 'sla_deadlines.seller_deadline': 1 });

@@ -1,9 +1,12 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
+export type TrafficSource = 'organic' | 'campaign' | 'social' | 'direct' | 'repeat';
+
 export interface IProductEvent extends Document {
     product_id: mongoose.Types.ObjectId;
     session_id: string;
     event_type: 'view' | 'add_to_cart';
+    traffic_source?: TrafficSource;
     user_id?: mongoose.Types.ObjectId;
     user_agent: string;
     ip_address: string;
@@ -15,6 +18,7 @@ const ProductEventSchema = new Schema<IProductEvent>({
     product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true, index: true },
     session_id: { type: String, required: true, index: true },
     event_type: { type: String, enum: ['view', 'add_to_cart'], required: true, index: true },
+    traffic_source: { type: String, enum: ['organic', 'campaign', 'social', 'direct', 'repeat'], required: false, index: true },
     user_id: { type: Schema.Types.ObjectId, ref: 'User', index: true },
     user_agent: { type: String, required: true },
     ip_address: { type: String, required: true, index: true },

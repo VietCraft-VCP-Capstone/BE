@@ -1,11 +1,36 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IAxis {
-    conversion?: number | null;
-    rating?: number | null;
-    content?: number | null;
-    inventory?: number | null;
-    freshness?: number | null;
+    image?: number | null;
+    description?: number | null;
+    tags?: number | null;
+    review?: number | null;
+    price?: number | null;
+}
+
+export type HealthMethod = 'rule' | 'heuristic' | 'ml_unvalidated' | 'weak_supervision';
+
+export interface ICoverage {
+    evaluated: number;
+    total: number;
+}
+
+export interface IBlocker {
+    field: string;
+    message: string;
+}
+
+export interface IRecommendation {
+    id: string;
+    kind: 'blocker' | 'search' | 'image' | 'info' | 'price';
+    title: string;
+    why: string;
+    action: string;
+    field: string | null;
+    effort: number;
+    gain_points: number;
+    method: HealthMethod;
+    evidence: Record<string, unknown>;
 }
 
 export interface ITodo {
@@ -17,40 +42,38 @@ export interface ITodo {
     impact?: number;
 }
 
-export interface IConversionDetail {
-    views_30d: number;
-    orders_30d: number;
-    min_views: number;
-    conversion_rate: number | null;
-    baseline_rate: number | null;
-    baseline_scope: 'category' | 'platform' | null;
-    reason: 'not_enough_views' | 'not_enough_peers' | 'no_orders_in_baseline' | null;
-}
-
 export interface IListingHealthScore extends Document {
     product_id: mongoose.Types.ObjectId;
     date: Date;
+    title?: string;
+    thumbnail?: string | null;
     score: number | null;
     status: 'good' | 'needs_improvement' | 'poor' | null;
     axes: IAxis;
     axes_missing: string[];
     todos: ITodo[];
+    warnings?: ITodo[];
     content_hash: string;
-    content_changed_at?: Date;
     model_version: string;
     computed_at: Date;
     inputs_hash?: string;
-    conversion_detail?: IConversionDetail | null;
+    coverage?: ICoverage | null;
+    factors?: Record<string, unknown>[];
+    blockers?: IBlocker[];
+    recommendations?: IRecommendation[];
+    search?: Record<string, unknown> | null;
+    versions?: Record<string, unknown> | null;
+    content_snapshot?: Record<string, unknown> | null;
     created_at: Date;
     updated_at: Date;
 }
 
 const AxisSchema = new Schema<IAxis>({
-    conversion: { type: Number, default: null },
-    rating: { type: Number, default: null },
-    content: { type: Number, default: null },
-    inventory: { type: Number, default: null },
-    freshness: { type: Number, default: null }
+    image: { type: Number, default: null },
+    description: { type: Number, default: null },
+    tags: { type: Number, default: null },
+    review: { type: Number, default: null },
+    price: { type: Number, default: null }
 }, { _id: false });
 
 const TodoSchema = new Schema<ITodo>({
@@ -65,17 +88,25 @@ const TodoSchema = new Schema<ITodo>({
 const ListingHealthScoreSchema = new Schema<IListingHealthScore>({
     product_id: { type: Schema.Types.ObjectId, ref: 'Product', required: true, index: true },
     date: { type: Date, required: true, index: true },
+    title: { type: String, default: null },
+    thumbnail: { type: String, default: null },
     score: { type: Number, default: null },
     status: { type: String, enum: ['good', 'needs_improvement', 'poor'], default: null },
     axes: { type: AxisSchema, required: true, default: {} },
     axes_missing: { type: [String], default: [] },
     todos: { type: [TodoSchema], default: [] },
+    warnings: { type: [Schema.Types.Mixed], default: [] },
     content_hash: { type: String, required: true },
-    content_changed_at: { type: Date, default: null },
-    model_version: { type: String, required: true, default: 'health-1.0' },
+    model_version: { type: String, required: true, default: 'health-3.1' },
     computed_at: { type: Date, required: true },
     inputs_hash: { type: String, default: null },
-    conversion_detail: { type: Schema.Types.Mixed, default: null }
+    coverage: { type: Schema.Types.Mixed, default: null },
+    factors: { type: [Schema.Types.Mixed], default: [] },
+    blockers: { type: [Schema.Types.Mixed], default: [] },
+    recommendations: { type: [Schema.Types.Mixed], default: [] },
+    search: { type: Schema.Types.Mixed, default: null },
+    versions: { type: Schema.Types.Mixed, default: null },
+    content_snapshot: { type: Schema.Types.Mixed, default: null }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });

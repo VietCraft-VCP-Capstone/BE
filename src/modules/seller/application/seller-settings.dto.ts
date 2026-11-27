@@ -25,9 +25,9 @@ export interface ShippingCarrierItemDTO {
 export type ShippingPricingType = 'FLAT_RATE' | 'ZONE_BASED';
 
 export interface ZoneShippingRatesDTO {
-    intraProvince: number; // Nội tỉnh
-    intraRegion: number;   // Nội vùng
-    interRegion: number;   // Liên vùng
+    intraProvince: number; 
+    intraRegion: number;   
+    interRegion: number;  
 }
 
 export interface SellerShippingSettingsDTO {
@@ -79,6 +79,7 @@ export interface SellerNotificationSettingsDTO {
     analytics: {
         weeklyReport: NotificationChannelSettingDTO;
         promotions: NotificationChannelSettingDTO;
+        performanceAlert: NotificationChannelSettingDTO;
     };
 }
 
