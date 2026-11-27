@@ -101,3 +101,38 @@ export async function fetchPopularKeywords(q: string, limit = 4): Promise<string
     ]);
     return rows.map((r: any) => r.keyword);
 }
+
+const RECENT_SEARCH_DAYS = 30;
+
+/**
+ * "Mọi người đang tìm" trên VietCraft: từ khoá do người dùng thật gõ (SearchLog) trong 30 ngày, có kết quả,
+ * được ít nhất MIN_USERS người khác nhau tìm, bỏ từ khoá bị cấm. Không pha dữ liệu xu hướng thị trường.
+ */
+export async function fetchPopularSearches(limit: number, bannedKeywords: string[]): Promise<string[]> {
+    const since = new Date(Date.now() - RECENT_SEARCH_DAYS * 24 * 60 * 60 * 1000);
+    const rows = await SearchLog.aggregate([
+        { $match: { result_count: { $gt: 0 }, user_id: { $exists: true, $ne: null }, created_at: { $gte: since } } },
+        {
+            $group: {
+                _id: { $toLower: '$keyword' },
+                keyword: { $max: '$keyword' },
+                users: { $addToSet: '$user_id' },
+                searches: { $sum: 1 },
+            },
+        },
+        { $addFields: { userCount: { $size: '$users' } } },
+        { $match: { userCount: { $gte: MIN_USERS } } },
+        { $sort: { userCount: -1, searches: -1 } },
+        { $limit: limit * 4 },
+    ]);
+    const bannedNorms = bannedKeywords.map(normalizeVi).filter(Boolean);
+    const picked = new Map<string, string>();
+    for (const r of rows) {
+        const kw = nfcLower(String(r.keyword || '')).replace(/\s+/g, ' ').trim();
+        const norm = normalizeVi(kw);
+        if (!norm || kw.length > MAX_LEN || bannedNorms.some(b => norm.includes(b))) continue;
+        const prev = picked.get(norm);
+        if (prev === undefined || (!hasTone(prev) && hasTone(kw))) picked.set(norm, kw);
+    }
+    return [...picked.values()].slice(0, limit);
+}

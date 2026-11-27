@@ -16,7 +16,7 @@ import { searchInsights } from '../application/listing-search-gaps.service';
 import { listingImpact, recordHealthAction } from '../application/listing-impact.service';
 import { listingRanking } from '../application/listing-ranking.service';
 import { parsePreviewBody, PreviewBodyResult } from '../application/health-preview';
-import { parseIntelPreview } from '../application/intel-preview';
+import { parseHealthDraft } from '../application/health-draft';
 import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 
 type Method = 'get' | 'post' | 'delete';
@@ -48,18 +48,11 @@ function parseRecognizeImage(raw: unknown): PreviewBodyResult<Record<string, unk
 
 const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/overview', ai: () => '/api/analytics/shop/overview', query: ['timeRange', 'to'] },
-    { method: 'get', path: '/listings/intel', ai: () => '/api/analytics/listings/intel' },
-    { method: 'get', path: '/listings/:id/intel', ai: p => `/api/analytics/listings/${p.id}/intel`, query: ['date'] },
     { method: 'get', path: '/listings/:id/health', ai: p => `/api/analytics/listings/${p.id}/health` },
-    { method: 'post', path: '/listings/intel/preview', ai: () => '/api/analytics/listings/intel/preview', parseBody: parseIntelPreview },
-    { method: 'get', path: '/trends/calendar', ai: () => '/api/analytics/trends/calendar', query: ['category'] },
+    { method: 'post', path: '/listings/health/draft', ai: () => '/api/analytics/listings/health/draft', parseBody: parseHealthDraft },
     { method: 'get', path: '/listings/:id/timeseries', ai: p => `/api/analytics/listings/${p.id}/timeseries`, query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/conversion', ai: p => `/api/analytics/listings/${p.id}/conversion` },
     { method: 'post', path: '/listings/:id/health/preview', ai: p => `/api/analytics/listings/${p.id}/health/preview`, parseBody: parsePreviewBody },
-    { method: 'get', path: '/listings/:id/health/ml', ai: p => `/api/analytics/listings/${p.id}/health/ml` },
-    { method: 'get', path: '/listings/:id/quality', ai: p => `/api/analytics/listings/${p.id}/quality` },
-    { method: 'post', path: '/listings/:id/quality/audit', ai: p => `/api/analytics/listings/${p.id}/quality/audit` },
-    { method: 'post', path: '/listings/:id/quality/recheck', ai: p => `/api/analytics/listings/${p.id}/quality/recheck` },
     { method: 'get', path: '/alerts', ai: () => '/api/notifications/alerts', query: ['period'] },
     { method: 'get', path: '/money', ai: () => '/api/analytics/shop/money', query: ['timeRange', 'from_date', 'to_date'] },
     { method: 'get', path: '/money/advice', ai: () => '/api/analytics/shop/money/advice', query: ['timeRange', 'from_date', 'to_date'] },
@@ -271,7 +264,7 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
     }
 });
 
-router.post('/listings/intel/preview', userRateLimit(20, 60_000, 'Bạn thử quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
+router.post('/listings/health/draft', userRateLimit(20, 60_000, 'Bạn thử quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 // Mỗi lần nhận diện ảnh tốn hạn mức Gemini
 router.post('/product/recognize-image', userRateLimit(10, 60_000, 'Bạn nhận diện ảnh quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 
