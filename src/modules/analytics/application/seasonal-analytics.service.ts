@@ -1175,6 +1175,25 @@ Yêu cầu nghiệp vụ:
         const activePlan = planViewFor(plansByKey, activeCampId, planEventYear, legacyPrefs);
         const savedIdeas: string[] = activePlan.saved_ideas;
 
+        // Cập nhật mốc thời gian vào các kế hoạch đã có (để job nhắc việc biết khi nào nhắc)
+        if (planShopId && plansByKey.size > 0) {
+            const ops: any[] = [];
+            for (const camp of (data.all_campaigns || []) as any[]) {
+                const year = eventYearOf(camp);
+                const ow = camp.occasion_window || {};
+                const pl = year != null ? plansByKey.get(planLookupKey(camp.id, year)) : null;
+                if (!pl || !ow.traction_start || !ow.cut_off_date || !ow.event_date) continue;
+                const milestones = {
+                    event_name: camp.name, traction_start: ow.traction_start, cut_off_date: ow.cut_off_date,
+                    event_date: ow.event_date, post_event_end: ow.post_event_end || ow.event_date,
+                };
+                if (JSON.stringify(pl.milestones || {}) !== JSON.stringify(milestones)) {
+                    ops.push({ updateOne: { filter: { _id: pl._id }, update: { $set: { milestones } } } });
+                }
+            }
+            if (ops.length) await SeasonalPlan.bulkWrite(ops).catch(() => null);
+        }
+
         // Mốc đã tick của mọi dịp trong lịch, mỗi dịp lấy đúng kỳ (năm) của nó; khóa giữ dạng FE đang dùng `${camp}_${...}`
         const checkedMilestones: Record<string, boolean> = {};
         for (const camp of (data.all_campaigns || []) as any[]) {

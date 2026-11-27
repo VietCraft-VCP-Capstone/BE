@@ -9,6 +9,10 @@ export interface ISeasonalPlan extends Document {
     idea_drafts: Record<string, any>;
     checked_milestones: Record<string, boolean>;
     review?: { rating: 'good' | 'neutral' | 'poor'; note: string; updated_at: Date } | null;
+    /** mốc thời gian của kỳ (ISO date) để nhắc việc; cập nhật mỗi khi seller mở trang */
+    milestones?: { event_name?: string; traction_start?: string; cut_off_date?: string; event_date?: string; post_event_end?: string };
+    /** mốc đã nhắc: { traction_start | cutoff_soon | post_event: ISO time } */
+    reminded?: Record<string, string>;
     created_at: Date;
     updated_at: Date;
 }
@@ -28,6 +32,8 @@ const SeasonalPlanSchema = new Schema<ISeasonalPlan>({
         }, { _id: false }),
         default: null,
     },
+    milestones: { type: Schema.Types.Mixed, default: undefined },
+    reminded: { type: Schema.Types.Mixed, default: {} },
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
     minimize: false,
@@ -35,5 +41,6 @@ const SeasonalPlanSchema = new Schema<ISeasonalPlan>({
 
 SeasonalPlanSchema.index({ shop_id: 1, event_key: 1, event_year: 1 }, { unique: true });
 SeasonalPlanSchema.index({ shop_id: 1, event_year: 1 });
+SeasonalPlanSchema.index({ 'milestones.post_event_end': 1 });
 
 export const SeasonalPlan = mongoose.model<ISeasonalPlan>('SeasonalPlan', SeasonalPlanSchema, 'seasonal_plans');
