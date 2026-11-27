@@ -7,7 +7,6 @@ import { Shop } from '../../product/infrastructure/models/shop.model';
 import { Order } from '../../order/infrastructure/models/order.model';
 import { BlankClient, Blank } from '../../product/application/blank-client.service';
 import { ProductEvent } from '../infrastructure/models/product-event.model';
-import { Category } from '../../category/infrastructure/models/category.model';
 import { cacheService } from '../../../shared/services/cache.service';
 import {
     isValidDemandOrder,
@@ -463,105 +462,11 @@ Yêu cầu nghiệp vụ:
         const shopRealOrders: any[] = (initialRealOrders as any[]).filter(isValidDemandOrder);
         const shop8WeeksOrders = shopRealOrders.filter(o => new Date(o.created_at).getTime() >= Date.now() - 56 * 86400000).length;
 
-        // Tự động nhận diện ngành hàng chính của gian hàng (hỗ trợ đầy đủ các ngành hàng TMĐT tổng hợp)
-        let detectedSlug = 'tong-hop';
-        let detectedName = 'Thương mại điện tử tổng hợp';
-
-        if (shopProducts.length > 0) {
-            // 1. Ưu tiên đối soát từ danh mục chính thức (Category Collection) nếu sản phẩm có gắn category_ids
-            const categoryIdCount: Record<string, number> = {};
-            for (const p of shopProducts) {
-                if (Array.isArray(p.category_ids)) {
-                    for (const cId of p.category_ids) {
-                        const idStr = String(cId);
-                        categoryIdCount[idStr] = (categoryIdCount[idStr] || 0) + 1;
-                    }
-                }
-            }
-
-            const sortedCatIds = Object.entries(categoryIdCount).sort((a, b) => b[1] - a[1]);
-            if (sortedCatIds.length > 0) {
-                try {
-                    const topCatDoc = await Category.findById(sortedCatIds[0][0]).lean();
-                    if (topCatDoc && topCatDoc.name) {
-                        detectedName = topCatDoc.name;
-                        detectedSlug = topCatDoc.slug || 'tong-hop';
-                    }
-                } catch {
-                    // Fallback sang nhận diện từ khóa đa ngành hàng bên dưới
-                }
-            }
-
-            // 2. Phân loại theo bộ từ khóa đa ngành hàng chuẩn sàn TMĐT (Shopee, Amazon, Etsy, Lazada)
-            if (detectedSlug === 'tong-hop') {
-                const catScores: Record<string, number> = {
-                    'thoi-trang': 0,
-                    'sac-dep': 0,
-                    'dien-tu': 0,
-                    'nha-cua-doi-song': 0,
-                    'me-be': 0,
-                    'bach-hoa': 0,
-                    'the-thao': 0,
-                    'van-phong-pham': 0,
-                    'phu-kien': 0,
-                    'thu-cong-qua-tang': 0
-                };
-
-                for (const p of shopProducts) {
-                    const text = `${p.title || ''} ${(p.categories || []).join(' ')} ${(p.tags || []).join(' ')}`.toLowerCase();
-                    if (/áo|quần|váy|đầm|hoodie|sweater|thời trang|tweed|nỉ|jacket|khoác|quần bò|jeans|sơ mi|blazer|giày|dép|sneaker|guốc|sandal/.test(text)) {
-                        catScores['thoi-trang'] += 2;
-                    }
-                    if (/mỹ phẩm|son|kem|serum|phấn|nước hoa|sữa rửa mặt|toner|dưỡng da|chăm sóc da|makeup|skincare|tóc|dầu gội|sữa tắm|body|mặt nạ/.test(text)) {
-                        catScores['sac-dep'] += 2;
-                    }
-                    if (/điện tử|công nghệ|điện thoại|laptop|tai nghe|sạc|cáp|pin|loa|bluetooth|ốp lưng|chuột|bàn phím|máy ảnh|cường lực|smartwatch|đồng hồ thông minh/.test(text)) {
-                        catScores['dien-tu'] += 2;
-                    }
-                    if (/gia dụng|nhà cửa|đời sống|bếp|nồi|chảo|bát|đĩa|cốc|ly|gốm|sứ|bình|thớt|chăn|ga|gối|nệm|tủ|bàn|ghế|đèn|khăn tắm|thùng rác|hút bụi|decor/.test(text)) {
-                        catScores['nha-cua-doi-song'] += 2;
-                    }
-                    if (/mẹ|bé|sơ sinh|bỉm|tã|sữa|bình sữa|đồ chơi|xe đẩy|nôi|quần áo trẻ em|đồ bầu|ăn dặm|núm ti/.test(text)) {
-                        catScores['me-be'] += 2;
-                    }
-                    if (/thực phẩm|bách hóa|đồ ăn|bánh|kẹo|snack|khô bò|hạt|mứt|trà|cà phê|gia vị|nước tương|mì|gạo|yến|ngũ cốc|đặc sản/.test(text)) {
-                        catScores['bach-hoa'] += 2;
-                    }
-                    if (/thể thao|dã ngoại|gym|yoga|bóng đá|cầu lông|vợt|lều|balo du lịch|vali|bình nước thể thao|chạy bộ|đồ bơi/.test(text)) {
-                        catScores['the-thao'] += 2;
-                    }
-                    if (/văn phòng phẩm|sách|vở|sổ|bút|thước|họa cụ|màu vẽ|giấy in|truyện|bìa/.test(text)) {
-                        catScores['van-phong-pham'] += 2;
-                    }
-                    if (/trang sức|vòng|dây chuyền|nhẫn|khuyên tai|lắc tay|đồng hồ|mắt kính|kính râm|thắt lưng|dây nịt|túi xách|ví|bóp|nón|mũ/.test(text)) {
-                        catScores['phu-kien'] += 2;
-                    }
-                    if (/thủ công|handmade|quà lưu niệm|quà tặng|mây tre|đan lát|khắc gỗ|thêu|tranh đính đá/.test(text)) {
-                        catScores['thu-cong-qua-tang'] += 2;
-                    }
-                }
-
-                const bestCat = Object.entries(catScores).sort((a, b) => b[1] - a[1])[0];
-                if (bestCat && bestCat[1] > 0) {
-                    detectedSlug = bestCat[0];
-                    const nameMap: Record<string, string> = {
-                        'thoi-trang': 'Thời trang & May mặc',
-                        'sac-dep': 'Sức khỏe & Sắc đẹp',
-                        'dien-tu': 'Thiết bị điện tử & Phụ kiện công nghệ',
-                        'nha-cua-doi-song': 'Nhà cửa & Đời sống',
-                        'me-be': 'Mẹ & Bé',
-                        'bach-hoa': 'Bách hóa & Thực phẩm',
-                        'the-thao': 'Thể thao & Dã ngoại',
-                        'van-phong-pham': 'Nhà sách & Văn phòng phẩm',
-                        'phu-kien': 'Phụ kiện & Trang sức',
-                        'thu-cong-qua-tang': 'Quà tặng & Thủ công mỹ nghệ',
-                        'tong-hop': 'Thương mại điện tử tổng hợp'
-                    };
-                    detectedName = nameMap[detectedSlug] || 'Thương mại điện tử tổng hợp';
-                }
-            }
-        }
-        data.seller_category = { slug: detectedSlug, name: detectedName };
+        // Nhóm ngành của shop do AI xác định từ danh mục thật của sản phẩm (một bộ mã chung, app/core/category_groups.py)
+        const aiCategory = data.seller_category || {};
+        const detectedSlug: string = aiCategory.slug || data.selected_category_slug || 'tong-hop';
+        const detectedName: string = aiCategory.name || 'Toàn ngành hàng TMĐT';
+        data.seller_category = { slug: detectedSlug, name: detectedName, source: aiCategory.source || 'none' };
 
         if (data.events && Array.isArray(data.events)) {
             for (const event of data.events) {
