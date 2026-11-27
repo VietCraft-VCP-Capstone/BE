@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import path from 'path';
 import { SellerKycService } from '../application/seller-kyc.service';
-import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { authenticate, requireRole, AuthenticatedRequest, checkToken } from '../../../app/middleware/auth.middleware';
 import { uploadKycDocument, saveEncryptedKycFile, verifyKycFileOwnership } from '../../../shared/upload/kyc-storage.middleware';
 import { SellerApplication } from '../infrastructure/models/seller-application.model';
 import { generatePresignedToken } from '../../../shared/utils/crypto.service';
@@ -134,13 +134,12 @@ router.get('/files/:filename', async (req: any, res: Response) => {
         let role = '';
         let userId = '';
         if (authHeader && authHeader.startsWith('Bearer ')) {
-            try {
-                const jwt = require('jsonwebtoken');
-                const { config } = require('../../../app/config');
-                const decoded = jwt.verify(authHeader.split(' ')[1], config.jwtSecret);
-                role = decoded.role;
-                userId = decoded.id;
-            } catch { }
+            // Kiểm cả tài khoản trong DB: admin bị khóa/hạ quyền với token cũ không được xem ảnh CCCD
+            const checked = await checkToken(authHeader.split(' ')[1]);
+            if (checked.ok) {
+                role = checked.user.role;
+                userId = checked.user.id;
+            }
         }
 
         const isAllowed = SellerKycService.isAuthorizedToAccessFile(filename, token, role, userId);

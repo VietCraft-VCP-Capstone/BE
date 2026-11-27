@@ -25,7 +25,8 @@ export class AuthError extends Error {
 }
 
 /** Role được phép TỰ đăng ký. ADMIN cố tình không nằm ở đây: không ai tự phong admin. */
-const SELF_SIGNUP_ROLES = ['BUYER', 'SELLER'] as const;
+// Chỉ tự đăng ký làm người mua: vai trò người bán chỉ có khi admin duyệt hồ sơ KYC (approveSellerApplication)
+const SELF_SIGNUP_ROLES = ['BUYER'] as const;
 type SelfSignupRole = typeof SELF_SIGNUP_ROLES[number];
 
 function generateOtp(): string {
@@ -56,23 +57,23 @@ export function assertPassword(password?: string): string {
     return value;
 }
 
-/** Chỉ chấp nhận BUYER/SELLER. Truyền ADMIN (hay gì khác) là lỗi 400, không âm thầm hạ cấp. */
+/** Chỉ chấp nhận BUYER. Truyền SELLER/ADMIN (hay gì khác) là lỗi 400, không âm thầm hạ cấp. */
 function normalizeSignupRole(role?: string): SelfSignupRole {
     const value = String(role || 'BUYER').trim().toUpperCase();
     if (!SELF_SIGNUP_ROLES.includes(value as SelfSignupRole)) {
-        throw new AuthError("Vai trò đăng ký không hợp lệ. Chỉ chấp nhận 'BUYER' hoặc 'SELLER'.", 400, 'VALIDATION_ERROR');
+        throw new AuthError('Vai trò đăng ký không hợp lệ. Tài khoản mới là người mua; muốn bán hàng hãy đăng ký người bán sau khi đăng nhập.', 400, 'VALIDATION_ERROR');
     }
     return value as SelfSignupRole;
 }
 
-function generateToken(payload: { id: string; email: string; role: string }) {
+function generateToken(payload: { id: string; email: string; role: string; tv?: number }) {
     // Normalize role to lowercase so it matches route guards (requireRole(['admin']))
-    const normalized = { ...payload, role: String(payload.role || '').toLowerCase() };
+    const normalized = { ...payload, role: String(payload.role || '').toLowerCase(), tv: payload.tv || 0 };
     return jwt.sign(normalized, config.jwtSecret, { expiresIn: '7d' });
 }
 
 function authResponse(user: any) {
-    const token = generateToken({ id: user._id.toString(), email: user.email, role: user.role });
+    const token = generateToken({ id: user._id.toString(), email: user.email, role: user.role, tv: user.token_version || 0 });
     return { token, user: { id: user._id, email: user.email, name: user.full_name, role: user.role } };
 }
 
@@ -383,6 +384,7 @@ export class AuthService {
         await this.consumeOtp(email, code, 'FORGOT_PASSWORD');
 
         user.password_hash = await bcrypt.hash(newPassword, 12);
+        user.token_version = (user.token_version || 0) + 1;   // đăng xuất mọi phiên cũ (kể cả kẻ đã lấy được token)
         await user.save();
 
         // Dọn mọi mã còn lại của email này
@@ -401,6 +403,7 @@ export class AuthService {
             throw new AuthError('Không tìm thấy người dùng.', 404, 'USER_NOT_FOUND');
         }
         user.is_locked = !user.is_locked;
+        user.token_version = (user.token_version || 0) + 1;   // khóa là có hiệu lực ngay, không đợi token hết hạn
         await user.save();
         return user;
     }

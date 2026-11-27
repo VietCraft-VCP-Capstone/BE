@@ -29,6 +29,8 @@ const UserSchema = new Schema<IUser>({
         default: 'BUYER'
     },
     is_locked: { type: Boolean, default: false },
+    // Tăng mỗi khi khóa/mở khóa hoặc đổi mật khẩu: mọi token phát trước đó hết hiệu lực ngay
+    token_version: { type: Number, default: 0 },
     full_name: { type: String, required: true },
     avatar: { type: String },
     phone: { type: String },

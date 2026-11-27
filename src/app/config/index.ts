@@ -27,6 +27,9 @@ function parseShopMap(raw?: string): Record<string, string> {
 export const config = {
     port: process.env.PORT || 8080,
     nodeEnv: process.env.NODE_ENV || 'development',
+    // Số proxy tin cậy đứng trước BE (Nginx/Caddy ghi đè X-Forwarded-For). Mặc định 0: lấy IP kết nối thật,
+    // nếu tin header khi không có proxy thì kẻ tấn công giả IP và vượt mọi giới hạn tần suất.
+    trustProxy: Math.max(0, Number(process.env.TRUST_PROXY) || 0),
     databaseUrl: process.env.DATABASE_URL || '',
     mongoUri: process.env.MONGO_URI || '',
     mongoDbData: process.env.MONGO_DB_DATA || 'data-collection',

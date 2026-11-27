@@ -40,6 +40,8 @@ export interface IShop extends Document {
     rating_count: number;
     product_diversity_score?: number;
     reputation_score: number;
+    /** Đang xử lý một lệnh rút tiền: khóa để hai request song song không cùng chi */
+    withdrawal_locked_at?: Date | null;
     reputation_tier: ReputationTier;
     clean_streak_orders: number;
     dispute_count_30d: number;
@@ -93,6 +95,7 @@ const ShopSchema = new Schema<IShop>({
     rating_count: { type: Number, default: 0 },
     product_diversity_score: { type: Number, default: 0.0 },
     reputation_score: { type: Number, default: 80, min: 0, max: 100, index: true },
+    withdrawal_locked_at: { type: Date, default: null },
     reputation_tier: { 
         type: String, 
         enum: ['TRUSTED', 'NORMAL', 'WARNING', 'RESTRICTED'], 

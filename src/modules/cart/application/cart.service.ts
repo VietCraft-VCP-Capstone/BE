@@ -4,7 +4,7 @@ import { Product } from '../../product/infrastructure/models/product.model';
 import { ProductVariant } from '../../product/infrastructure/models/product-variant.model';
 import { applySelection, normalizeItemIds, PRODUCT_POPULATE, toUserObjectId, VARIANT_POPULATE } from '../utils';
 import { EventService } from '../../analytics/application/event.service';
-import { assertNotOwnProduct } from '../../product/application/purchase-guard';
+import { assertNotOwnProduct, assertPurchasable, parseQuantity } from '../../product/application/purchase-guard';
 
 export class CartService {
 
@@ -92,15 +92,13 @@ export class CartService {
         const productId = String(payload.productId || payload.product_id || '').trim();
         const variantId = (payload.variantId || payload.variant_id) ? String(payload.variantId || payload.variant_id).trim() : undefined;
         const customNotes = payload.customNotes;
-        const quantity = Math.max(1, Number(payload.quantity) || 1);
+        const quantity = parseQuantity(payload.quantity, 1);
 
         if (!mongoose.Types.ObjectId.isValid(productId)) throw new Error('Sản phẩm không hợp lệ');
-        const product = await Product.findById(productId).select('title listing_status shop_id');
+        const product = await Product.findById(productId).select('title listing_status status is_hidden shop_id');
         if (!product) throw new Error('Sản phẩm không tồn tại');
         await assertNotOwnProduct(userId, product.shop_id);
-        if (product.listing_status === 'INACTIVE' || product.listing_status === 'EXPIRED') {
-            throw new Error(`Sản phẩm "${product.title}" hiện không bán`);
-        }
+        assertPurchasable(product);
 
         let variant = null;
         if (variantId && mongoose.Types.ObjectId.isValid(variantId)) {
@@ -187,8 +185,7 @@ export class CartService {
 
     static async updateQuantity(userId: string, itemId: string, quantity: number) {
         const ownerId = toUserObjectId(userId);
-        const qty = Number(quantity);
-        if (!Number.isFinite(qty) || qty < 1) throw new Error('Số lượng phải lớn hơn 0');
+        const qty = parseQuantity(quantity);
 
         const cart = await Cart.findOne({ user_id: ownerId });
         if (!cart) throw new Error('Sản phẩm không có trong giỏ hàng');

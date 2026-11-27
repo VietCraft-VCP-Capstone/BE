@@ -390,12 +390,14 @@ export class ChatService {
      * Lấy tổng số tin nhắn chưa đọc của user
      */
     async getTotalUnreadCount(userId: string): Promise<number> {
+        // Cộng đúng bộ đếm từng hội thoại mà danh sách chat đang hiện (mở hội thoại là về 0). Trước đây đếm thẳng
+        // chat_messages nên tin cũ còn is_read=false trong hội thoại đã về 0 làm badge kẹt 99+ dù đã đọc hết.
         const userObjId = new mongoose.Types.ObjectId(userId);
-        const count = await ChatMessage.countDocuments({
-            receiver_id: userObjId,
-            is_read: false
-        });
-        return count;
+        const [row] = await Conversation.aggregate([
+            { $match: { participants: userObjId } },
+            { $group: { _id: null, n: { $sum: { $ifNull: [`$unread_counts.${userObjId.toHexString()}`, 0] } } } },
+        ]);
+        return Number(row?.n) || 0;
     }
 }
 
