@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { SellerSettingsService } from '../application/seller-settings.service';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
+import { logger } from '../../../shared/utils/logger';
 
 const router = Router();
 
@@ -38,6 +39,7 @@ router.get('/', authenticate, requireRole(['seller', 'admin']), async (req: Auth
         const settings = await SellerSettingsService.getSettings(req.user!.id);
         res.json(settings);
     } catch (error: any) {
+        logger.error('[SellerSettingsRouter] GET / error: ' + (error?.stack || error?.message || error));
         res.status(500).json({ error: error.message || 'Lỗi khi tải cài đặt gian hàng.' });
     }
 });
@@ -47,6 +49,7 @@ router.put('/', authenticate, requireRole(['seller', 'admin']), async (req: Auth
         const updated = await SellerSettingsService.updateSettings(req.user!.id, req.body);
         res.json(updated);
     } catch (error: any) {
+        logger.error('[SellerSettingsRouter] PUT / error: ' + (error?.stack || error?.message || error));
         res.status(400).json({ error: error.message || 'Lỗi khi lưu cài đặt gian hàng.' });
     }
 });

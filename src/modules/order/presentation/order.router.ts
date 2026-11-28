@@ -3,21 +3,18 @@ import crypto from 'crypto';
 import { OrdersService } from '../application/order.service';
 import { config } from '../../../app/config';
 import { authenticate, AuthenticatedRequest, requireRole } from '../../../app/middleware/auth.middleware';
+import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 
 import { logger } from '../../../shared/utils/logger';
 
 const router = Router();
 
 
-function verifyPaymentCallback(req: Request, res: Response, next: NextFunction) {
+export function verifyPaymentCallback(req: Request, res: Response, next: NextFunction) {
     const expected = config.paymentCallbackSecret;
     if (!expected) {
-        if (config.nodeEnv === 'production') {
-            logger.error('PAYMENT_CALLBACK_SECRET chưa cấu hình — từ chối callback thanh toán.');
-            return res.status(503).json({ error: 'Payment callback chưa được cấu hình' });
-        }
-        logger.warn('PAYMENT_CALLBACK_SECRET chưa cấu hình — callback thanh toán đang KHÔNG được xác thực (chỉ chấp nhận ở development).');
-        return next();
+        logger.error('PAYMENT_CALLBACK_SECRET chưa cấu hình — từ chối callback thanh toán.');
+        return res.status(503).json({ error: 'Payment callback chưa được cấu hình' });
     }
 
     const provided = String(req.headers['x-payment-callback-secret'] || '');
@@ -29,7 +26,7 @@ function verifyPaymentCallback(req: Request, res: Response, next: NextFunction) 
     next();
 }
 
-router.post('/calculate-shipping', async (req: Request, res: Response) => {
+router.post('/calculate-shipping', userRateLimit(30, 60_000, 'Tính phí quá nhiều lần, vui lòng thử lại sau.'), async (req: Request, res: Response) => {
     try {
         const { shopId, address } = req.body;
         const result = await OrdersService.resolveShippingFee(shopId, address);
@@ -39,7 +36,16 @@ router.post('/calculate-shipping', async (req: Request, res: Response) => {
     }
 });
 
-router.post('/', authenticate, async (req: AuthenticatedRequest, res) => {
+router.post('/quote', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res) => {
+    try {
+        const quote = await OrdersService.quoteOrder(req.user!.id, req.body);
+        res.json(quote);
+    } catch (error: any) {
+        res.status(400).json({ error: error.message || 'Không tính được tiền đơn hàng.' });
+    }
+});
+
+router.post('/', authenticate, requireRole(['buyer', 'seller']), async (req: AuthenticatedRequest, res) => {
     try {
         const buyerId = req.user!.id;
         const order = await OrdersService.createOrder(buyerId, req.body);

@@ -1,7 +1,5 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
-import jwt from 'jsonwebtoken';
-import { config } from '../../../app/config';
-import { AuthUser, normalizeRole } from '../../../app/middleware/auth.middleware';
+import { AuthUser, normalizeRole, checkToken } from '../../../app/middleware/auth.middleware';
 import { logger } from '../../../shared/utils/logger';
 import { chatService, buildConversationId } from '../application/chat.service';
 
@@ -80,13 +78,11 @@ export class ChatGateway {
             );
             const token = raw.startsWith('Bearer ') ? raw.slice(7) : raw;
             if (!token) return next(new Error('Unauthorized: Missing token'));
-            try {
-                const decoded = jwt.verify(token, config.jwtSecret) as any;
-                socket.data.user = { id: decoded.id, email: decoded.email, role: decoded.role } as AuthUser;
+            checkToken(token).then(result => {
+                if (!result.ok) return next(new Error(`Unauthorized: ${result.code}`));
+                socket.data.user = result.user;
                 next();
-            } catch {
-                next(new Error('Unauthorized: Invalid token'));
-            }
+            });
         });
 
         this.io.on('connection', (socket: Socket) => {

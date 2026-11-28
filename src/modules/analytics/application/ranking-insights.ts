@@ -33,7 +33,9 @@ export interface RankInsight {
     next: 'pricing' | 'tags' | null;
 }
 
-type Ctx = { category: string; stock: number | null; score: number | null };
+type Ctx = { category: string; stock: number | null; score: number | null; titleIssue?: string | null };
+
+const ready = (ctx: Ctx) => ctx.score !== null && ctx.score >= 80 && !ctx.titleIssue;
 
 export const rate = (part: number, views: number): number | null =>
     views >= MIN_RATE_VIEWS ? Math.round((part / views) * 1000) / 10 : null;
@@ -55,16 +57,16 @@ const vnd = (n: number) => `${Math.round(n).toLocaleString('vi-VN')}đ`;
 
 function goodListingSlow(m: RankMetrics, r: Partial<Record<RankMetric, Rank | null>>, b: CategoryBench, ctx: Ctx, low: { reach: boolean; buyer: boolean }): RankInsight | null {
     const slowSales = !!r.units && r.units.of > 1 && r.units.rank > r.units.of / 2;
-    if (ctx.score === null || ctx.score < 80 || m.views === 0 || !(low.reach || low.buyer || slowSales)) return null;
-    const head = `Đăng chuẩn (${Math.round(ctx.score)} điểm) nhưng bán chậm`;
+    if (!ready(ctx) || m.views === 0 || !(low.reach || low.buyer || slowSales)) return null;
+    const head = `Trang sản phẩm đã hoàn thiện (${Math.floor(ctx.score!)}/100) nhưng bán chậm`;
     if (low.reach && r.views) {
         return { tone: 'warn', title: `${head}: ít người thấy`, field: 'title', next: 'tags',
             action: `Trang sản phẩm đã tốt, chỉ là khách chưa tìm tới (hạng ${r.views.rank}/${r.views.of} về lượt xem trong danh mục ${ctx.category} toàn sàn). Đưa từ khoá khách hay tìm vào tên, gắn tag còn thiếu của danh mục, chia sẻ link lên mạng xã hội hoặc chạy giảm giá ngắn ngày.` };
     }
     if (m.price !== null && b.median_price && m.price > b.median_price * 1.2) {
         const over = Math.round((m.price / b.median_price - 1) * 100);
-        return { tone: 'warn', title: `${head}: giá cao hơn mặt bằng`, field: 'variants.retail_price', next: 'pricing',
-            action: `Giá ${vnd(m.price)} cao hơn khoảng ${over}% so với mức giữa của danh mục ${ctx.category} toàn sàn (${vnd(b.median_price)}). Thử giảm giá, tặng kèm, hoặc nói rõ điểm khác biệt (chất liệu, làm thủ công) trong mô tả.` };
+        return { tone: 'warn', title: `${head}: giá cao hơn mức giữa danh mục`, field: 'description', next: 'pricing',
+            action: `Giá ${vnd(m.price)} cao hơn khoảng ${over}% so với mức giữa của danh mục ${ctx.category} (${vnd(b.median_price)}), mức này gộp nhiều chất liệu khác nhau. Nếu do chất liệu tốt hơn hay làm thủ công, ghi rõ trong tên, mô tả và ảnh; rồi so giá với hàng cùng chất liệu.` };
     }
     if (low.buyer) {
         return { tone: 'warn', title: `${head}: xem nhiều mà ít mua`, field: 'images', next: 'pricing',
@@ -76,6 +78,7 @@ function goodListingSlow(m: RankMetrics, r: Partial<Record<RankMetric, Rank | nu
 
 export function rankingInsights(m: RankMetrics, r: Partial<Record<RankMetric, Rank | null>>, b: CategoryBench, ctx: Ctx): RankInsight[] {
     const out: RankInsight[] = [];
+    if (ctx.titleIssue) out.push({ tone: 'bad', title: 'Tên sản phẩm cần sửa', action: ctx.titleIssue, field: 'title', next: null });
     const low = {
         reach: m.views > 0 && m.views < b.median_views * 0.8 && !!r.views && r.views.rank > r.views.of / 2,
         buyer: m.buy_rate !== null && b.median_buy_rate !== null && m.buy_rate < b.median_buy_rate * 0.7,
@@ -84,8 +87,8 @@ export function rankingInsights(m: RankMetrics, r: Partial<Record<RankMetric, Ra
     const slow = goodListingSlow(m, r, b, ctx, low);
 
     if (m.views === 0) {
-        out.push(ctx.score !== null && ctx.score >= 80
-            ? { tone: 'bad', title: `Đăng chuẩn (${Math.round(ctx.score)} điểm) nhưng chưa ai xem trong 30 ngày`, action: 'Trang đã tốt, chỉ là khách chưa tìm tới. Kiểm tra sản phẩm đang hiển thị, đưa từ khoá khách hay tìm vào tên, gắn tag còn thiếu và chia sẻ link lên mạng xã hội để có lượt xem đầu tiên.', field: 'title', next: 'tags' }
+        out.push(ready(ctx)
+            ? { tone: 'bad', title: `Trang sản phẩm đã hoàn thiện (${Math.floor(ctx.score!)}/100) nhưng chưa ai xem trong 30 ngày`, action: 'Trang đã tốt, chỉ là khách chưa tìm tới. Kiểm tra sản phẩm đang hiển thị, đưa từ khoá khách hay tìm vào tên, gắn tag còn thiếu và chia sẻ link lên mạng xã hội để có lượt xem đầu tiên.', field: 'title', next: 'tags' }
             : { tone: 'bad', title: 'Chưa ai xem trong 30 ngày', action: 'Kiểm tra sản phẩm đã được duyệt và đang hiển thị, gắn tag đúng từ khoá khách hay tìm.', field: 'tags', next: 'tags' });
     }
     if (slow) out.push(slow);
@@ -101,7 +104,7 @@ export function rankingInsights(m: RankMetrics, r: Partial<Record<RankMetric, Ra
         out.push({ tone: 'warn', title: `Ít người thấy: hạng ${r.views.rank}/${r.views.of} về lượt xem trong danh mục ${ctx.category} toàn sàn`, action: 'Viết tên rõ loại, chất liệu, kiểu dáng và gắn thêm tag để khớp từ khoá khách gõ.', field: 'tags', next: 'tags' });
     }
     if (!slow && !low.reach && low.buyer) {
-        out.push({ tone: 'warn', title: 'Nhiều người xem nhưng ít mua', action: `Chỉ ${m.buy_rate}% người xem đặt mua, mức chung của danh mục là ${b.median_buy_rate}%. So giá với sản phẩm cùng loại, thêm ảnh thật và bảng kích thước.`, field: 'variants.retail_price', next: 'pricing' });
+        out.push({ tone: 'warn', title: 'Nhiều người xem nhưng ít mua', action: `Chỉ ${m.buy_rate}% người xem đặt mua, mức chung của danh mục là ${b.median_buy_rate}%. Thêm ảnh thật, bảng kích thước và so giá với hàng cùng chất liệu.`, field: 'variants.retail_price', next: 'pricing' });
     }
     if (m.carts >= 5 && b.median_checkout !== null && m.orders / m.carts < b.median_checkout * 0.8) {
         out.push({ tone: 'warn', title: 'Khách thêm giỏ rồi bỏ', action: `${m.carts} lượt thêm giỏ nhưng chỉ ${m.orders} đơn. Xem lại phí ship, thời gian giao hoặc tặng mã giảm giá nhỏ.`, field: 'shipping', next: null });

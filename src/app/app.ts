@@ -6,7 +6,6 @@ import { errorHandler } from './middleware/error.middleware';
 import { config } from './config';
 import router from './routes';
 
-import { cacheService } from '../shared/services/cache.service';
 
 const app = express();
 
@@ -16,11 +15,16 @@ app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('X-XSS-Protection', '1; mode=block');
+    // API chỉ trả JSON/ảnh: không cho chạy script hay nhúng khung
+    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; frame-ancestors 'none'");
+    if (config.nodeEnv === 'production') {
+        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
     next();
 });
 
-// Trust proxy từ Nginx API Gateway để đọc đúng IP client và IPN VNPay
-app.set('trust proxy', 1);
+// Chỉ tin X-Forwarded-For khi thật sự có proxy phía trước (TRUST_PROXY = số proxy)
+app.set('trust proxy', config.trustProxy);
 
 const allowedOrigins = [
     config.frontendUrl,
@@ -34,7 +38,7 @@ app.use(cors({
         if (!origin || allowedOrigins.includes(origin) || config.nodeEnv !== 'production') {
             callback(null, true);
         } else {
-            callback(new Error('Blocked by CORS policy: Origin not allowed.'));
+            callback(null, false);   // không cấp header CORS, trình duyệt tự chặn (không ném lỗi thành 500)
         }
     },
     credentials: true,
@@ -48,15 +52,9 @@ app.use(requestLogger);
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 app.use('/images', express.static(path.resolve(process.cwd(), '..', 'frontend', 'public', 'images')));
 
-app.use('/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        service: 'backend-core',
-        timestamp: new Date(),
-        redis: {
-            ready: cacheService.isReady(),
-        }
-    });
+// Công khai: chỉ báo còn sống, không lộ trạng thái hạ tầng (Redis) hay giờ máy chủ
+app.use('/health', (_req, res) => {
+    res.json({ status: 'ok' });
 });
 
 app.use('/api', router);

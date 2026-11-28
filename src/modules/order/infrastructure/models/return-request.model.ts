@@ -20,6 +20,7 @@ export interface IReturnRequest extends Document {
     refund_admin_confirmed: boolean; refund_admin_confirmed_by: string | null; refund_admin_confirmed_at: Date | null;
     correction_used: boolean; printer_evidence_request_used: boolean; buyer_dispute_count: number; seller_appeal_used: boolean; side_effect_started: boolean; exchange_quota_consumed: boolean;
     refund_amount_minor?: number | null; refund_currency?: string | null; admin_decision_id?: string | null; linked_refund_id?: string | null; linked_refund_status?: string | null;
+    refund_bank_info?: { bank_name: string; account_holder: string; account_number: string };
     evidence_requested_at?: Date | null; evidence_deadline_at?: Date | null; buyer_evidence_submitted_at?: Date | null; seller_fault_notified_at?: Date | null; seller_appeal_deadline_at?: Date | null;
     r06_tracking_event_id?: string | null; r06_tracking_event_at?: Date | null; r06_tracking_status?: 'IN_TRANSIT' | 'LOST' | 'RETURNED' | 'DELIVERED' | 'UNKNOWN' | null; r06_tracking_latest_eta?: Date | null; r06_fault_source?: 'CARRIER' | 'PRINTER' | null;
     deadline_reminded_for?: Date | null;
@@ -56,6 +57,7 @@ const ReturnRequestSchema = new Schema<IReturnRequest>({
  proposed_fault_party: { type: String, enum: ['BUYER', 'SELLER', 'PRINTER', 'CARRIER', 'PLATFORM', null], default: null }, proposed_classification: { type: String, default: null },
  is_simulated: { type: Boolean, default: false, immutable: true },
  replacement_order_id: { type: String, default: null }, replacement_order_code: { type: String, default: null },
+ refund_bank_info: { type: new Schema({ bank_name: String, account_holder: String, account_number: String }, { _id: false }), default: undefined },
  }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }, versionKey: false, strict: 'throw' });
 ReturnRequestSchema.index({ order_item_id: 1 }, { unique: true, name: 'uniq_active_return_request_v3_per_item_v2', partialFilterExpression: { status: { $in: [...RETURN_REQUEST_ACTIVE_STATUSES] } } });
 

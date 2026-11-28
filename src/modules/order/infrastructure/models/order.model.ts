@@ -36,6 +36,8 @@ export interface IFinancialBreakdown {
     subtotal: mongoose.Types.Decimal128;
     shipping_fee: mongoose.Types.Decimal128;
     coupon_discount: mongoose.Types.Decimal128;
+    // Phần của coupon_discount trừ vào phí ship (mã vận chuyển); coupon_discount vẫn là tổng giảm.
+    shipping_discount?: mongoose.Types.Decimal128;
     platform_fee: mongoose.Types.Decimal128;
     seller_payout_amount: mongoose.Types.Decimal128;
     commission_rate?: number;
@@ -63,9 +65,11 @@ export interface IOrder extends Document {
     order_code: string;
     simulation_source_id?: mongoose.Types.ObjectId;
     is_simulated?: boolean;
-    payment_method: 'VNPAY' | 'PAYOS' | 'COD';
+    payment_method: 'PAYOS' | 'COD';
     /** Mọi mã số payOS đã cấp cho đơn (mỗi lần tạo link là một mã mới) để webhook đối chiếu được link cũ. */
     payos_order_codes?: number[];
+    /** Đã hoàn kho và voucher cho đơn hủy; đặt nguyên tử để hai luồng hủy cùng lúc không hoàn hai lần. */
+    stock_restored_at?: Date;
     payment_status: 'PENDING' | 'PAID' | 'REFUNDED';
     /** Thời điểm provider xác nhận tiền về; refund window tính từ mốc này. */
     paid_at?: Date;
@@ -83,6 +87,7 @@ export interface IOrder extends Document {
     items: IOrderItem[];
     financial_breakdown: IFinancialBreakdown;
     coupon_code?: string;
+    shipping_coupon_code?: string;
     status_history: IStatusHistory[];
     order_hour_of_week: number;
     created_at: Date;
@@ -125,6 +130,7 @@ const FinancialBreakdownSchema = new Schema<IFinancialBreakdown>({
     subtotal: { type: Schema.Types.Decimal128, required: true },
     shipping_fee: { type: Schema.Types.Decimal128, required: true },
     coupon_discount: { type: Schema.Types.Decimal128, required: true, default: 0.0 },
+    shipping_discount: { type: Schema.Types.Decimal128, default: 0.0 },
     platform_fee: { type: Schema.Types.Decimal128, required: true },
     seller_payout_amount: { type: Schema.Types.Decimal128, required: true },
     commission_rate: { type: Number, default: 0.10 },
@@ -147,8 +153,9 @@ const OrderSchema = new Schema<IOrder>({
     order_code: { type: String, required: true, unique: true, index: true },
     simulation_source_id: { type: Schema.Types.ObjectId, ref: 'Order', index: true },
     is_simulated: { type: Boolean, default: false, index: true },
-    payment_method: { type: String, required: true, enum: ['VNPAY', 'PAYOS', 'COD'] },
+    payment_method: { type: String, required: true, enum: ['PAYOS', 'COD'] },
     payos_order_codes: { type: [Number], default: undefined, index: true },
+    stock_restored_at: { type: Date },
     payment_status: { type: String, required: true, enum: ['PENDING', 'PAID', 'REFUNDED'], default: 'PENDING' },
     paid_at: { type: Date, index: true },
     refund_status: { type: String, required: true, enum: ['NONE', 'REQUESTED', 'UNDER_REVIEW', 'DISPUTED', 'REFUNDED', 'REFUND_REJECTED'], default: 'NONE', index: true },
@@ -180,6 +187,7 @@ const OrderSchema = new Schema<IOrder>({
     items: { type: [OrderItemSchema], required: true },
     financial_breakdown: { type: FinancialBreakdownSchema, required: true },
     coupon_code: { type: String, default: null, index: true },
+    shipping_coupon_code: { type: String, default: null, index: true },
     status_history: { type: [StatusHistorySchema], default: [] },
     order_hour_of_week: { type: Number, required: true, index: true }
 }, {

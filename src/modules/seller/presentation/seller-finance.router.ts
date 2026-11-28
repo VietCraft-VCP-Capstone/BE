@@ -9,7 +9,7 @@ const router = Router();
  * GET /api/seller/finance/overview
  * Lấy tổng quan số dư, doanh thu, dòng tiền của shop
  */
-router.get('/overview', authenticate, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+router.get('/overview', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
         const ownerId = req.user?.id;
         if (!ownerId) {
@@ -29,7 +29,7 @@ router.get('/overview', authenticate, async (req: AuthenticatedRequest, res: Res
  * GET /api/seller/finance/settlements
  * Lấy danh sách các phiên đối soát đơn hàng
  */
-router.get('/settlements', authenticate, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+router.get('/settlements', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
         const ownerId = req.user?.id;
         if (!ownerId) {
@@ -56,7 +56,7 @@ router.get('/settlements', authenticate, async (req: AuthenticatedRequest, res: 
  * GET /api/seller/finance/withdrawals
  * Lấy lịch sử các lệnh rút tiền
  */
-router.get('/withdrawals', authenticate, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+router.get('/withdrawals', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
         const ownerId = req.user?.id;
         if (!ownerId) {
@@ -82,7 +82,7 @@ router.get('/withdrawals', authenticate, async (req: AuthenticatedRequest, res: 
  * POST /api/seller/finance/withdraw
  * Tạo yêu cầu rút tiền về tài khoản ngân hàng
  */
-router.post('/withdraw', authenticate, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+router.post('/withdraw', authenticate, requireRole(['seller', 'admin']), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
         const ownerId = req.user?.id;
         if (!ownerId) {

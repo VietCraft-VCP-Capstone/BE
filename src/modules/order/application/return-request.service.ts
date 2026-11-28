@@ -26,7 +26,7 @@ export interface ReturnRequestServiceDependencies {
     repository: ReturnRequestRepository; snapshotSource: OrderReturnSnapshotSource; deliveredEventSource: ReturnDeliveredEventSource;
     eligibilityItemSource?: ReturnEligibilityItemSource;
     resolveBuyerOrderId: (orderId: unknown, buyerId: string) => Promise<string>;
-    bridge: ReturnRequestRefundBridge; executeRefund?: (request: ReturnRequestData) => Promise<{ id: string; status: string }>; clock: ReturnRequestClock; id: () => string; r06DeliveredWindowHours?: number;
+    bridge: ReturnRequestRefundBridge; executeRefund?: (request: ReturnRequestData) => Promise<{ id: string; status: string }>; maxRefundMinor?: (orderId: string) => Promise<number>; clock: ReturnRequestClock; id: () => string; r06DeliveredWindowHours?: number;
 }
 export type PrinterDecisionAction = 'APPROVE'|'REJECT'|'REQUEST_EVIDENCE'|'PROPOSE_FAULT_CHANGE';
 export type DeadlineOutcome = { kind:'REMIND_ADMIN'|'ADMIN_REVIEW'; requestId:string };
@@ -46,6 +46,10 @@ export class ReturnRequestApplicationService {
         const log: ReturnRequestLogData = { request_id:current.id, actor_id:actorId, actor_role:auditRole, ...(actingAs ? { acting_as:actingAs } : {}), from_status:current.status, to_status:to, reason, event_id:eventId, created_at:this.now() };
         return this.deps.repository.transitionWithAudit(current.id, current.version, { ...patch, updated_at:this.now(), status:to as ReturnRequestData['status'] }, log, evidence);
     }
+    private async assertRefundCap(orderId: string, amount?: number) {
+        const max = this.deps.maxRefundMinor ? await this.deps.maxRefundMinor(orderId) : Infinity;
+        if (amount != null && amount > max) throw new Error(`Số tiền hoàn vượt số tiền khách đã thanh toán (${max.toLocaleString('vi-VN')}đ).`);
+    }
     private async createBridge(request: ReturnRequestData): Promise<ReturnRequestData> {
         const faultParty=request.fault_party, amountMinor=request.refund_amount_minor, currency=request.refund_currency, adminDecisionId=request.admin_decision_id;
         if (request.final_resolution !== 'REFUND' || !request.refund_admin_confirmed || !faultParty || !adminDecisionId || amountMinor == null || !currency) throw new Error('Refund requires an Admin-confirmed decision before bridge execution.');
@@ -57,7 +61,7 @@ export class ReturnRequestApplicationService {
         const linkedRequest = await this.deps.repository.transitionWithAudit(request.id, request.version, { linked_refund_id:linked.id, linked_refund_status:linked.status, updated_at:this.now() }, { request_id:request.id, actor_id:'SYSTEM', actor_role:'SYSTEM', from_status:request.status, to_status:request.status, reason:'Persisted idempotent linked Refund bridge reference.', event_id:linked.id, created_at:this.now() });
         return this.executeLinkedRefund(linkedRequest);
     }
-    /** Money moves only through the idempotent VNPay execution; the result is re-read so callers see the real status. */
+    /** Money moves only through the idempotent refund execution; the result is re-read so callers see the real status. */
     private async executeLinkedRefund(request: ReturnRequestData): Promise<ReturnRequestData> {
         if (!this.deps.executeRefund) return request;
         await this.deps.executeRefund(request);
@@ -163,7 +167,23 @@ export class ReturnRequestApplicationService {
             uploaded_by: input.actorId,
             created_at: this.now()
         }));
-        return this.commit(current, input.actorId, 'PRINTER', approve ? 'PRINTER_APPROVE' : 'PRINTER_REJECT', to, input.reason, { final_resolution: current.requested_resolution }, null, undefined, evidenceRows, auditRole, actingAs);
+        const saved = await this.commit(current, input.actorId, 'PRINTER', approve ? 'PRINTER_APPROVE' : 'PRINTER_REJECT', to, input.reason, { final_resolution: current.requested_resolution }, null, undefined, evidenceRows, auditRole, actingAs);
+        return to === 'AWAITING_ADMIN_REFUND' ? this.printerAutoRefund(saved, input.actorId, auditRole, actingAs) : saved;
+    }
+    /** Xưởng nhận lỗi thì hoàn ngay theo số tiền khách đã trả cho món; lỗi thì giữ ở AWAITING_ADMIN_REFUND cho admin. */
+    private async printerAutoRefund(request: ReturnRequestData, actorId: string, auditRole: ReturnRequestLogData['actor_role'], actingAs?: 'PRINTER'): Promise<ReturnRequestData> {
+        try {
+            const snap = request.item_snapshot as { item_paid_amount_minor?: number; unit_price?: number };
+            const decided = snap.item_paid_amount_minor ?? Number(snap.unit_price ?? 0) * request.quantity;
+            const max = this.deps.maxRefundMinor ? await this.deps.maxRefundMinor(request.order_id) : decided;
+            const amount = Math.min(decided, max);
+            if (!Number.isSafeInteger(amount) || amount <= 0) return request;
+            const confirmed = await this.commit(request, actorId, 'PRINTER', 'PRINTER_CONFIRM_REFUND', 'CONVERTED_TO_REFUND', 'Xưởng in chấp thuận, hệ thống tự hoàn tiền.', { final_resolution: 'REFUND', fault_party: 'PRINTER', fault_source: 'SYSTEM', refund_admin_confirmed: true, refund_admin_confirmed_by: actorId, refund_admin_confirmed_at: this.now(), refund_amount_minor: amount, refund_currency: 'VND', admin_decision_id: this.deps.id() }, null, undefined, [], auditRole, actingAs);
+            return this.createBridge(confirmed);
+        } catch (err) {
+            console.warn(`[Return] Tự hoàn tiền ${request.id} thất bại, chờ admin:`, (err as Error).message);
+            return (await this.deps.repository.findById(request.id)) ?? request;
+        }
     }
     async addEvidence(input:{actorId:string;requestId:string;role:'SELLER'|'PRINTER';evidence:readonly ReturnEvidenceItem[]}):Promise<ReturnRequestData>{
         const current=await this.requireRequest(input.requestId); const action=input.role==='SELLER'?'SELLER_ADD_EVIDENCE':'PRINTER_ADD_EVIDENCE'; this.authorize(action,current,input.actorId,input.role);
@@ -207,6 +227,7 @@ export class ReturnRequestApplicationService {
         const current=await this.requireRequest(input.requestId); if(!input.reason.trim()) throw new Error('Admin decision reason is required.');
         if(input.resolution && !input.faultParty) throw new Error('Admin must decide a fault party alongside any resolution.');
         if(input.resolution==='REFUND'&&(!Number.isSafeInteger(input.amountMinor)||input.amountMinor!<0||!input.currency)) throw new Error('Refund decision requires a valid amount/currency.');
+        if(input.resolution==='REFUND') await this.assertRefundCap(current.order_id,input.amountMinor);
         const sellerFault=input.faultParty==='SELLER'; const sellerNotifiedAt=sellerFault?this.now():null; const sellerWindow=sellerNotifiedAt?evaluateAnchoredWindow('P05',sellerNotifiedAt,this.now()):null;
         const acceptedPrinterProposal=current.status==='PRINTER_PROPOSED_FAULT_CHANGE'&&current.proposed_fault_party===input.faultParty;
         const base={final_resolution:input.resolution,fault_party:input.faultParty,fault_source:acceptedPrinterProposal?'PRINTER_PROPOSED':'ADMIN',admin_decision_id:this.deps.id(),refund_admin_confirmed:input.resolution==='REFUND',refund_admin_confirmed_by:input.resolution==='REFUND'?input.actorId:null,refund_admin_confirmed_at:input.resolution==='REFUND'?this.now():null,refund_amount_minor:input.resolution==='REFUND'?input.amountMinor:null,refund_currency:input.resolution==='REFUND'?input.currency:null,seller_fault_notified_at:sellerNotifiedAt,seller_appeal_deadline_at:sellerWindow?.kind==='OPEN'?sellerWindow.deadline:null};
@@ -225,6 +246,7 @@ export class ReturnRequestApplicationService {
         if(current.refund_admin_confirmed) return this.createBridge(current);
         if(current.final_resolution!=='REFUND'&&current.requested_resolution!=='REFUND') throw new Error('Only a Refund resolution can be confirmed.');
         if(!input.faultParty||!Number.isSafeInteger(input.amountMinor)||input.amountMinor<0||!input.currency.trim()) throw new Error('Admin confirmation requires verified fault and a valid Refund amount/currency.');
+        await this.assertRefundCap(current.order_id,input.amountMinor);
         const action:ReturnAction=current.status==='DISPUTED'?'ADMIN_CONFIRM_REFUND':'ADMIN_CONFIRM_REFUND';
         const saved=await this.commit(current,input.actorId,'ADMIN',action,'CONVERTED_TO_REFUND','Admin confirmed Refund before bridge.',{final_resolution:'REFUND',fault_party:input.faultParty,fault_source:'ADMIN',refund_admin_confirmed:true,refund_admin_confirmed_by:input.actorId,refund_admin_confirmed_at:this.now(),refund_amount_minor:input.amountMinor,refund_currency:input.currency,admin_decision_id:this.deps.id()});
         if (input.faultParty === 'SELLER' && current.seller_id) {

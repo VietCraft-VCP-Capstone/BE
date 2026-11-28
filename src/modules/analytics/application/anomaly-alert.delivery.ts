@@ -3,14 +3,14 @@ import { User } from '../../user/infrastructure/models/user.model';
 import { notificationService } from '../../notification';
 import { sendPerformanceAlertEmail } from '../../../shared/utils/email.service';
 import { AnalyticsAlertLog } from '../infrastructure/models/analytics-alert-log.model';
-import { AnomalyEvent, buildAlertMessage } from './anomaly-alert.message';
+import { AnomalyEvent, buildAlertMessage, prevDay } from './anomaly-alert.message';
 
 const WEEKLY_CAP = 3;
 const ALERT_LINK = '/seller/insights/alerts';
 const DEFAULT_PREF = { email: false, app: true };
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
-export type DeliveryResult = 'created' | 'duplicate' | 'capped' | 'no_shop';
+export type DeliveryResult = 'created' | 'duplicate' | 'continued' | 'capped' | 'no_shop';
 
 export async function deliverAlert(e: AnomalyEvent): Promise<DeliveryResult> {
     const shop = await Shop.findById(e.shop_id).select('owner_id shop_name settings');
@@ -23,6 +23,9 @@ export async function deliverAlert(e: AnomalyEvent): Promise<DeliveryResult> {
         if (err?.code === 11000) return 'duplicate';
         throw err;
     }
+
+    // A zero streak re-fires daily; only its first day is worth a notification.
+    if (e.rule === 'zero_run' && await AnalyticsAlertLog.exists({ shop_id: shop._id, metric: e.metric, event_date: prevDay(e.date) })) return 'continued';
 
     const notifiedThisWeek = await AnalyticsAlertLog.countDocuments({
         shop_id: shop._id,

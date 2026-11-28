@@ -22,6 +22,7 @@ export interface IUser extends Document {
     password_hash: string;
     role: 'BUYER' | 'SELLER' | 'ADMIN';
     is_locked: boolean;
+    token_version?: number;
     full_name: string;
     avatar?: string;
     phone?: string;

@@ -36,6 +36,10 @@ async function bootstrap() {
 
     const { ReturnDeadlineJob } = await import('./modules/order/application/return-deadline.job');
     ReturnDeadlineJob.start();
+    const { SeasonalReminderJob } = await import('./modules/analytics/application/seasonal-reminder.job');
+    SeasonalReminderJob.start();
+    const { SeasonalForecastSnapshotJob } = await import('./modules/analytics/application/seasonal-forecast-snapshot.job');
+    SeasonalForecastSnapshotJob.start();
 
     const { PayosPaymentReconcileJob } = await import('./modules/payment/application/payos-payment-reconcile.job');
     PayosPaymentReconcileJob.start();

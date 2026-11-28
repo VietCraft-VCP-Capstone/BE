@@ -40,6 +40,8 @@ export interface IShop extends Document {
     rating_count: number;
     product_diversity_score?: number;
     reputation_score: number;
+    /** Đang xử lý một lệnh rút tiền: khóa để hai request song song không cùng chi */
+    withdrawal_locked_at?: Date | null;
     reputation_tier: ReputationTier;
     clean_streak_orders: number;
     dispute_count_30d: number;
@@ -50,15 +52,15 @@ export interface IShop extends Document {
 }
 
 const BankInfoSchema = new Schema<IBankInfo>({
-    bank_code: { type: String, required: true },
-    account_number: { type: String, required: true },
-    account_holder: { type: String, required: true }
+    bank_code: { type: String, required: false },
+    account_number: { type: String, required: false },
+    account_holder: { type: String, required: false }
 }, { _id: false });
 
 const PrinterPartnerSchema = new Schema<IPrinterPartner>({
     printer_id: { type: String },
-    printer_name: { type: String, required: true },
-    api_url: { type: String, required: true },
+    printer_name: { type: String, required: false },
+    api_url: { type: String, required: false },
     api_key: { type: String },
     seller_printing_email: { type: String },
     webhook_secret: { type: String },
@@ -93,6 +95,7 @@ const ShopSchema = new Schema<IShop>({
     rating_count: { type: Number, default: 0 },
     product_diversity_score: { type: Number, default: 0.0 },
     reputation_score: { type: Number, default: 80, min: 0, max: 100, index: true },
+    withdrawal_locked_at: { type: Date, default: null },
     reputation_tier: { 
         type: String, 
         enum: ['TRUSTED', 'NORMAL', 'WARNING', 'RESTRICTED'], 

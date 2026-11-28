@@ -23,7 +23,7 @@ const TransactionSchema = new Schema<ITransaction>({
     order_id: { type: Schema.Types.ObjectId, ref: 'Order', index: true },
     order_code: { type: String, index: true },
     user_id: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    gateway: { type: String, default: 'VNPAY' },
+    gateway: { type: String, default: 'PAYOS' },
     gateway_transaction_id: { type: String, index: true },
     gateway_bank_code: { type: String },
     gateway_response_code: { type: String },

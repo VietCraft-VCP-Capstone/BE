@@ -152,7 +152,7 @@ class CategoryService implements ICategoryService {
         return cacheService.getOrSet('vietcraft:categories:active', async () => {
             return Category.find({ is_active: true, status: { $ne: 'banned' }, review_status: { $ne: 'banned' } })
                 .sort({ sort_order: 1, name: 1 })
-                .select('name slug _id')
+                .select('name slug _id parent_id')
                 .lean();
         }, 300);
     }

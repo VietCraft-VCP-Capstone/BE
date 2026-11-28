@@ -72,10 +72,10 @@ export async function listingRanking(shopId: string): Promise<{ httpStatus: numb
                 stock: { $sum: { $max: [0, { $ifNull: ['$stock_quantity', 0] }] } },
             } },
         ])),
-        byId<{ score: number | null }>(ListingHealthScore.aggregate([
+        byId<{ score: number | null; warnings: { field?: string | null; message?: string }[] }>(ListingHealthScore.aggregate([
             { $match: { product_id: { $in: mineIds } } },
             { $sort: { date: -1, computed_at: -1 } },
-            { $group: { _id: '$product_id', score: { $first: '$score' } } },
+            { $group: { _id: '$product_id', score: { $first: '$score' }, warnings: { $first: '$warnings' } } },
         ])),
     ]);
 
@@ -118,6 +118,7 @@ export async function listingRanking(shopId: string): Promise<{ httpStatus: numb
                 category: cat,
                 stock: p.product_type === 'READY_TO_SHIP' ? variants.get(String(p._id))?.stock ?? 0 : null,
                 score: scores.get(String(p._id))?.score ?? null,
+                titleIssue: scores.get(String(p._id))?.warnings?.find(t => t.field === 'title')?.message ?? null,
             }),
         };
     });

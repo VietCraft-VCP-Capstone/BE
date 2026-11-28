@@ -1,12 +1,14 @@
 import { Router, Response } from 'express';
 import { EventService } from '../application/event.service';
 import { optionalAuthenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 
 const router = Router();
+const eventLimiter = userRateLimit(120, 60_000, 'Gửi sự kiện quá nhanh, vui lòng thử lại sau.');
 
-router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/events/view', eventLimiter, optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
-        const { product_id, session_id } = req.body;
+        const { product_id, session_id, traffic_source } = req.body;
         const userAgent = req.get('user-agent') || '';
         const ipAddress = req.ip || req.socket.remoteAddress || '';
         const userId = req.user?.id;
@@ -21,7 +23,8 @@ router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedReque
             'view',
             userAgent,
             ipAddress,
-            userId
+            userId,
+            traffic_source
         );
 
         res.json({ success: recorded });
@@ -31,9 +34,9 @@ router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedReque
     }
 });
 
-router.post('/events/add-to-cart', optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/events/add-to-cart', eventLimiter, optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
-        const { product_id, session_id } = req.body;
+        const { product_id, session_id, traffic_source } = req.body;
         const userAgent = req.get('user-agent') || '';
         const ipAddress = req.ip || req.socket.remoteAddress || '';
         const userId = req.user?.id;
@@ -48,7 +51,8 @@ router.post('/events/add-to-cart', optionalAuthenticate, async (req: Authenticat
             'add_to_cart',
             userAgent,
             ipAddress,
-            userId
+            userId,
+            traffic_source
         );
 
         res.json({ success: recorded });

@@ -1,8 +1,20 @@
 import { Router, Response } from 'express';
 import { AuthService, AuthError } from '../application/auth.service';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 
 const router = Router();
+
+// Chống dò mật khẩu và spam OTP: giới hạn theo IP (route chưa đăng nhập nên không có user id).
+const loginLimiter = userRateLimit(20, 15 * 60_000, 'Bạn thử đăng nhập quá nhiều lần, vui lòng đợi 15 phút rồi thử lại.');
+const otpLimiter = userRateLimit(10, 10 * 60_000, 'Bạn thao tác quá nhiều lần, vui lòng đợi 10 phút rồi thử lại.');
+// Thêm giới hạn theo EMAIL: đổi IP (mạng khác, proxy) vẫn không dò được mật khẩu/OTP của một tài khoản
+const emailKey = (req: any) => {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    return email ? `email:${email}` : undefined;
+};
+const loginEmailLimiter = userRateLimit(10, 15 * 60_000, 'Tài khoản này nhập sai quá nhiều lần, vui lòng đợi 15 phút rồi thử lại.', emailKey);
+const otpEmailLimiter = userRateLimit(8, 10 * 60_000, 'Bạn thao tác với email này quá nhiều lần, vui lòng đợi 10 phút rồi thử lại.', emailKey);
 
 function friendlyError(err: any): string {
     const msg: string = err?.message || '';
@@ -28,7 +40,7 @@ function sendAuthError(res: Response, error: any, defaultStatus = 400) {
     });
 }
 
-router.post('/signup', async (req, res) => {
+router.post('/signup', loginLimiter, async (req, res) => {
     try {
         const { email, password, name, role } = req.body || {};
         const errors: string[] = [];
@@ -66,7 +78,7 @@ router.post('/signup', async (req, res) => {
     }
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, loginEmailLimiter, async (req, res) => {
     try {
         const { email, password } = req.body || {};
         const errors: string[] = [];
@@ -93,7 +105,7 @@ router.post('/login', async (req, res) => {
     }
 });
 
-router.post('/verify-otp', async (req, res) => {
+router.post('/verify-otp', otpLimiter, otpEmailLimiter, async (req, res) => {
     try {
         const { email, code } = req.body || {};
         const errors: string[] = [];
@@ -122,7 +134,7 @@ router.post('/verify-otp', async (req, res) => {
     }
 });
 
-router.post('/resend-otp', async (req, res) => {
+router.post('/resend-otp', otpLimiter, otpEmailLimiter, async (req, res) => {
     try {
         const { email } = req.body || {};
         if (!email || !String(email).trim()) {
@@ -139,7 +151,7 @@ router.post('/resend-otp', async (req, res) => {
     }
 });
 
-router.post('/google', async (req, res) => {
+router.post('/google', loginLimiter, async (req, res) => {
     try {
         const { accessToken } = req.body || {};
         if (!accessToken || !String(accessToken).trim()) {
@@ -156,7 +168,7 @@ router.post('/google', async (req, res) => {
     }
 });
 
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', otpLimiter, otpEmailLimiter, async (req, res) => {
     try {
         const { email } = req.body || {};
         if (!email || !String(email).trim()) {
@@ -180,7 +192,7 @@ router.post('/forgot-password', async (req, res) => {
     }
 });
 
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', otpLimiter, otpEmailLimiter, async (req, res) => {
     try {
         const { email, code, newPassword } = req.body || {};
         const errors: string[] = [];

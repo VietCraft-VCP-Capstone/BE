@@ -4,6 +4,7 @@ import { Shop } from '../../product/infrastructure/models/shop.model';
 import { notificationService } from '../../notification';
 import { dispatchToPrinter } from '../../order/application/printer-dispatch.service';
 import { ReputationService } from './reputation.service';
+import { OrdersService } from '../../order/application/order.service';
 import {
     SellerOrderDTO,
     SellerOrderListDTO,
@@ -255,6 +256,11 @@ export class SellerOrdersService {
             order.seller_approval_status = 'APPROVED';
         }
 
+        const refundOnCancel = next === 'CANCELLED' && order.payment_status === 'PAID';
+        if (next === 'CANCELLED') {
+            order.fulfillment_status = 'CANCELLED';
+            if (refundOnCancel) order.refund_status = 'REQUESTED';
+        }
         order.order_status = next;
         order.status_history.push({
             status: next,
@@ -262,6 +268,11 @@ export class SellerOrdersService {
             note: String(payload.note || '').trim() || undefined
         });
         await order.save();
+        if (next === 'CANCELLED') {
+            // Người bán hủy: trả lại kho, lượt voucher và tiền khách đã trả (như khi người mua tự hủy)
+            await OrdersService.restoreOrderStockAndCoupon(order);
+            if (refundOnCancel) await OrdersService.refundCancelledOrder(order, ownerId, 'Người bán hủy đơn');
+        }
 
         if (next === 'DELIVERED') void ReputationService.recordCleanOrder(order);
 
@@ -291,6 +302,16 @@ export class SellerOrdersService {
         return mapDbOrderToSellerDTO(saved || order.toObject());
     }
 
+    private static assertApprovable(order: any): void {
+        if (order.order_status === 'CANCELLED' || order.fulfillment_status === 'CANCELLED' || order.seller_approval_status === 'REJECTED') {
+            throw new Error('Đơn hàng đã bị huỷ, không thể duyệt hoặc gửi xưởng in.');
+        }
+        // Đơn trả trước (payOS) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
+        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
+            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
+        }
+    }
+
     static async approveOrder(ownerId: string, id: string): Promise<SellerOrderDTO> {
         const shopId = await this.findShopId(ownerId);
         if (!shopId) throw new Error('Không tìm thấy cửa hàng của bạn');
@@ -304,10 +325,7 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
-        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
-        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
-            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
-        }
+        this.assertApprovable(order);
 
         const isPod = Boolean(
             order.is_pod ||
@@ -368,10 +386,7 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
-        // Đơn trả trước (payOS/VNPay) chỉ được duyệt khi tiền đã về; COD trả khi nhận hàng.
-        if (order.payment_method !== 'COD' && order.payment_status !== 'PAID') {
-            throw new Error('Khách chưa thanh toán đơn này. Chỉ duyệt sau khi tiền đã về.');
-        }
+        this.assertApprovable(order);
 
         // Cập nhật trạng thái duyệt của người bán
         order.seller_approval_status = 'APPROVED';
@@ -422,16 +437,24 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
+        // Chỉ từ chối được đơn chưa bắt đầu xử lý: đơn đang giao/đã giao không được "từ chối" để chiếm tiền khách
+        if (!['ORDERED', 'PENDING_DESIGN'].includes(order.order_status) || ['SHIPPED', 'DELIVERED'].includes(order.fulfillment_status || '')) {
+            throw new Error('Chỉ có thể từ chối đơn chưa được xử lý.');
+        }
 
+        const wasPaid = order.payment_status === 'PAID';
         order.seller_approval_status = 'REJECTED';
         order.order_status = 'CANCELLED';
         order.fulfillment_status = 'CANCELLED';
+        if (wasPaid) order.refund_status = 'REQUESTED';
         order.status_history.push({
             status: 'CANCELLED',
             changed_at: new Date(),
             note: `Người bán từ chối duyệt đơn: ${reason || 'Không thể đáp ứng đơn hàng'}`
         });
         await order.save();
+        await OrdersService.restoreOrderStockAndCoupon(order);
+        if (wasPaid) await OrdersService.refundCancelledOrder(order, ownerId, 'Người bán từ chối đơn');
 
         try {
             if (order.buyer_id) {

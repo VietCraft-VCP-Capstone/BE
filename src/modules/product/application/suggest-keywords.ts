@@ -1,12 +1,13 @@
-import mongoose from 'mongoose';
 import { SearchLog } from '../../analytics/infrastructure/models/search-log.model';
 import { accentInsensitive, hasTone, nfcLower, normalizeVi } from '../../../shared/utils/vietnamese-search.util';
+import { getRecentSearches } from './recent-searches';
+import { compoundEnd } from './compound-words';
 
 const MAX_LEN = 40;
 const MIN_USERS = 2;
 const POPULAR_DAYS = 90;
 
-/** Cụm từ trong tiêu đề bắt đầu tại chỗ khớp, thêm 1 từ phía sau để gợi ý cụ thể hơn. */
+/** Cụm từ trong tiêu đề bắt đầu tại chỗ khớp, thêm 1 từ phía sau (trọn từ ghép nếu có). */
 export function phraseFromTitle(title: string, qWords: string[]): string | null {
     if (qWords.length === 0) return null;
     const words = nfcLower(title).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
@@ -14,7 +15,7 @@ export function phraseFromTitle(title: string, qWords: string[]): string | null 
     const last = qWords.length - 1;
     for (let i = 0; i + last < norms.length; i++) {
         const hit = qWords.every((w, j) => (j < last ? norms[i + j] === w : norms[i + j].startsWith(w)));
-        if (hit) return words.slice(i, i + qWords.length + 1).join(' ');
+        if (hit) return words.slice(i, compoundEnd(norms, i + qWords.length + 1)).join(' ');
     }
     // Gõ liền ("aothun") không khớp từng từ: thử nối nhiều từ liên tiếp của tiêu đề
     if (qWords.length === 1 && qWords[0].length >= 3) {
@@ -22,12 +23,16 @@ export function phraseFromTitle(title: string, qWords: string[]): string | null 
             let joined = '';
             for (let j = i; j < norms.length && j < i + 4; j++) {
                 joined += norms[j];
-                if (joined.startsWith(qWords[0])) return words.slice(i, j + 2).join(' ');
+                if (joined.startsWith(qWords[0])) return words.slice(i, compoundEnd(norms, j + 2)).join(' ');
             }
         }
     }
     return null;
 }
+
+// Cụm kết thúc bằng hư từ ("mèo và") hoặc mã/số ("quai 5", "trắng if1343") là bị cắt dở
+const WEAK_TAIL = new Set(['và', 'về', 'cho', 'của', 'với', 'từ', 'theo', 'trong', 'là', 'ở', 'khi', 'hay', 'hoặc', 'nhưng', 'các']);
+const badTail = (kw: string) => { const w = kw.split(' ').pop() || ''; return WEAK_TAIL.has(w) || /\d/.test(w); };
 
 export function buildKeywordSuggestions(q: string, logged: string[], titles: string[], banned: string[], limit = 6): string[] {
     const qNorm = normalizeVi(q);
@@ -45,28 +50,17 @@ export function buildKeywordSuggestions(q: string, logged: string[], titles: str
     for (const raw of [...logged, ...fromTitles]) {
         const kw = nfcLower(raw).replace(/\s+/g, ' ');
         const norm = normalizeVi(kw);
-        if (!norm || norm === qNorm || kw.length > MAX_LEN || bannedNorms.some(b => norm.includes(b))) continue;
+        if (!norm || kw === nfcLower(q).trim() || (norm === qNorm && !hasTone(kw)) || badTail(kw) || kw.length > MAX_LEN || bannedNorms.some(b => norm.includes(b))) continue;
         const prev = picked.get(norm);
         if (prev === undefined || (!hasTone(prev) && hasTone(kw))) picked.set(norm, kw);
     }
     return [...picked.values()].slice(0, limit);
 }
 
-/** Từ khoá chính người dùng này đã tìm (có kết quả), bắt đầu bằng chuỗi đang gõ, mới nhất trước. */
+/** Lịch sử tìm kiếm của người dùng (cùng nguồn với nút "Xoá"), bắt đầu bằng chuỗi đang gõ, mới nhất trước. */
 export async function fetchLoggedKeywords(q: string, userId: string, limit = 4): Promise<string[]> {
-    const rows = await SearchLog.aggregate([
-        {
-            $match: {
-                user_id: new mongoose.Types.ObjectId(userId),
-                keyword: { $regex: '^' + accentInsensitive(q), $options: 'i', $ne: q },
-                result_count: { $gt: 0 },
-            },
-        },
-        { $group: { _id: { $toLower: '$keyword' }, keyword: { $max: '$keyword' }, last: { $max: '$created_at' } } },
-        { $sort: { last: -1 } },
-        { $limit: limit },
-    ]);
-    return rows.map((r: any) => r.keyword);
+    const prefix = new RegExp('^' + accentInsensitive(q), 'i');
+    return (await getRecentSearches(userId)).filter(k => k !== q && prefix.test(k)).slice(0, limit);
 }
 
 /** Từ khoá được ít nhất MIN_USERS người dùng khác nhau tìm có kết quả trong 90 ngày, phổ biến nhất trước. */
@@ -100,4 +94,39 @@ export async function fetchPopularKeywords(q: string, limit = 4): Promise<string
         { $limit: limit },
     ]);
     return rows.map((r: any) => r.keyword);
+}
+
+const RECENT_SEARCH_DAYS = 30;
+
+/**
+ * "Mọi người đang tìm" trên VietCraft: từ khoá do người dùng thật gõ (SearchLog) trong 30 ngày, có kết quả,
+ * được ít nhất MIN_USERS người khác nhau tìm, bỏ từ khoá bị cấm. Không pha dữ liệu xu hướng thị trường.
+ */
+export async function fetchPopularSearches(limit: number, bannedKeywords: string[]): Promise<string[]> {
+    const since = new Date(Date.now() - RECENT_SEARCH_DAYS * 24 * 60 * 60 * 1000);
+    const rows = await SearchLog.aggregate([
+        { $match: { result_count: { $gt: 0 }, user_id: { $exists: true, $ne: null }, created_at: { $gte: since } } },
+        {
+            $group: {
+                _id: { $toLower: '$keyword' },
+                keyword: { $max: '$keyword' },
+                users: { $addToSet: '$user_id' },
+                searches: { $sum: 1 },
+            },
+        },
+        { $addFields: { userCount: { $size: '$users' } } },
+        { $match: { userCount: { $gte: MIN_USERS } } },
+        { $sort: { userCount: -1, searches: -1 } },
+        { $limit: limit * 4 },
+    ]);
+    const bannedNorms = bannedKeywords.map(normalizeVi).filter(Boolean);
+    const picked = new Map<string, string>();
+    for (const r of rows) {
+        const kw = nfcLower(String(r.keyword || '')).replace(/\s+/g, ' ').trim();
+        const norm = normalizeVi(kw);
+        if (!norm || kw.length > MAX_LEN || bannedNorms.some(b => norm.includes(b))) continue;
+        const prev = picked.get(norm);
+        if (prev === undefined || (!hasTone(prev) && hasTone(kw))) picked.set(norm, kw);
+    }
+    return [...picked.values()].slice(0, limit);
 }

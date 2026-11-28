@@ -3,6 +3,7 @@ import { adminService } from '../application/admin.service';
 import { parsePageParams } from '../../../shared/utils/pagination';
 import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
+import { logger } from '../../../shared/utils/logger';
 
 const router = Router();
 
@@ -120,6 +121,7 @@ router.get('/seller-applications', async (req: AuthenticatedRequest, res: Respon
 router.get('/seller-applications/:id', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const result = await adminService.getSellerApplicationDetail(req.params.id);
+        logger.info(`[KYC Access] admin ${req.user!.id} xem hồ sơ ${req.params.id} (IP ${req.ip})`);
         res.status(200).json({ success: true, data: result });
     } catch (error: any) {
         res.status(404).json({ success: false, error: error.message });
