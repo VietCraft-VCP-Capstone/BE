@@ -11,7 +11,7 @@ import { authenticate, requireRole, optionalAuthenticate, AuthenticatedRequest }
 import { ReviewService } from '../../order';
 import { RecommendService } from '../application/recommend/recommend.service';
 import { nfcLower } from '../../../shared/utils/vietnamese-search.util';
-import { getRecentSearches, addRecentSearch, clearRecentSearches } from '../application/recent-searches';
+import { getRecentSearches, addRecentSearch, clearRecentSearches, removeRecentSearch } from '../application/recent-searches';
 
 const router = Router();
 
@@ -221,6 +221,8 @@ router.post('/meta/recent-searches', authenticate, async (req: AuthenticatedRequ
 
 router.delete('/meta/recent-searches', authenticate, async (req: AuthenticatedRequest, res) => {
     try {
+        const keyword = req.query.keyword;
+        if (typeof keyword === 'string' && keyword) return res.json(await removeRecentSearch(req.user!.id, keyword));
         await clearRecentSearches(req.user!.id);
         res.status(204).end();
     } catch (error: any) {

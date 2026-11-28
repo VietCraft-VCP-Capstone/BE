@@ -916,7 +916,10 @@ export class ProductsService {
             moderation_status: 'APPROVED',
             shop_id: { $nin: restrictedShopIds },
         };
-        const atlas = await findSearchHits(q);
+        // Từ cuối đang gõ dở ("phong c") làm Atlas trả 0: tìm bằng các từ đã gõ xong, phraseFromTitle lọc tiếp
+        const done = q.includes(' ') ? q.slice(0, q.lastIndexOf(' ')) : '';
+        let atlas = await findSearchHits(q);
+        if (atlas && atlas.ids.length === 0 && done) atlas = await findSearchHits(done);
         const [hits, matchingShops, matchingCategories, loggedKeywords, popularKeywords, banned] = await Promise.all([
             MongoProduct.find(
                 atlas ? { ...prodBase, _id: { $in: atlas.ids.slice(0, 50) } } : { ...prodBase, $or: [{ title: qRegex }, { tags: qRegex }, { categories: qRegex }] },
