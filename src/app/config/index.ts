@@ -27,6 +27,9 @@ function parseShopMap(raw?: string): Record<string, string> {
 export const config = {
     port: process.env.PORT || 8080,
     nodeEnv: process.env.NODE_ENV || 'development',
+    // Số proxy tin cậy đứng trước BE (Nginx/Caddy ghi đè X-Forwarded-For). Mặc định 0: lấy IP kết nối thật,
+    // nếu tin header khi không có proxy thì kẻ tấn công giả IP và vượt mọi giới hạn tần suất.
+    trustProxy: Math.max(0, Number(process.env.TRUST_PROXY) || 0),
     databaseUrl: process.env.DATABASE_URL || '',
     mongoUri: process.env.MONGO_URI || '',
     mongoDbData: process.env.MONGO_DB_DATA || 'data-collection',
@@ -89,6 +92,14 @@ export const config = {
     speedSmsAccessToken: process.env.SPEEDSMS_ACCESS_TOKEN || '',
     speedSmsType: Number(process.env.SPEEDSMS_SMS_TYPE) || 2,
 };
+
+if (!process.env.NODE_ENV) {
+    logger.warn('NODE_ENV chưa được đặt nên đang chạy như development (CORS mở, bỏ qua một số kiểm tra). Máy chủ thật phải đặt NODE_ENV=production.');
+}
+
+if (config.nodeEnv === 'production' && (process.env.KYC_ENCRYPTION_KEY || '').trim().length < 16) {
+    throw new Error('FATAL: KYC_ENCRYPTION_KEY (tối thiểu 16 ký tự) chưa được cấu hình.');
+}
 
 if (!config.jwtSecret) {
     if (config.nodeEnv === 'production') {

@@ -6,7 +6,7 @@ import crypto from 'crypto';
 // Thư mục lưu file KYC riêng tư, KHÔNG serve tĩnh qua public /uploads
 export const KYC_STORAGE_ROOT = path.resolve(process.cwd(), 'storage', 'kyc_private');
 if (!fs.existsSync(KYC_STORAGE_ROOT)) {
-    fs.mkdirSync(KYC_STORAGE_ROOT, { recursive: true });
+    fs.mkdirSync(KYC_STORAGE_ROOT, { recursive: true, mode: 0o700 });
 }
 
 // Whitelist mimetype định dạng hợp lệ
@@ -18,20 +18,10 @@ const ALLOWED_MIME = new Map<string, string>([
     ['application/pdf', '.pdf'],
 ]);
 
-import { encryptBuffer, isBufferEncrypted } from '../utils/crypto.service';
-
-const kycDiskStorage = multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, KYC_STORAGE_ROOT),
-    filename: (req: any, file, cb) => {
-        const rawUserId = req.user?.id ? String(req.user.id) : 'anon';
-        const cleanUserId = rawUserId.replace(/[^a-zA-Z0-9]/g, '');
-        const ext = ALLOWED_MIME.get(file.mimetype) || '.jpg';
-        cb(null, `kyc_${cleanUserId}_${crypto.randomUUID()}${ext}`);
-    },
-});
+import { encryptBuffer } from '../utils/crypto.service';
 
 export const uploadKycDocument = multer({
-    storage: kycDiskStorage,
+    storage: multer.memoryStorage(),
     limits: {
         fileSize: 10 * 1024 * 1024, // 10MB
         files: 1
@@ -46,16 +36,15 @@ export const uploadKycDocument = multer({
 });
 
 /**
- * Mã hóa file vừa upload lên đĩa ở tầng ứng dụng (AES-256-GCM AEAD)
+ * Mã hóa AES-256-GCM trong bộ nhớ rồi mới ghi đĩa: ảnh gốc không bao giờ nằm trên ổ.
+ * Trả về tên file đã lưu.
  */
-export function encryptUploadedKycFile(filePath: string): void {
-    if (!fs.existsSync(filePath)) return;
-    const raw = fs.readFileSync(filePath);
-    // Nếu chưa mã hóa thì mã hóa và ghi đè
-    if (!isBufferEncrypted(raw)) {
-        const encrypted = encryptBuffer(raw);
-        fs.writeFileSync(filePath, encrypted);
-    }
+export function saveEncryptedKycFile(userId: string, file: { mimetype: string; buffer: Buffer }): string {
+    const cleanUserId = String(userId).replace(/[^a-zA-Z0-9]/g, '');
+    const ext = ALLOWED_MIME.get(file.mimetype) || '.jpg';
+    const filename = `kyc_${cleanUserId}_${crypto.randomUUID()}${ext}`;
+    fs.writeFileSync(path.join(KYC_STORAGE_ROOT, filename), encryptBuffer(file.buffer), { mode: 0o600 });
+    return filename;
 }
 
 /**

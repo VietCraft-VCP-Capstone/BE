@@ -11,6 +11,9 @@ import { toNapasBin } from '../../payment/domain/bank-codes';
 import { decryptField, maskBankAccount } from '../../../shared/utils/crypto.service';
 import { SettlementStatus, settlementStatusOf, openReturnOrderIds, deliveredAt } from './seller-settlement-rule';
 
+/** Một lần gọi chi (15s × tối đa 3 lần) xong trong dưới 2 phút; khóa cũ hơn là tiến trình đã chết giữa chừng */
+const WITHDRAW_LOCK_MS = 2 * 60 * 1000;
+
 export interface SellerFinanceOverview {
     availableBalance: number;
     pendingBalance: number;
@@ -280,6 +283,26 @@ export class SellerFinanceService {
             throw new Error('Số tiền rút tối thiểu là 500 VNĐ.');
         }
 
+        // Một shop chỉ một lệnh rút tại một thời điểm: kiểm số dư rồi mới tạo lệnh, không khóa thì hai request
+        // song song cùng thấy đủ tiền và cùng chi. Khóa cũ quá WITHDRAW_LOCK_MS (tiến trình chết giữa chừng) thì lấy lại.
+        const locked = await Shop.findOneAndUpdate(
+            { _id: shopId, $or: [{ withdrawal_locked_at: null }, { withdrawal_locked_at: { $lt: new Date(Date.now() - WITHDRAW_LOCK_MS) } }] },
+            { $set: { withdrawal_locked_at: new Date() } },
+        );
+        if (!locked) throw new Error('Đang có một lệnh rút tiền khác được xử lý, vui lòng đợi ít phút rồi thử lại.');
+        try {
+            return await this.withdrawLocked(shopId, ownerId, amount, customBank);
+        } finally {
+            await Shop.updateOne({ _id: shopId }, { $set: { withdrawal_locked_at: null } }).catch(() => { });
+        }
+    }
+
+    private static async withdrawLocked(
+        shopId: mongoose.Types.ObjectId,
+        ownerId: string,
+        amount: number,
+        customBank?: { bankName: string; bankCode: string; accountNumber: string; accountHolder: string }
+    ): Promise<SellerWithdrawalItem> {
         const overview = await this.getOverview(ownerId);
         if (amount > overview.availableBalance) {
             throw new Error(`Số dư khả dụng không đủ (${overview.availableBalance.toLocaleString('vi-VN')} VNĐ) để thực hiện lệnh rút ${amount.toLocaleString('vi-VN')} VNĐ.`);
@@ -299,6 +322,34 @@ export class SellerFinanceService {
             throw new Error('Chưa có thông tin tài khoản ngân hàng thụ hưởng. Vui lòng thiết lập trong Cài đặt thanh toán.');
         }
 
+        // Kiểm mọi điều kiện chi TRƯỚC khi tạo lệnh: chưa cấu hình cổng chi thì không được ghi "đã chi"
+        const payosGateway = new PayosRefundGateway();
+        if (!payosGateway.configured()) {
+            throw new Error('Cổng chi tiền chưa được cấu hình, chưa thể rút tiền. Vui lòng liên hệ quản trị sàn.');
+        }
+        const bin = toNapasBin(bank.bankCode);
+        if (!bin || !/^\d{6}$/.test(bin)) {
+            throw new Error(`Không xác định được mã BIN Napas của ngân hàng "${bank.bankCode}". Vui lòng chọn ngân hàng trong danh sách hỗ trợ.`);
+        }
+        const client = new PayOS({
+            clientId: config.payos.payoutClientId!,
+            apiKey: config.payos.payoutApiKey!,
+            checksumKey: config.payos.payoutChecksumKey!,
+            baseURL: config.payos.payoutBaseUrl,
+            timeout: 15_000,
+            maxRetries: 2,
+            logLevel: 'warn',
+        });
+        let walletBal = NaN;
+        try {
+            walletBal = Number((await client.payoutsAccount.balance()).balance);
+        } catch (bErr: any) {
+            logger.warn(`[SELLER WITHDRAWAL] Không đọc được số dư ví payOS: ${bErr?.message}`);
+        }
+        if (Number.isFinite(walletBal) && walletBal < amount) {
+            throw new Error('Ví chi của sàn tạm thời không đủ số dư để chi lệnh này. Vui lòng thử lại sau.');
+        }
+
         const withdrawalCode = `WD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
         const withdrawal = await SellerWithdrawal.create({
@@ -315,66 +366,31 @@ export class SellerFinanceService {
         });
 
         // Gửi lệnh chi tiền tự động qua PayOS Payout
+        const referenceId = `wd-${withdrawalCode}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
+        withdrawal.payout_reference_id = referenceId;
         try {
-            const payosGateway = new PayosRefundGateway();
-            if (payosGateway.configured()) {
-                const bin = toNapasBin(bank.bankCode);
-                if (!bin || !/^\d{6}$/.test(bin)) {
-                    throw new Error(`Không xác định được mã BIN Napas của ngân hàng "${bank.bankCode}". Vui lòng chọn ngân hàng trong danh sách hỗ trợ.`);
-                }
-                const client = new PayOS({
-                    clientId: config.payos.payoutClientId!,
-                    apiKey: config.payos.payoutApiKey!,
-                    checksumKey: config.payos.payoutChecksumKey!,
-                    baseURL: config.payos.payoutBaseUrl,
-                    timeout: 15_000,
-                    maxRetries: 2,
-                    logLevel: 'warn',
-                });
+            logger.info(`[SELLER WITHDRAWAL] Bắt đầu gọi PayOS Payout: ref=${referenceId}, amount=${amount}, bin=${bin}, acc=${maskBankAccount(bank.accountNumber)}`);
+            const payoutResult = await client.payouts.create({
+                referenceId,
+                amount,
+                description: payoutDescription(withdrawalCode),
+                toBin: bin,
+                toAccountNumber: bank.accountNumber,
+            }, referenceId);
 
-                // Kiểm tra số dư ví payout trước khi chi
-                try {
-                    const walletBal = Number((await client.payoutsAccount.balance()).balance);
-                    if (Number.isFinite(walletBal) && walletBal < amount) {
-                        throw new Error(`Ví chi PayOS của sàn không đủ số dư khả dụng (${walletBal.toLocaleString('vi-VN')}đ) để chi lệnh ${amount.toLocaleString('vi-VN')}đ.`);
-                    }
-                } catch (bErr: any) {
-                    logger.warn(`[SELLER WITHDRAWAL] Không đọc được số dư ví payOS: ${bErr?.message}`);
-                }
-
-                const referenceId = `wd-${withdrawalCode}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
-                const payoutDesc = payoutDescription(withdrawalCode);
-                logger.info(`[SELLER WITHDRAWAL] Bắt đầu gọi PayOS Payout: ref=${referenceId}, amount=${amount}, bin=${bin}, acc=${bank.accountNumber}`);
-
-                const payoutResult = await client.payouts.create({
-                    referenceId,
-                    amount,
-                    description: payoutDesc,
-                    toBin: bin,
-                    toAccountNumber: bank.accountNumber,
-                }, referenceId);
-
-                logger.info(`[SELLER WITHDRAWAL SUCCESS] PayOS Payout phản hồi: ${JSON.stringify(payoutResult)}`);
-
-                withdrawal.status = 'COMPLETED';
-                withdrawal.completed_at = new Date();
-                withdrawal.payout_reference_id = referenceId;
-                withdrawal.payout_transaction_id = payoutResult?.id;
-                await withdrawal.save();
-            } else {
-                logger.warn(`[SELLER WITHDRAWAL] Cổng PayOS Payout chưa được cấu hình ClientID/ApiKey.`);
-                withdrawal.status = 'COMPLETED';
-                withdrawal.completed_at = new Date();
-                withdrawal.note = 'Hoàn tất (Môi trường thử nghiệm không kết nối ví PayOS)';
-                await withdrawal.save();
-            }
-        } catch (err: any) {
-            const errMsg = err?.message || 'Lỗi không xác định từ cổng chi tiền PayOS';
-            logger.error(`[SELLER WITHDRAWAL FAILED] ${withdrawalCode}: ${errMsg}`);
-            withdrawal.status = 'FAILED';
-            withdrawal.failure_reason = errMsg;
+            logger.info(`[SELLER WITHDRAWAL SUCCESS] ${withdrawalCode}: payOS id=${payoutResult?.id}`);
+            withdrawal.status = 'COMPLETED';
+            withdrawal.completed_at = new Date();
+            withdrawal.payout_transaction_id = payoutResult?.id;
             await withdrawal.save();
-            throw new Error(`Rút tiền không thành công: ${errMsg}`);
+        } catch (err: any) {
+            // Lỗi lúc đã gửi lệnh (mạng, timeout...) thì KHÔNG biết tiền đã chi hay chưa: giữ PROCESSING để số tiền
+            // vẫn bị trừ khỏi số dư (không cho rút lại rồi chi hai lần), quản trị đối soát theo mã tham chiếu.
+            const errMsg = err?.message || 'Lỗi không xác định từ cổng chi tiền PayOS';
+            logger.error(`[SELLER WITHDRAWAL UNKNOWN] ${withdrawalCode} (ref ${referenceId}): ${errMsg}`);
+            withdrawal.failure_reason = `Chưa xác nhận được kết quả chi từ payOS (ref ${referenceId}): ${errMsg}`;
+            await withdrawal.save();
+            throw new Error('Lệnh rút đã gửi nhưng chưa xác nhận được kết quả từ cổng chi tiền. Số tiền tạm giữ, sàn sẽ đối soát và cập nhật cho bạn.');
         }
 
         return {

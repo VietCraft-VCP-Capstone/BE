@@ -4,6 +4,7 @@ import { Shop } from '../../product/infrastructure/models/shop.model';
 import { notificationService } from '../../notification';
 import { dispatchToPrinter } from '../../order/application/printer-dispatch.service';
 import { ReputationService } from './reputation.service';
+import { OrdersService } from '../../order/application/order.service';
 import {
     SellerOrderDTO,
     SellerOrderListDTO,
@@ -255,6 +256,11 @@ export class SellerOrdersService {
             order.seller_approval_status = 'APPROVED';
         }
 
+        const refundOnCancel = next === 'CANCELLED' && order.payment_status === 'PAID';
+        if (next === 'CANCELLED') {
+            order.fulfillment_status = 'CANCELLED';
+            if (refundOnCancel) order.refund_status = 'REQUESTED';
+        }
         order.order_status = next;
         order.status_history.push({
             status: next,
@@ -262,6 +268,11 @@ export class SellerOrdersService {
             note: String(payload.note || '').trim() || undefined
         });
         await order.save();
+        if (next === 'CANCELLED') {
+            // Người bán hủy: trả lại kho, lượt voucher và tiền khách đã trả (như khi người mua tự hủy)
+            await OrdersService.restoreOrderStockAndCoupon(order);
+            if (refundOnCancel) await OrdersService.refundCancelledOrder(order, ownerId, 'Người bán hủy đơn');
+        }
 
         if (next === 'DELIVERED') void ReputationService.recordCleanOrder(order);
 
@@ -426,16 +437,24 @@ export class SellerOrdersService {
             ]
         });
         if (!order) throw new Error('Không tìm thấy đơn hàng');
+        // Chỉ từ chối được đơn chưa bắt đầu xử lý: đơn đang giao/đã giao không được "từ chối" để chiếm tiền khách
+        if (!['ORDERED', 'PENDING_DESIGN'].includes(order.order_status) || ['SHIPPED', 'DELIVERED'].includes(order.fulfillment_status || '')) {
+            throw new Error('Chỉ có thể từ chối đơn chưa được xử lý.');
+        }
 
+        const wasPaid = order.payment_status === 'PAID';
         order.seller_approval_status = 'REJECTED';
         order.order_status = 'CANCELLED';
         order.fulfillment_status = 'CANCELLED';
+        if (wasPaid) order.refund_status = 'REQUESTED';
         order.status_history.push({
             status: 'CANCELLED',
             changed_at: new Date(),
             note: `Người bán từ chối duyệt đơn: ${reason || 'Không thể đáp ứng đơn hàng'}`
         });
         await order.save();
+        await OrdersService.restoreOrderStockAndCoupon(order);
+        if (wasPaid) await OrdersService.refundCancelledOrder(order, ownerId, 'Người bán từ chối đơn');
 
         try {
             if (order.buyer_id) {

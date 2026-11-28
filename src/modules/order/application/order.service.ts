@@ -20,7 +20,7 @@ import { byCodeOrId, dec, num, toBuyerObjectId } from "../utils";
 import { executeRefund } from "../../payment/application/refund-runtime";
 import { payosService } from "../../payment/application/payos.service";
 import { logger } from "../../../shared/utils/logger";
-import { assertNotOwnProduct } from '../../product/application/purchase-guard';
+import { assertNotOwnProduct, assertPurchasable, parseQuantity } from '../../product/application/purchase-guard';
 import { Cart } from '../../cart/infrastructure/models/cart.model';
 
 
@@ -128,12 +128,7 @@ export class OrdersService {
       const product = await Product.findById(it.productId);
       if (!product) throw new Error(`Sản phẩm ${it.productId} không tồn tại`);
       await assertNotOwnProduct(buyerId, product.shop_id);
-      if (
-        product.listing_status === "INACTIVE" ||
-        product.listing_status === "EXPIRED"
-      ) {
-        throw new Error(`Sản phẩm "${product.title}" hiện không bán`);
-      }
+      assertPurchasable(product);
 
       let variant = null;
       if (it.variantId && mongoose.Types.ObjectId.isValid(it.variantId)) {
@@ -156,7 +151,7 @@ export class OrdersService {
       if (variant.is_active === false)
         throw new Error(`Biến thể của "${product.title}" đã ngừng bán`);
 
-      const qty = Math.max(1, Number(it.quantity) || 1);
+      const qty = parseQuantity(it.quantity, 1);
       if (
         typeof variant.stock_quantity === "number" &&
         variant.stock_quantity < qty
@@ -402,7 +397,7 @@ export class OrdersService {
     const claimed: string[] = [];
     const rollback = async () => {
       await releaseVariantStock(orderItems).catch(err => console.error('[STOCK] Lỗi hoàn tồn kho:', err?.message || err));
-      for (const code of claimed) await PromotionService.releaseUsage(code).catch(() => { });
+      for (const code of claimed) await PromotionService.releaseUsage(code, buyerId).catch(() => { });
     };
 
     const carrierInput = String(
@@ -512,13 +507,18 @@ export class OrdersService {
 
   /** Hoàn lại tồn kho và voucher khi đơn hàng bị hủy */
   static async restoreOrderStockAndCoupon(order: any): Promise<void> {
+    const claimed = await OrderModel.findOneAndUpdate(
+      { _id: order._id, stock_restored_at: { $exists: false } },
+      { $set: { stock_restored_at: new Date() } },
+    );
+    if (!claimed) return;
     if (order.coupon_code) {
-      await PromotionService.releaseUsage(order.coupon_code).catch(err =>
+      await PromotionService.releaseUsage(order.coupon_code, String(order.buyer_id)).catch(err =>
         console.error('[COUPON] Lỗi hoàn lượt dùng voucher:', err?.message || err)
       );
     }
     if (order.shipping_coupon_code) {
-      await PromotionService.releaseUsage(order.shipping_coupon_code).catch(err =>
+      await PromotionService.releaseUsage(order.shipping_coupon_code, String(order.buyer_id)).catch(err =>
         console.error('[COUPON] Lỗi hoàn lượt dùng voucher vận chuyển:', err?.message || err)
       );
     }
@@ -533,6 +533,80 @@ export class OrdersService {
         }
       }
     }
+  }
+
+  /**
+   * Đơn trả trước qua payOS vừa bị hủy: gửi lệnh hoàn tiền và ghi kết quả vào đơn. Trả câu báo thêm cho người mua.
+   * Dùng chung khi người mua tự hủy và khi người bán từ chối/hủy đơn.
+   */
+  static async refundCancelledOrder(order: any, actorId: string, reasonLabel: string): Promise<string> {
+    let refundMessageSuffix = '';
+    if (order.payment_status === 'PAID' && order.payment_method === 'PAYOS') {
+      const refundAmount = Math.max(0,
+        num(order.financial_breakdown?.subtotal) +
+        num(order.financial_breakdown?.shipping_fee) -
+        num(order.financial_breakdown?.coupon_discount)
+      );
+
+      if (refundAmount > 0) {
+        try {
+          const refundResult = await executeRefund({
+            orderId: String(order._id),
+            businessKey: `CANCEL-${order.order_code}-${Date.now()}`,
+            amount: Math.round(refundAmount),
+            reason: `${reasonLabel} #${order.order_code}`,
+            createdBy: String(actorId),
+          });
+
+          if (refundResult.status === 'REFUNDED') {
+            order.payment_status = 'REFUNDED';
+            order.refund_status = 'REFUNDED';
+            order.status_history.push({
+              status: 'CANCELLED',
+              changed_at: new Date(),
+              note: `Cổng thanh toán đã hoàn trả thành công ${refundAmount.toLocaleString('vi-VN')}đ về tài khoản ngân hàng.`
+            });
+            await order.save();
+            refundMessageSuffix = ' Số tiền thanh toán đã được hoàn về tài khoản ngân hàng của bạn.';
+            logger.info(`[AUTO-REFUND SUCCESS] #${order.order_code}: amount=${refundResult.amount}`);
+          } else if (refundResult.status === 'PENDING') {
+            order.refund_status = 'UNDER_REVIEW';
+            order.status_history.push({
+              status: 'CANCELLED',
+              changed_at: new Date(),
+              note: `Lệnh hoàn tiền ${refundAmount.toLocaleString('vi-VN')}đ đang được cổng thanh toán xử lý.`
+            });
+            await order.save();
+            refundMessageSuffix = ' Lệnh hoàn tiền đang được xử lý về tài khoản ngân hàng của bạn.';
+            logger.info(`[AUTO-REFUND PENDING] #${order.order_code}: ${refundResult.error || 'Đang xử lý'}`);
+          } else {
+            const failReason = refundResult.error || 'Cổng thanh toán từ chối lệnh chi tiền';
+            order.refund_status = 'REFUND_REJECTED';
+            order.status_history.push({
+              status: 'CANCELLED',
+              changed_at: new Date(),
+              note: `Hoàn tiền tự động không thành công: ${failReason}. Đang chờ đối soát hoàn thủ công.`
+            });
+            await order.save();
+            refundMessageSuffix = ` Lưu ý: Lệnh hoàn tiền tự động chưa hoàn tất (${failReason}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
+            logger.error(`[AUTO-REFUND FAILED] #${order.order_code}: ${failReason}`);
+          }
+        } catch (refundErr: any) {
+          const errMsg = refundErr?.message || String(refundErr);
+          order.refund_status = 'REFUND_REJECTED';
+          order.status_history.push({
+            status: 'CANCELLED',
+            changed_at: new Date(),
+            note: `Lỗi xử lý hoàn tiền: ${errMsg}. Đang chờ đối soát hoàn thủ công.`
+          });
+          await order.save();
+          refundMessageSuffix = ` Lưu ý: Lỗi xử lý hoàn tiền (${errMsg}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
+          logger.error(`[AUTO-REFUND ERROR] #${order.order_code}: ${errMsg}`);
+        }
+      }
+    }
+
+    return refundMessageSuffix;
   }
 
   /** Người mua tự hủy đơn hàng */
@@ -608,71 +682,7 @@ export class OrdersService {
     await OrdersService.restoreOrderStockAndCoupon(order);
 
     // Tự động kích hoạt lệnh hoàn tiền qua PayOS Payout
-    let refundMessageSuffix = '';
-    if (wasPaid && order.payment_method === 'PAYOS') {
-      const refundAmount = Math.max(0,
-        num(order.financial_breakdown?.subtotal) +
-        num(order.financial_breakdown?.shipping_fee) -
-        num(order.financial_breakdown?.coupon_discount)
-      );
-
-      if (refundAmount > 0) {
-        try {
-          const refundResult = await executeRefund({
-            orderId: String(order._id),
-            businessKey: `CANCEL-${order.order_code}-${Date.now()}`,
-            amount: Math.round(refundAmount),
-            reason: `Người mua tự hủy đơn #${order.order_code}`,
-            createdBy: String(buyerId),
-          });
-
-          if (refundResult.status === 'REFUNDED') {
-            order.payment_status = 'REFUNDED';
-            order.refund_status = 'REFUNDED';
-            order.status_history.push({
-              status: 'CANCELLED',
-              changed_at: new Date(),
-              note: `Cổng thanh toán đã hoàn trả thành công ${refundAmount.toLocaleString('vi-VN')}đ về tài khoản ngân hàng.`
-            });
-            await order.save();
-            refundMessageSuffix = ' Số tiền thanh toán đã được hoàn về tài khoản ngân hàng của bạn.';
-            logger.info(`[AUTO-REFUND SUCCESS] #${order.order_code}: amount=${refundResult.amount}`);
-          } else if (refundResult.status === 'PENDING') {
-            order.refund_status = 'UNDER_REVIEW';
-            order.status_history.push({
-              status: 'CANCELLED',
-              changed_at: new Date(),
-              note: `Lệnh hoàn tiền ${refundAmount.toLocaleString('vi-VN')}đ đang được cổng thanh toán xử lý.`
-            });
-            await order.save();
-            refundMessageSuffix = ' Lệnh hoàn tiền đang được xử lý về tài khoản ngân hàng của bạn.';
-            logger.info(`[AUTO-REFUND PENDING] #${order.order_code}: ${refundResult.error || 'Đang xử lý'}`);
-          } else {
-            const failReason = refundResult.error || 'Cổng thanh toán từ chối lệnh chi tiền';
-            order.refund_status = 'REFUND_REJECTED';
-            order.status_history.push({
-              status: 'CANCELLED',
-              changed_at: new Date(),
-              note: `Hoàn tiền tự động không thành công: ${failReason}. Đang chờ đối soát hoàn thủ công.`
-            });
-            await order.save();
-            refundMessageSuffix = ` Lưu ý: Lệnh hoàn tiền tự động chưa hoàn tất (${failReason}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
-            logger.error(`[AUTO-REFUND FAILED] #${order.order_code}: ${failReason}`);
-          }
-        } catch (refundErr: any) {
-          const errMsg = refundErr?.message || String(refundErr);
-          order.refund_status = 'REFUND_REJECTED';
-          order.status_history.push({
-            status: 'CANCELLED',
-            changed_at: new Date(),
-            note: `Lỗi xử lý hoàn tiền: ${errMsg}. Đang chờ đối soát hoàn thủ công.`
-          });
-          await order.save();
-          refundMessageSuffix = ` Lưu ý: Lỗi xử lý hoàn tiền (${errMsg}). Hệ thống/Shop sẽ đối soát và hoàn tiền cho bạn.`;
-          logger.error(`[AUTO-REFUND ERROR] #${order.order_code}: ${errMsg}`);
-        }
-      }
-    }
+    const refundMessageSuffix = await OrdersService.refundCancelledOrder(order, String(buyerId), 'Người mua tự hủy đơn');
 
     // Thông báo cho Buyer
     try {
@@ -811,6 +821,10 @@ export class OrdersService {
   ): Promise<OrderResponse> {
     const order = await OrderModel.findOne(byCodeOrId(id)).populate("shop_id");
     if (!order) throw new Error("Không tìm thấy đơn hàng");
+    // Đơn payOS chỉ được xác nhận qua payOS; đơn đã trả hoặc đã hủy không được đổi trạng thái thanh toán nữa.
+    if (order.payment_method === 'PAYOS' || order.payment_status !== 'PENDING' || order.order_status === 'CANCELLED') {
+      throw new Error("Đơn hàng không ở trạng thái chờ thanh toán");
+    }
 
     if (gatewayStatus === "success") {
       order.payment_status = "PAID";

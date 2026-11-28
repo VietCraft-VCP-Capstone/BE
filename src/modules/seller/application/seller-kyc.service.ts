@@ -147,7 +147,7 @@ export class SellerKycService {
             logger.info(`📧 Đã gửi email dự phòng mã OTP tới: ${user.email}`);
         }
 
-        logger.info(`📱 SMS OTP -> ${phone}: [ ${otp} ] (SpeedSMS status: ${smsResult.success ? 'SENT' : smsResult.message})`);
+        logger.info(`📱 SMS OTP -> ${maskCardNumber(phone)} (SpeedSMS status: ${smsResult.success ? 'SENT' : smsResult.message})`);
 
         return {
             success: true,
@@ -445,7 +445,11 @@ export class SellerKycService {
             app.kyc_data?.business_license_image
         ].filter(Boolean) as string[];
 
-        for (const fname of filesToDelete) {
+        // Cả ảnh đã tải lên rồi đổi (không nằm trong hồ sơ) cũng phải xóa.
+        const ownPrefix = `kyc_${String(userId).replace(/[^a-zA-Z0-9]/g, '')}_`;
+        const uploaded = fs.existsSync(KYC_STORAGE_ROOT) ? fs.readdirSync(KYC_STORAGE_ROOT).filter(f => f.startsWith(ownPrefix)) : [];
+
+        for (const fname of new Set([...filesToDelete, ...uploaded])) {
             const absPath = resolveKycFilePath(fname);
             if (absPath && fs.existsSync(absPath)) {
                 try {
@@ -456,6 +460,7 @@ export class SellerKycService {
             }
         }
 
+        await KycOcrScan.deleteMany({ user_id: userId });
         await SellerApplication.deleteOne({ _id: app._id });
         await User.findByIdAndUpdate(userId, {
             seller_status: 'NONE',

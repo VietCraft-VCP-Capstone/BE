@@ -1,10 +1,12 @@
 import { Router, Response } from 'express';
 import { EventService } from '../application/event.service';
 import { optionalAuthenticate, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
+import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 
 const router = Router();
+const eventLimiter = userRateLimit(120, 60_000, 'Gửi sự kiện quá nhanh, vui lòng thử lại sau.');
 
-router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/events/view', eventLimiter, optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { product_id, session_id, traffic_source } = req.body;
         const userAgent = req.get('user-agent') || '';
@@ -32,7 +34,7 @@ router.post('/events/view', optionalAuthenticate, async (req: AuthenticatedReque
     }
 });
 
-router.post('/events/add-to-cart', optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/events/add-to-cart', eventLimiter, optionalAuthenticate, async (req: AuthenticatedRequest, res: Response) => {
     try {
         const { product_id, session_id, traffic_source } = req.body;
         const userAgent = req.get('user-agent') || '';

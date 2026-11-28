@@ -1,11 +1,12 @@
 import { Router, Response } from 'express';
 import path from 'path';
 import { SellerKycService } from '../application/seller-kyc.service';
-import { authenticate, requireRole, AuthenticatedRequest } from '../../../app/middleware/auth.middleware';
-import { uploadKycDocument, encryptUploadedKycFile, verifyKycFileOwnership } from '../../../shared/upload/kyc-storage.middleware';
+import { authenticate, requireRole, AuthenticatedRequest, checkToken } from '../../../app/middleware/auth.middleware';
+import { uploadKycDocument, saveEncryptedKycFile, verifyKycFileOwnership } from '../../../shared/upload/kyc-storage.middleware';
 import { SellerApplication } from '../infrastructure/models/seller-application.model';
 import { generatePresignedToken } from '../../../shared/utils/crypto.service';
 import { logger } from '../../../shared/utils/logger';
+import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 
 const router = Router();
 
@@ -72,18 +73,15 @@ router.post('/phone-otp/verify', authenticate, async (req: AuthenticatedRequest,
 /**
  * 4. Tải lên tài liệu định danh riêng tư (CCCD, Chân dung, GPKD)
  */
-router.post('/upload-doc', authenticate, uploadKycDocument.single('file'), async (req: AuthenticatedRequest, res: Response) => {
+router.post('/upload-doc', authenticate, userRateLimit(20, 10 * 60_000, 'Bạn tải tài liệu quá nhiều lần, vui lòng đợi vài phút.'), uploadKycDocument.single('file'), async (req: AuthenticatedRequest, res: Response) => {
     try {
         if (!req.file) {
             return res.status(400).json({ success: false, error: 'Không tìm thấy file tải lên.' });
         }
 
-        const filename = req.file.filename;
+        const filename = saveEncryptedKycFile(req.user!.id, req.file);
 
-        // Mã hóa ảnh nhạy cảm trên đĩa ngay sau khi upload (AES-256-CBC at-rest encryption)
-        encryptUploadedKycFile(req.file.path);
-
-        const { token } = generatePresignedToken(filename, 3600); // 1 giờ cho phiên upload
+        const { token } = generatePresignedToken(filename);
         const secureUrl = `/api/seller/kyc/files/${filename}?token=${token}`;
 
         res.status(200).json({
@@ -136,13 +134,12 @@ router.get('/files/:filename', async (req: any, res: Response) => {
         let role = '';
         let userId = '';
         if (authHeader && authHeader.startsWith('Bearer ')) {
-            try {
-                const jwt = require('jsonwebtoken');
-                const { config } = require('../../../app/config');
-                const decoded = jwt.verify(authHeader.split(' ')[1], config.jwtSecret);
-                role = decoded.role;
-                userId = decoded.id;
-            } catch { }
+            // Kiểm cả tài khoản trong DB: admin bị khóa/hạ quyền với token cũ không được xem ảnh CCCD
+            const checked = await checkToken(authHeader.split(' ')[1]);
+            if (checked.ok) {
+                role = checked.user.role;
+                userId = checked.user.id;
+            }
         }
 
         const isAllowed = SellerKycService.isAuthorizedToAccessFile(filename, token, role, userId);
@@ -163,9 +160,13 @@ router.get('/files/:filename', async (req: any, res: Response) => {
 
         res.setHeader('Content-Type', mime);
         res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Referrer-Policy', 'no-referrer');
+        logger.info(`[KYC Access] ${filename} được mở bởi ${userId ? `user ${userId}` : 'link tạm'} (IP ${req.ip})`);
         res.send(buffer);
     } catch (error: any) {
-        res.status(500).json({ error: error.message });
+        logger.error(`[KYC Access] Không đọc được ${req.params.filename}: ${error.message}`);
+        res.status(500).json({ error: 'Không đọc được tài liệu.' });
     }
 });
 

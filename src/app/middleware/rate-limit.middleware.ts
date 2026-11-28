@@ -3,7 +3,8 @@ import { AuthenticatedRequest } from './auth.middleware';
 
 const SWEEP_AT = 1000;
 
-export function userRateLimit(max: number, windowMs: number, message: string) {
+export function userRateLimit(max: number, windowMs: number, message: string,
+    keyOf?: (req: AuthenticatedRequest) => string | undefined) {
     const hits = new Map<string, { count: number; resetAt: number }>();
 
     return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
@@ -12,7 +13,7 @@ export function userRateLimit(max: number, windowMs: number, message: string) {
             for (const [key, hit] of hits) if (hit.resetAt <= now) hits.delete(key);
         }
 
-        const key = req.user?.id || req.ip || 'anonymous';
+        const key = keyOf?.(req) || req.user?.id || req.ip || 'anonymous';
         let hit = hits.get(key);
         if (!hit || hit.resetAt <= now) {
             hit = { count: 0, resetAt: now + windowMs };
