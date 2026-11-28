@@ -7,8 +7,12 @@ export interface ISeasonalPlan extends Document {
     event_year: number;
     saved_ideas: string[];
     idea_drafts: Record<string, any>;
+    /** nội dung ý tưởng lúc seller lưu (danh sách ý tưởng đổi hằng ngày theo dữ liệu thị trường) */
+    idea_snapshots: Record<string, any>;
     checked_milestones: Record<string, boolean>;
     review?: { rating: 'good' | 'neutral' | 'poor'; note: string; updated_at: Date } | null;
+    /** đánh giá riêng từng ý tưởng đã áp dụng: { [idea_id (đã thay ".")]: { rating, note, updated_at } } */
+    idea_reviews?: Record<string, { rating: 'good' | 'neutral' | 'poor'; note: string; updated_at: Date }>;
     /** mốc thời gian của kỳ (ISO date) để nhắc việc; cập nhật mỗi khi seller mở trang */
     milestones?: { event_name?: string; traction_start?: string; cut_off_date?: string; event_date?: string; post_event_end?: string };
     /** mốc đã nhắc: { traction_start | cutoff_soon | post_event: ISO time } */
@@ -23,6 +27,7 @@ const SeasonalPlanSchema = new Schema<ISeasonalPlan>({
     event_year: { type: Number, required: true, min: 2020, max: 2100 },
     saved_ideas: { type: [String], default: [] },
     idea_drafts: { type: Schema.Types.Mixed, default: {} },
+    idea_snapshots: { type: Schema.Types.Mixed, default: {} },
     checked_milestones: { type: Schema.Types.Mixed, default: {} },
     review: {
         type: new Schema({
@@ -32,6 +37,7 @@ const SeasonalPlanSchema = new Schema<ISeasonalPlan>({
         }, { _id: false }),
         default: null,
     },
+    idea_reviews: { type: Schema.Types.Mixed, default: {} },
     milestones: { type: Schema.Types.Mixed, default: undefined },
     reminded: { type: Schema.Types.Mixed, default: {} },
 }, {

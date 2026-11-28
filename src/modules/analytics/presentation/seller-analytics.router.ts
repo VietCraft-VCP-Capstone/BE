@@ -17,7 +17,8 @@ import { parsePreviewBody, PreviewBodyResult } from '../application/health-previ
 import { parseHealthDraft } from '../application/health-draft';
 import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 import { writableShopId } from '../application/seasonal-access';
-import { parsePlanRef, PlanRef } from '../application/seasonal-plan';
+import { ideaReviewsBySavedIds, legacyForCamp, parseIdeaSnapshot, parseLinkProductBody, parsePlanRef, parseReviewBody, PlanRef, safeMapKey } from '../application/seasonal-plan';
+import { Shop } from '../../product/infrastructure/models/shop.model';
 import { SeasonalPlan } from '../infrastructure/models/seasonal-plan.model';
 
 type Method = 'get' | 'post' | 'delete';
@@ -270,7 +271,6 @@ router.post('/listings/health/draft', userRateLimit(20, 60_000, 'Bạn thử qu�
 router.get('/forecast/seasonal', userRateLimit(20, 60_000, 'Bạn tải trang mùa vụ quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 router.post('/product/recognize-image', userRateLimit(10, 60_000, 'Bạn nhận diện ảnh quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 
-const ALLOWED_RATINGS = new Set(['good', 'neutral', 'poor']);
 const SAFE_KEY_REGEX = /^[^$\0\r\n]{1,200}$/;
 const MAX_SAVED_IDEAS = 200;
 const MAX_DRAFTS_OR_REVIEWS = 200;
@@ -280,9 +280,7 @@ function isSafeKey(value: unknown, maxLen = 200): value is string {
     return typeof value === 'string' && value.trim().length > 0 && value.length <= maxLen && SAFE_KEY_REGEX.test(value);
 }
 
-function toSafeMapKey(key: string): string {
-    return key.replace(/\./g, '_');
-}
+const toSafeMapKey = safeMapKey;
 
 function replyDemoReadOnly(res: Response) {
     return res.status(403).json({
@@ -391,7 +389,15 @@ const isDuplicateKey = (e: any) => e?.code === 11000;
 async function updatePlan(shopId: mongoose.Types.ObjectId, ref: PlanRef, filter: Record<string, unknown>, update: Record<string, unknown>) {
     const base = planFilter(shopId, ref);
     try {
-        await SeasonalPlan.updateOne(base, { $setOnInsert: { saved_ideas: [], idea_drafts: {}, checked_milestones: {}, review: null } }, { upsert: true });
+        if (!await SeasonalPlan.exists(base)) {
+            // Kế hoạch đầu tiên của dịp: chép ý tưởng kiểu cũ (Shop.settings) của đúng dịp để seller không mất ý tưởng đã lưu
+            const shop: any = await Shop.findById(shopId).select('settings.seasonal_preferences').lean();
+            const legacy = legacyForCamp(shop?.settings?.seasonal_preferences, ref.event_key);
+            const drafts = Object.fromEntries(Object.entries(legacy.idea_drafts).map(([k, v]) => [safeMapKey(k), v]));
+            await SeasonalPlan.updateOne(base, {
+                $setOnInsert: { saved_ideas: legacy.saved_ideas, idea_drafts: drafts, idea_snapshots: {}, checked_milestones: {}, review: null },
+            }, { upsert: true });
+        }
     } catch (e) {
         if (!isDuplicateKey(e)) throw e; // hai request cùng tạo: bản còn lại đã tạo xong
     }
@@ -409,18 +415,82 @@ router.post('/forecast/seasonal/save-idea', async (req: AuthenticatedRequest, re
         }
         const base = planFilter(ctx.shopId, ctx.ref);
         const existing = await SeasonalPlan.exists({ ...base, saved_ideas: idea_id });
+        // Giữ nội dung ý tưởng lúc lưu: danh sách ý tưởng đổi hằng ngày theo dữ liệu thị trường
+        const snapshot = parseIdeaSnapshot(req.body?.snapshot);
         const updated = existing
             ? await SeasonalPlan.findOneAndUpdate(base, { $pull: { saved_ideas: idea_id } }, { new: true }).lean()
             : await updatePlan(ctx.shopId, ctx.ref,
                 { ...base, [`saved_ideas.${MAX_SAVED_IDEAS - 1}`]: { $exists: false } },
-                { $addToSet: { saved_ideas: idea_id } },
+                {
+                    $addToSet: { saved_ideas: idea_id },
+                    ...(snapshot ? { $set: { [`idea_snapshots.${toSafeMapKey(idea_id)}`]: { ...snapshot, saved_at: new Date().toISOString() } } } : {}),
+                },
             );
         if (!updated) return res.status(400).json({ success: false, error: 'saved_ideas_limit_reached' });
-        return res.json({ success: true, saved_ideas: updated.saved_ideas || [] });
+        return res.json({ success: true, saved_ideas: updated.saved_ideas || [], idea_snapshots: (updated as any).idea_snapshots || {} });
     } catch (error: any) {
         return res.status(500).json({ success: false, error: 'save_failed', message: 'Lỗi khi lưu ý tưởng theo dịp.' });
     }
 });
+
+// Áp dụng ý tưởng vào một sản phẩm CÓ SẴN của shop (hoặc bỏ gắn). Thành quả của ý tưởng
+// được đo bằng đơn thật của các sản phẩm có source_idea_id trong kỳ dịp.
+router.post('/forecast/seasonal/link-product', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const ctx = await planContext(req, res);
+        if (!ctx) return;
+        const body = parseLinkProductBody(req.body);
+        if (body.invalid) return res.status(400).json({ success: false, error: 'invalid_param', field: body.invalid });
+        const productOid = new mongoose.Types.ObjectId(body.product_id);
+        const owned = await Product.findOne({ _id: productOid, shop_id: ctx.shopId }).select('source_idea_id').lean();
+        if (!owned) return res.status(404).json({ success: false, error: 'product_not_found' });
+        const previous = (owned as any).source_idea_id || null;
+        if (body.linked) {
+            await Product.updateOne({ _id: productOid, shop_id: ctx.shopId }, { $set: { source_idea_id: body.idea_id } });
+            await updatePlan(ctx.shopId, ctx.ref,
+                { ...planFilter(ctx.shopId, ctx.ref), [`saved_ideas.${MAX_SAVED_IDEAS - 1}`]: { $exists: false } },
+                { $addToSet: { saved_ideas: body.idea_id } },
+            );
+        } else if (previous === body.idea_id) {
+            await Product.updateOne({ _id: productOid, shop_id: ctx.shopId, source_idea_id: body.idea_id }, { $unset: { source_idea_id: 1 } });
+        }
+        await ProductsService.invalidateProductCache(body.product_id);
+        return res.json({
+            success: true,
+            product_id: body.product_id,
+            source_idea_id: body.linked ? body.idea_id : (previous === body.idea_id ? null : previous),
+            previous_idea_id: previous,
+        });
+    } catch (error: any) {
+        return res.status(500).json({ success: false, error: 'save_failed', message: 'Lỗi khi gắn sản phẩm vào ý tưởng.' });
+    }
+});
+
+// "Gợi ý thêm": nối tối đa 3 ý tưởng AI mới vào danh sách ý tưởng của kỳ dịp (chờ LLM trực tiếp)
+const MORE_IDEAS_MESSAGES: Record<string, { status: number; message: string }> = {
+    busy: { status: 409, message: 'AI đang soạn ý tưởng cho dịp này, vui lòng đợi.' },
+    no_ideas_yet: { status: 409, message: 'Ý tưởng của dịp chưa soạn xong, hãy tải lại trang rồi thử lại.' },
+    no_more_signals: { status: 409, message: 'Đã dùng hết dữ liệu dịp này để gợi ý.' },
+    limit_reached: { status: 409, message: 'Dịp này đã đủ số ý tưởng tối đa.' },
+    no_new_ideas: { status: 409, message: 'AI chưa ra ý tưởng khác các ý tưởng đã có, hãy bấm lại để thử với dữ liệu khác.' },
+    llm_unavailable: { status: 503, message: 'AI tạm thời chưa soạn được ý tưởng, vui lòng thử lại sau.' },
+};
+router.post('/forecast/seasonal/more-ideas',
+    userRateLimit(6, 60_000, 'Bạn yêu cầu gợi ý quá nhiều lần, vui lòng đợi một phút rồi thử lại.'),
+    async (req: AuthenticatedRequest, res: Response) => {
+        try {
+            const ctx = await planContext(req, res);
+            if (!ctx) return;
+            const out = await SeasonalAnalyticsService.generateMoreIdeas(ctx.shopId, ctx.ref);
+            if ('error' in out) {
+                const m = MORE_IDEAS_MESSAGES[out.error];
+                return res.status(m.status).json({ success: false, error: out.error, message: m.message });
+            }
+            return res.json({ success: true, ideas: out.ideas });
+        } catch (error: any) {
+            return res.status(500).json({ success: false, error: 'more_ideas_failed', message: 'Lỗi khi gợi ý thêm ý tưởng.' });
+        }
+    });
 
 // Lưu bản chỉnh sửa của seller cho 1 ý tưởng của kỳ dịp
 router.post('/forecast/seasonal/idea-draft', async (req: AuthenticatedRequest, res: Response) => {
@@ -451,19 +521,24 @@ router.post('/forecast/seasonal/idea-draft', async (req: AuthenticatedRequest, r
     }
 });
 
-// Lưu đánh giá thành quả sau dịp của seller (mỗi kỳ một đánh giá)
+// Lưu đánh giá thành quả sau dịp của seller: đánh giá chung (không bắt buộc) + đánh giá riêng từng ý tưởng đã áp dụng
 router.post('/forecast/seasonal/review', async (req: AuthenticatedRequest, res: Response) => {
     try {
         const ctx = await planContext(req, res);
         if (!ctx) return;
-        const { rating, note } = req.body || {};
-        if (typeof rating !== 'string' || !ALLOWED_RATINGS.has(rating)) {
-            return res.status(400).json({ success: false, error: 'invalid_param', field: 'rating' });
+        const parsed = parseReviewBody(req.body);
+        if (parsed.invalid) {
+            return res.status(400).json({ success: false, error: 'invalid_param', field: parsed.invalid });
         }
-        const review = { rating, note: typeof note === 'string' ? note.trim().slice(0, 1000) : '', updated_at: new Date() };
-        const updated = await updatePlan(ctx.shopId, ctx.ref, planFilter(ctx.shopId, ctx.ref), { $set: { review } });
+        const updated = await updatePlan(ctx.shopId, ctx.ref, planFilter(ctx.shopId, ctx.ref), {
+            $set: { review: parsed.review, idea_reviews: parsed.idea_reviews },
+        });
         if (!updated) return res.status(409).json({ success: false, error: 'conflict' });
-        return res.json({ success: true, occasion_reviews: { [ctx.ref.event_key]: updated.review } });
+        return res.json({
+            success: true,
+            occasion_reviews: { [ctx.ref.event_key]: updated.review },
+            idea_reviews: ideaReviewsBySavedIds(updated.idea_reviews, updated.saved_ideas || []),
+        });
     } catch (error: any) {
         return res.status(500).json({ success: false, error: 'save_failed', message: 'Lỗi khi lưu đánh giá thành quả.' });
     }

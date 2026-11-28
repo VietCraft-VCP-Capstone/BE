@@ -82,7 +82,7 @@ export async function processSeasonalReminders(deps: SeasonalReminderDeps): Prom
 
 const vnToday = () => new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 10);
 
-function defaultDeps(): SeasonalReminderDeps {
+export function defaultDeps(): SeasonalReminderDeps {
     return {
         today: vnToday,
         async listPlans(today) {

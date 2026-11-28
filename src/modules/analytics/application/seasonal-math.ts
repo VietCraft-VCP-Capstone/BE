@@ -23,7 +23,10 @@ export function orderGmv(o: any): number {
     return toNum(o?.financial_breakdown?.subtotal);
 }
 
-export const MIN_BASELINE_COVERAGE_DAYS = 14;
+/** Dưới số ngày lịch sử này trước mùa thì chưa có gì để tính nhịp nền. */
+export const MIN_BASELINE_COVERAGE_DAYS = 7;
+/** Từ số ngày này trở lên (và đủ mẫu) mới coi nhịp nền là đáng tin. */
+export const CONFIDENT_COVERAGE_DAYS = 14;
 const DAY_MS = 86400000;
 
 const createdMs = (o: any): number => new Date(o?.created_at).getTime();
@@ -32,8 +35,10 @@ export interface BaselineRate {
     rate: number | null;
     orders: number;
     coverage_days: number;
-    /** baseline_history: shop chưa đủ ngày có đơn trước mùa; baseline_orders: đủ ngày nhưng quá ít đơn */
-    missing: 'baseline_history' | 'baseline_orders' | null;
+    /** baseline_history: shop có dưới 7 ngày lịch sử trước mùa nên chưa tính được */
+    missing: 'baseline_history' | null;
+    /** vẫn có số, nhưng dựa trên ít đơn (< 5) hoặc lịch sử ngắn (< 14 ngày) */
+    low_confidence: boolean;
 }
 
 /**
@@ -48,9 +53,14 @@ export function baselineDailyRate(orders: any[], windowStart: Date, days = RATE_
     const startMs = Math.max(endMs - days * DAY_MS, firstMs);
     const coverageDays = Number.isFinite(startMs) ? Math.max(0, Math.ceil((endMs - startMs) / DAY_MS)) : 0;
     const n = valid.filter(o => createdMs(o) >= startMs && createdMs(o) < endMs).length;
-    if (coverageDays < MIN_BASELINE_COVERAGE_DAYS) return { rate: null, orders: n, coverage_days: coverageDays, missing: 'baseline_history' };
-    if (n < MIN_ORDERS_FOR_RATE) return { rate: null, orders: n, coverage_days: coverageDays, missing: 'baseline_orders' };
-    return { rate: n / coverageDays, orders: n, coverage_days: coverageDays, missing: null };
+    if (coverageDays < MIN_BASELINE_COVERAGE_DAYS) {
+        return { rate: null, orders: n, coverage_days: coverageDays, missing: 'baseline_history', low_confidence: true };
+    }
+    // Ít đơn vẫn tính (seller cần thấy số), chỉ gắn cờ độ tin cậy thấp
+    return {
+        rate: n / coverageDays, orders: n, coverage_days: coverageDays, missing: null,
+        low_confidence: n < MIN_ORDERS_FOR_RATE || coverageDays < CONFIDENT_COVERAGE_DAYS,
+    };
 }
 
 /** Đơn hợp lệ đặt trong [start, end]. */
@@ -94,7 +104,7 @@ export function measuredUplift(info: any): MeasuredUplift | null {
 /** Mục tiêu đơn của dịp; null khi thiếu nhịp đơn hoặc độ nâng. */
 export function targetOrders(ratePerDay: number | null, windowDays: number, uplift: number | null): number | null {
     if (ratePerDay == null || uplift == null) return null;
-    return Math.max(1, Math.round(ratePerDay * windowDays * uplift));
+    return Math.max(0, Math.round(ratePerDay * windowDays * uplift));
 }
 
 /** 00:00 giờ Việt Nam của ngày `YYYY-MM-DD`. */
@@ -156,4 +166,50 @@ export function campaignTimingBasis(camp: any, actionType: 'close_orders' | 'boo
         return `Bắt đầu chuẩn bị ${ddmm(rd)} = Hạn chốt đơn (${ddmm(cut)}) − ${Number(camp?.prep_days) || dayDiff(rd, cut)} ngày chuẩn bị của dịp.`;
     }
     return '';
+}
+
+/**
+ * Ý tưởng AI là sản phẩm chưa tồn tại nên không có giá vốn thật. Giá vốn suy từ tỷ lệ giá vốn chung của shop
+ * cho ra cùng một biên lãi ở mọi ý tưởng (1 − tỷ lệ − phí sàn), nên bỏ hẳn thay vì hiện một con số vô nghĩa.
+ */
+export function stripIdeaMargin<T extends { estimated_cost_vnd?: unknown; expected_margin_pct?: unknown; cost_basis?: unknown }>(
+    idea: T,
+): Omit<T, 'estimated_cost_vnd' | 'expected_margin_pct' | 'cost_basis'> {
+    const { estimated_cost_vnd: _c, expected_margin_pct: _m, cost_basis: _b, ...rest } = idea;
+    return rest;
+}
+
+export interface TierLevel { level: number; per_day: number; base_count: number; coverage_days: number; low_confidence: boolean }
+
+/**
+ * Mức ngày thường của một tầng phễu (lượt xem, thêm giỏ): số sự kiện/ngày trong khoảng trước ngày mở bán
+ * × số ngày kỳ dịp. Null khi chưa đủ 14 ngày lịch sử hoặc quá ít sự kiện để tính nhịp.
+ */
+export function tierNormalLevel(baseCount: number, coverageDays: number, windowDays: number, minCount: number): TierLevel | null {
+    if (coverageDays < MIN_BASELINE_COVERAGE_DAYS) return null;
+    const perDay = baseCount / coverageDays;
+    return {
+        level: Math.round(perDay * windowDays),
+        per_day: Math.round(perDay * 100) / 100,
+        base_count: baseCount,
+        coverage_days: coverageDays,
+        low_confidence: baseCount < minCount || coverageDays < CONFIDENT_COVERAGE_DAYS,
+    };
+}
+
+/** Tỷ lệ thêm giỏ / lượt xem và đơn / thêm giỏ (%); null khi mẫu bằng 0. */
+export const MIN_VIEWS_FOR_RATE = 50;
+export const MIN_CARTS_FOR_RATE = 10;
+
+/** Tỷ lệ thêm giỏ / lượt xem và đơn / thêm giỏ (%) kèm cỡ mẫu; mẫu nhỏ thì gắn cờ độ tin cậy thấp. */
+export function conversionRates(views: number, carts: number, orders: number) {
+    const pct = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 1000) / 10 : null);
+    return {
+        cart_rate_pct: pct(carts, views),
+        order_rate_pct: pct(orders, carts),
+        views,
+        carts,
+        orders,
+        low_confidence: views < MIN_VIEWS_FOR_RATE || carts < MIN_CARTS_FOR_RATE,
+    };
 }

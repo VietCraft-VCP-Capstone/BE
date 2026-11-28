@@ -37,7 +37,7 @@ export async function processForecastSnapshots(deps: ForecastSnapshotDeps): Prom
 
 const ORDER_LOOKBACK_DAYS = 400;
 
-function defaultDeps(): ForecastSnapshotDeps {
+export function defaultDeps(): ForecastSnapshotDeps {
     return {
         now: () => new Date(),
         async listPlans(todayVn) {
