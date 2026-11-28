@@ -3,7 +3,10 @@ import { Shop } from '../../product/infrastructure/models/shop.model';
 import { Order } from '../../order/infrastructure/models/order.model';
 import { SellerSettingsService } from './seller-settings.service';
 import { SellerWithdrawal, ISellerWithdrawal } from '../infrastructure/models/seller-withdrawal.model';
-import { PayOS } from '@payos/node';
+import { PayOS, APIError } from '@payos/node';
+
+/** Mã nghiệp vụ payOS Payout nghĩa là lệnh bị từ chối, chưa chi tiền. */
+const PAYOUT_REJECTED_CODES = new Set(['607']);
 import { config } from '../../../app/config';
 import { PayosRefundGateway, payosPayoutReference, payoutDescription } from '../../payment/application/payos-refund.gateway';
 import { logger } from '../../../shared/utils/logger';
@@ -321,6 +324,11 @@ export class SellerFinanceService {
         if (!bank || !bank.accountNumber || !bank.bankCode) {
             throw new Error('Chưa có thông tin tài khoản ngân hàng thụ hưởng. Vui lòng thiết lập trong Cài đặt thanh toán.');
         }
+        // Số tài khoản phải là chữ số thật: giải mã lỗi trả '****', gửi đi thì payOS từ chối mà tiền vẫn bị tạm giữ.
+        if (!/^\d{6,20}$/.test(bank.accountNumber)) {
+            logger.error(`[SELLER WITHDRAWAL] Số tài khoản thụ hưởng không hợp lệ sau giải mã (shop ${shopId}, bank ${bank.bankCode}).`);
+            throw new Error('Không đọc được số tài khoản ngân hàng thụ hưởng. Vui lòng nhập lại tài khoản trong Cài đặt thanh toán rồi thử lại.');
+        }
 
         // Kiểm mọi điều kiện chi TRƯỚC khi tạo lệnh: chưa cấu hình cổng chi thì không được ghi "đã chi"
         const payosGateway = new PayosRefundGateway();
@@ -384,9 +392,18 @@ export class SellerFinanceService {
             withdrawal.payout_transaction_id = payoutResult?.id;
             await withdrawal.save();
         } catch (err: any) {
+            const errMsg = err?.message || 'Lỗi không xác định từ cổng chi tiền PayOS';
+            // payOS trả HTTP 200 kèm mã nghiệp vụ từ chối hẳn (lệnh không được tạo) → FAILED để hoàn số dư.
+            // Chỉ nhận các mã chắc chắn không phải "đã chi" (vd 607 tài khoản đích sai, không thể là trùng lệnh do retry).
+            if (err instanceof APIError && err.status === 200 && err.code && PAYOUT_REJECTED_CODES.has(err.code)) {
+                logger.warn(`[SELLER WITHDRAWAL REJECTED] ${withdrawalCode} (ref ${referenceId}): ${errMsg}`);
+                withdrawal.status = 'FAILED';
+                withdrawal.failure_reason = `payOS từ chối lệnh chi (ref ${referenceId}): ${errMsg}`;
+                await withdrawal.save();
+                throw new Error(`Cổng chi tiền từ chối lệnh rút: ${err.desc || errMsg}. Số tiền đã được hoàn lại vào số dư khả dụng.`);
+            }
             // Lỗi lúc đã gửi lệnh (mạng, timeout...) thì KHÔNG biết tiền đã chi hay chưa: giữ PROCESSING để số tiền
             // vẫn bị trừ khỏi số dư (không cho rút lại rồi chi hai lần), quản trị đối soát theo mã tham chiếu.
-            const errMsg = err?.message || 'Lỗi không xác định từ cổng chi tiền PayOS';
             logger.error(`[SELLER WITHDRAWAL UNKNOWN] ${withdrawalCode} (ref ${referenceId}): ${errMsg}`);
             withdrawal.failure_reason = `Chưa xác nhận được kết quả chi từ payOS (ref ${referenceId}): ${errMsg}`;
             await withdrawal.save();
