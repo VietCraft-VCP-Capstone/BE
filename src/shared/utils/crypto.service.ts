@@ -21,6 +21,34 @@ export function getKycEncryptionKey(): Buffer {
     return crypto.createHash('sha256').update(getKycRawSecret()).digest();
 }
 
+/**
+ * Khóa để giải mã dữ liệu CBC cũ: khóa hiện tại trước, rồi sha256(JWT_SECRET) — khóa mà bản trước 26/10/2026
+ * dùng khi chưa đặt KYC_ENCRYPTION_KEY. Thiếu khóa cũ thì số tài khoản/CCCD mã hóa trước đó giải ra '****'.
+ * Chỉ dùng để ĐỌC; mã hóa mới luôn dùng getKycEncryptionKey().
+ */
+function getLegacyCbcKeys(): Buffer[] {
+    const keys = [getKycEncryptionKey()];
+    const jwt = process.env.JWT_SECRET;
+    if (jwt) {
+        const legacy = crypto.createHash('sha256').update(jwt).digest();
+        if (!legacy.equals(keys[0])) keys.push(legacy);
+    }
+    return keys;
+}
+
+function decryptCbcWithAnyKey(iv: Buffer, ciphertext: Buffer): Buffer {
+    let lastErr: any;
+    for (const key of getLegacyCbcKeys()) {
+        try {
+            const decipher = crypto.createDecipheriv(LEGACY_CBC_ALGORITHM, key, iv);
+            return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+        } catch (err) {
+            lastErr = err;
+        }
+    }
+    throw lastErr;
+}
+
 const GCM_ALGORITHM = 'aes-256-gcm';
 const GCM_IV_LENGTH = 12; // 12 bytes IV chuẩn cho AES-GCM
 const GCM_TAG_LENGTH = 16; // 16 bytes Auth Tag
@@ -90,11 +118,7 @@ export function decryptField(encryptedText: string): string {
             const [ivHex, cipherHex] = encryptedText.split(':');
             if (!ivHex || !cipherHex) return encryptedText;
 
-            const iv = Buffer.from(ivHex, 'hex');
-            const decipher = crypto.createDecipheriv(LEGACY_CBC_ALGORITHM, key, iv);
-            let decrypted = decipher.update(cipherHex, 'hex', 'utf8');
-            decrypted += decipher.final('utf8');
-            return decrypted;
+            return decryptCbcWithAnyKey(Buffer.from(ivHex, 'hex'), Buffer.from(cipherHex, 'hex')).toString('utf8');
         } catch (err: any) {
             console.warn(`[CryptoSecurity] Legacy CBC decrypt failed: ${err.message}`);
             return '****';
@@ -152,13 +176,11 @@ export function decryptBuffer(buffer: Buffer): Buffer {
         if (buffer.length < 4 + LEGACY_CBC_IV_LENGTH) {
             throw new Error('[CryptoSecurity] Dữ liệu file KYC legacy bị cắt cụt.');
         }
-        const key = getKycEncryptionKey();
         const iv = buffer.subarray(4, 4 + LEGACY_CBC_IV_LENGTH);
         const ciphertext = buffer.subarray(4 + LEGACY_CBC_IV_LENGTH);
 
         try {
-            const decipher = crypto.createDecipheriv(LEGACY_CBC_ALGORITHM, key, iv);
-            return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+            return decryptCbcWithAnyKey(iv, ciphertext);
         } catch (err: any) {
             throw new Error(`[CryptoSecurity] Giải mã file KYC legacy thất bại: ${err.message}`);
         }
