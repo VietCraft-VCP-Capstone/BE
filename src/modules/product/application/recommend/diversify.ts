@@ -1,6 +1,6 @@
 export const POPULAR_REASON = 'Đang được quan tâm';
 
-const MAX_PER_SHOP = 2;
+export const MAX_PER_SHOP = 2;
 const EXPLORE_MIN_LIMIT = 6;
 
 export interface Diversifiable {

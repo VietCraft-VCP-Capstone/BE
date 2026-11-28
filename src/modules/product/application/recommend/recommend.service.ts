@@ -10,7 +10,7 @@ import { loadProfileInputs, minPriceOf } from './signal-products';
 import { computeProfile, Profile } from './user-profile';
 import { fetchCandidates, tasteClauses } from './recommend.pipeline';
 import { popularity } from './popular';
-import { diversify, POPULAR_REASON } from './diversify';
+import { diversify, MAX_PER_SHOP, POPULAR_REASON } from './diversify';
 import {
     Candidate, Scored, byScore, pickExplore, scoreForYou, scorePopular, scoreRelated,
 } from './score';
@@ -76,7 +76,7 @@ export class RecommendService {
         const tail = `${p.limit}:${cacheService.hashKey(p.q)}`;
         const key = `vietcraft:foryou3:${owner}:${version}:${tail}`;
         const lastKey = `vietcraft:foryou3:last:${owner}:${tail}`;
-        const list = await staleFirst(key, lastKey, POPULAR_KEY, FOR_YOU_TTL, () => computeForYou({ ...p, limit: p.limit + EXTRA }), popularAll);
+        const list = await staleFirst(key, lastKey, POPULAR_KEY, FOR_YOU_TTL, () => computeForYou(p), popularAll);
         return list.filter(i => !hide.has(i.id)).slice(0, p.limit);
     }
 
@@ -153,7 +153,13 @@ async function computeForYou(p: ForYouParams): Promise<ForYouItem[]> {
         ? pickExplore([...tasteRanked, ...popRanked], known)
         : undefined;
 
-    const picked = diversify([...tasteRanked, ...popRanked], limit, explore);
+    const ranked = [...tasteRanked, ...popRanked];
+    const picked = diversify(ranked, limit, explore);
+    // Dự phòng nối sau, để lọc giỏ/đơn mới không làm hỏng giới hạn đa dạng
+    const chosen = new Set(picked.map(c => c.id));
+    const perShop = new Map<string, number>();
+    for (const c of picked) perShop.set(c.shopId, (perShop.get(c.shopId) ?? 0) + 1);
+    picked.push(...ranked.filter(c => !chosen.has(c.id) && (perShop.get(c.shopId) ?? 0) < MAX_PER_SHOP).slice(0, EXTRA));
     const dtos = await ProductsService.mapMany(picked.map(c => c.doc), sold);
     return dtos.map((d, i) => ({ id: d.id, title: d.title, images: (d.images ?? []).slice(0, 1), price: d.price, category: d.category, reason: picked[i].reason || POPULAR_REASON }));
 }

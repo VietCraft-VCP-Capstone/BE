@@ -7,8 +7,54 @@ import { Shop } from '../../product/infrastructure/models/shop.model';
 import { Order } from '../../order/infrastructure/models/order.model';
 import { BlankClient, Blank } from '../../product/application/blank-client.service';
 import { ProductEvent } from '../infrastructure/models/product-event.model';
-import { Category } from '../../category/infrastructure/models/category.model';
 import { cacheService } from '../../../shared/services/cache.service';
+import {
+    isValidDemandOrder,
+    orderGmv,
+    baselineDailyRate,
+    ordersInWindow,
+    orderStatusBreakdown,
+    overlappingCampaigns,
+    campaignTimingBasis,
+    measuredUplift,
+    targetOrders as computeTargetOrders,
+    vnDayStart,
+    vnDayEnd,
+    RATE_WINDOW_DAYS,
+    stripIdeaMargin,
+    tierNormalLevel,
+    conversionRates,
+} from './seasonal-math';
+import { writableShopId } from './seasonal-access';
+import { isGrounded } from './llm-grounding';
+import {
+    anchorPool,
+    draftBasisOf,
+    ideasPrompt,
+    IDEAS_PER_BATCH,
+    MAX_IDEAS_PER_CAMPAIGN,
+    nextAnchors,
+    parseLlmIdeas,
+    pickIdeaInputs,
+    usedAnchorsOf,
+    type IdeaInputs,
+    type ShopSeasonalIdea,
+} from './seasonal-ideas';
+
+export type { ShopSeasonalIdea } from './seasonal-ideas';
+import { eventYearOf, planLookupKey, planViewFor, stableIdeaId } from './seasonal-plan';
+import { BackgroundOnce } from './background-once';
+import { applyIdeaOutcomesToImpact, ideaOutcomes } from './seasonal-outcome';
+import { buildPreviousSeasonLesson, type PreviousSeasonLesson } from './seasonal-lesson';
+import { buildForecastSnapshot, forecastAccuracy } from './seasonal-forecast-log';
+import { SeasonalForecastLog } from '../infrastructure/models/seasonal-forecast-log.model';
+import { SeasonalPlan } from '../infrastructure/models/seasonal-plan.model';
+
+const ORDER_LOOKBACK_DAYS = 400;
+const ORDER_LOOKBACK_LIMIT = 3000;
+// dưới số sự kiện này trước mùa thì nhịp ngày thường của lượt xem / thêm giỏ bị gắn cờ độ tin cậy thấp
+const MIN_BASE_VIEWS = 50;
+const MIN_BASE_CARTS = 10;
 
 export interface GeminiAdvisoryResult {
     title: string;
@@ -22,23 +68,6 @@ export interface TraitActionItem {
     traitKey: string;
 }
 
-export interface ShopSeasonalIdea {
-    id: string;
-    title: string;
-    concept: string;
-    target_price_vnd: number;
-    estimated_cost_vnd: number;
-    expected_margin_pct: number;
-    tags: string[];
-    why_it_fits_shop: string;
-    source_type: 'llm_scoped' | 'draft_synthesized';
-    draft_basis: {
-        shop_style: string;
-        price_band: string;
-        trend_signal: string;
-        top_keywords: string[];
-    };
-}
 
 class BoundedTtlCache<T> {
     private store = new Map<string, { data: T; expiresAt: number }>();
@@ -72,55 +101,128 @@ class BoundedTtlCache<T> {
     }
 }
 
+export type MoreIdeasError = 'no_ideas_yet' | 'no_more_signals' | 'limit_reached' | 'busy' | 'llm_unavailable' | 'no_new_ideas';
+
+/** Dữ liệu đầu vào lưu kèm ý tưởng được làm mới sau 24 giờ. */
+const INPUTS_REFRESH_MS = 24 * 3600 * 1000;
+
 export class SeasonalAnalyticsService {
     private static geminiAdvisoryCache = new BoundedTtlCache<GeminiAdvisoryResult | null>(200);
     private static traitActionsCache = new BoundedTtlCache<TraitActionItem[] | null>(200);
     private static seasonalIdeasCache = new BoundedTtlCache<ShopSeasonalIdea[]>(200);
+    /** LLM chạy nền, không chặn request; lỗi thì nghỉ 10 phút mới thử lại. */
+    private static llmJobs = new BackgroundOnce({ failureCooldownMs: 10 * 60_000 });
+    private static readonly LLM_UNAVAILABLE = 'llm_unavailable';
 
-    static async fetchGeminiSeasonalIdeas(params: {
+    /** Trạng thái soạn ý tưởng AI của shop cho dịp (để trang báo "đang soạn"). */
+    static ideasJobStatus(p: { shopId: string; campId: string; eventYear: number; catName: string }) {
+        return SeasonalAnalyticsService.llmJobs.status(`ideas:${SeasonalAnalyticsService.ideasCacheKey(p)}`);
+    }
+
+    private static ideasCampKey(campId: string, eventYear: number): string {
+        return `${String(campId || 'event').replace(/[^a-zA-Z0-9_-]/g, '_')}_${eventYear}`;
+    }
+
+    private static moreIdeasBusy = new Set<string>();
+
+    /**
+     * "Gợi ý thêm": tối đa 3 ý tưởng mới cho dịp, mỗi ý tưởng dựa vào một tín hiệu chưa dùng, nối sau ý tưởng đã lưu.
+     * Ý tưởng cũ giữ nguyên; tín hiệu chỉ bị đánh dấu đã dùng khi LLM trả lời được.
+     */
+    static async generateMoreIdeas(
+        shopOid: mongoose.Types.ObjectId,
+        ref: { event_key: string; event_year: number },
+    ): Promise<{ ideas: ShopSeasonalIdea[] } | { error: MoreIdeasError }> {
+        const campKey = SeasonalAnalyticsService.ideasCampKey(ref.event_key, ref.event_year);
+        const lockKey = `${shopOid}:${campKey}`;
+        if (SeasonalAnalyticsService.moreIdeasBusy.has(lockKey)) return { error: 'busy' };
+        SeasonalAnalyticsService.moreIdeasBusy.add(lockKey);
+        try {
+            const path = `settings.seasonal_preferences.generated_ideas.${campKey}`;
+            const shop: any = await Shop.findById(shopOid).select(path).lean();
+            const entry = shop?.settings?.seasonal_preferences?.generated_ideas?.[campKey];
+            const ideas: ShopSeasonalIdea[] = Array.isArray(entry?.ideas) ? entry.ideas : [];
+            if (!ideas.length || !entry?.inputs) return { error: 'no_ideas_yet' };
+            const room = MAX_IDEAS_PER_CAMPAIGN - ideas.length;
+            if (room <= 0) return { error: 'limit_reached' };
+
+            const inputs = pickIdeaInputs(entry.inputs);
+            const pool = anchorPool(inputs);
+            const used = usedAnchorsOf(entry, pool);
+            const anchors = nextAnchors(pool, used, Math.min(IDEAS_PER_BATCH, room));
+            if (!anchors.length) return { error: 'no_more_signals' };
+
+            const existingTitles = ideas.map(i => i.title).filter(Boolean);
+            const raw = await llmJsonText(ideasPrompt(inputs, anchors, existingTitles), 20000);
+            let parsed: unknown = null;
+            try { parsed = raw ? JSON.parse(raw) : null; } catch { parsed = null; }
+            if (!Array.isArray(parsed) || parsed.length === 0) return { error: 'llm_unavailable' };
+
+            const existingIds = new Set(ideas.map(i => i.id));
+            const fresh = parseLlmIdeas(parsed, inputs, existingTitles).filter(i => !existingIds.has(i.id)).slice(0, room);
+            const usedAfter = [...used, ...anchors.map(a => a.key)];
+            if (!fresh.length) {
+                // LLM chỉ lặp ý tưởng cũ: bỏ qua các tín hiệu này để lần bấm sau thử tín hiệu khác
+                await Shop.updateOne({ _id: shopOid }, { $set: { [`${path}.used_anchors`]: usedAfter } });
+                return { error: 'no_new_ideas' };
+            }
+            const updated: any = await Shop.findOneAndUpdate(
+                { _id: shopOid, [`${path}.ideas.${MAX_IDEAS_PER_CAMPAIGN - fresh.length}`]: { $exists: false } },
+                {
+                    $push: { [`${path}.ideas`]: { $each: fresh } },
+                    $set: {
+                        [`${path}.used_anchors`]: usedAfter,
+                        // Lô này soạn có bài học mùa trước thì đánh dấu, để trang chỉ nói "AI đã dùng" khi đúng là đã dùng
+                        ...(inputs.previousSeason ? { [`${path}.lesson_used`]: true } : {}),
+                    },
+                },
+                { new: true, projection: { [`${path}.ideas`]: 1 } },
+            ).lean();
+            if (!updated) return { error: 'limit_reached' };
+            const all: any[] = updated.settings?.seasonal_preferences?.generated_ideas?.[campKey]?.ideas || [];
+            return { ideas: all.map(i => stripIdeaMargin(i)) as ShopSeasonalIdea[] };
+        } finally {
+            SeasonalAnalyticsService.moreIdeasBusy.delete(lockKey);
+        }
+    }
+
+    private static ideasCacheKey(p: { shopId: string; campId: string; eventYear: number; catName: string }): string {
+        const safeCampKey = `${String(p.campId || 'event').replace(/[^a-zA-Z0-9_-]/g, '_')}_${p.eventYear}`;
+        return `ideas_${p.shopId}_${safeCampKey}_${p.catName}`;
+    }
+
+    static async fetchGeminiSeasonalIdeas(params: IdeaInputs & {
         shopId: string;
         liveShopOid?: mongoose.Types.ObjectId | null;
-        shopName: string;
-        catName: string;
-        campId: string;
-        campName: string;
-        eventYear: number;
         persistedIdeas?: ShopSeasonalIdea[] | null;
-        shopStyleKeywords: string[];
-        shopSampleTitles: string[];
-        priceBand: { min: number; max: number; avg: number };
-        topOppKeywords: Array<{ tag: string; volume: number; competition: number; wow?: number | null }>;
-        ordersGrowth?: number | null;
-        spendingGrowth?: number | null;
-        comboInd?: number | null;
-        occasionIndustryClusters?: Array<{ title?: string; price_vnd?: number; sold_count?: number; platform?: string }>;
-        occasionIndustryPriceBand?: { min?: number; max?: number; avg?: number };
-        industryScale?: { productsCount?: number; sellersCount?: number; totalSold?: number };
-    }): Promise<ShopSeasonalIdea[]> {
+        /** thời điểm lưu dữ liệu đầu vào kèm ý tưởng đã lưu; thiếu/cũ thì ghi lại cho "Gợi ý thêm" */
+        persistedInputsAt?: string | null;
+    }, opts: { llm?: boolean } = {}): Promise<ShopSeasonalIdea[]> {
+        const safeCampKey = SeasonalAnalyticsService.ideasCampKey(params.campId, params.eventYear);
+        const inputs = pickIdeaInputs(params);
         // Ưu tiên 1: Ý tưởng đã lưu bền vững trong MongoDB cho shop + dịp + năm (không bị mất hay đè khi restart server)
         if (Array.isArray(params.persistedIdeas) && params.persistedIdeas.length > 0) {
+            const at = params.persistedInputsAt ? Date.parse(params.persistedInputsAt) : NaN;
+            if (params.liveShopOid && !(Date.now() - at < INPUTS_REFRESH_MS)) {
+                // Mục cũ chưa có (hoặc có dữ liệu đầu vào quá cũ): ghi lại để "Gợi ý thêm" dựng prompt theo số liệu mới
+                const path = `settings.seasonal_preferences.generated_ideas.${safeCampKey}`;
+                await Shop.updateOne(
+                    { _id: params.liveShopOid, [`${path}.ideas.0`]: { $exists: true } },
+                    { $set: { [`${path}.inputs`]: inputs, [`${path}.inputs_at`]: new Date().toISOString() } },
+                ).catch(() => {});
+            }
             return params.persistedIdeas;
         }
 
-        const safeCampKey = `${String(params.campId || 'event').replace(/[^a-zA-Z0-9_-]/g, '_')}_${params.eventYear}`;
-        const cacheKey = `ideas_${params.shopId}_${safeCampKey}_${params.catName}`;
+        const cacheKey = SeasonalAnalyticsService.ideasCacheKey(params);
         const cached = SeasonalAnalyticsService.seasonalIdeasCache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) {
             return cached.data;
         }
 
-        const priceBandStr = `${Math.round(params.priceBand.min / 1000)}k – ${Math.round(params.priceBand.max / 1000)}k`;
-        const shopStyleStr = params.shopStyleKeywords.slice(0, 5).join(', ') || params.catName;
-        const kwNames = params.topOppKeywords.slice(0, 4).map(k => k.tag);
-        const trendSig = params.ordersGrowth != null ? `Cầu dịp +${params.ordersGrowth}%, AOV ngành +${params.spendingGrowth ?? 0}%` : 'Dữ liệu đa sàn';
-
         // Bản phác thảo (Draft) tổng hợp từ dữ liệu thật của shop + DL/STL + đa sàn
-        const draftBasis = {
-            shop_style: shopStyleStr,
-            price_band: priceBandStr,
-            trend_signal: trendSig,
-            top_keywords: kwNames,
-        };
+        const draftBasis = draftBasisOf(inputs);
+        const priceBandStr = draftBasis.price_band;
 
         const buildFallbackIdeas = (): ShopSeasonalIdea[] => {
             const clusters = params.occasionIndustryClusters || [];
@@ -136,8 +238,6 @@ export class SeasonalAnalyticsService {
                 const clKw = (cl?.keyword || kw).trim();
                 const indPrice = cl?.price_vnd && cl.price_vnd >= 30000 ? cl.price_vnd : params.priceBand.avg;
                 const targetPrice = Math.max(120000, Math.round(((params.priceBand.avg * 0.6 + indPrice * 0.4) * (1 + idx * 0.05)) / 5000) * 5000);
-                const estCost = Math.round((targetPrice * 0.48) / 1000) * 1000;
-                const marginPct = Math.round(((targetPrice - estCost - targetPrice * 0.1) / Math.max(1, targetPrice)) * 100);
 
                 let ideaTitle = '';
                 let ideaConcept = '';
@@ -160,12 +260,10 @@ export class SeasonalAnalyticsService {
                     : '';
 
                 return {
-                    id: `ai_idea_${params.campId}_${idx}`,
+                    id: stableIdeaId('ai', params.campId, ideaTitle),
                     title: ideaTitle,
                     concept: ideaConcept,
                     target_price_vnd: targetPrice,
-                    estimated_cost_vnd: estCost,
-                    expected_margin_pct: Math.max(20, marginPct),
                     tags: [kw, ...params.shopStyleKeywords.slice(0, 2)].filter(Boolean),
                     why_it_fits_shop: `Phù hợp khung giá ${priceBandStr} của shop; ${kwMetricStr}${clMetricStr}.`,
                     source_type: 'draft_synthesized',
@@ -174,9 +272,10 @@ export class SeasonalAnalyticsService {
             });
         };
 
-        const persistIdeasToMongo = async (ideasToSave: ShopSeasonalIdea[]) => {
+        const persistIdeasToMongo = async (ideasToSave: ShopSeasonalIdea[], usedAnchors?: string[]) => {
             if (!params.liveShopOid || ideasToSave.length === 0) return;
             try {
+                const now = new Date().toISOString();
                 await Shop.updateOne(
                     { _id: params.liveShopOid },
                     {
@@ -184,7 +283,13 @@ export class SeasonalAnalyticsService {
                             [`settings.seasonal_preferences.generated_ideas.${safeCampKey}`]: {
                                 ideas: ideasToSave,
                                 event_year: params.eventYear,
-                                generated_at: new Date().toISOString(),
+                                generated_at: now,
+                                // để "Gợi ý thêm" biết tín hiệu nào đã dùng và dựng lại prompt
+                                ...(usedAnchors ? { used_anchors: usedAnchors } : {}),
+                                inputs,
+                                inputs_at: now,
+                                // chỉ ý tưởng do LLM soạn (có khối bài học trong prompt) mới tính là đã dùng bài học
+                                lesson_used: Boolean(inputs.previousSeason) && ideasToSave[0]?.source_type === 'llm_scoped',
                             },
                         },
                     }
@@ -194,7 +299,7 @@ export class SeasonalAnalyticsService {
             }
         };
 
-        const redisKey = `vietcraft:seasonal:ideas:v3:${cacheKey}`;
+        const redisKey = `vietcraft:seasonal:ideas:v4:${cacheKey}`;
         const redisCached = await cacheService.get<ShopSeasonalIdea[]>(redisKey).catch(() => null);
         if (Array.isArray(redisCached) && redisCached.length > 0 && redisCached[0]?.source_type === 'llm_scoped') {
             SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: redisCached, expiresAt: Date.now() + 1800 * 1000 });
@@ -202,64 +307,29 @@ export class SeasonalAnalyticsService {
             return redisCached;
         }
 
+        if (!opts.llm) {
+            // Request không chờ LLM: trả bản phác thảo từ số liệu thật ngay, LLM soạn nền rồi lần tải sau dùng
+            SeasonalAnalyticsService.llmJobs.start(`ideas:${cacheKey}`, async () => {
+                const res = await SeasonalAnalyticsService.fetchGeminiSeasonalIdeas(params, { llm: true });
+                if (!res.length || res[0].source_type !== 'llm_scoped') throw new Error(SeasonalAnalyticsService.LLM_UNAVAILABLE);
+            });
+            return buildFallbackIdeas();
+        }
+
         try {
-            const prompt = `Bạn là chuyên gia phát triển sản phẩm TMĐT. Hãy đọc BẢN PHÁC THẢO DỮ LIỆU THẬT dưới đây và tổng hợp đúng 3 ý tưởng sản phẩm MỚI cho shop (phải bám sát SỐ LIỆU TOÀN NGÀNH CỦA DỊP ${params.campName} ${params.eventYear} đồng thời mang PHONG CÁCH RIÊNG của shop; KHÔNG tự bịa thêm số liệu ngoài bản phác thảo; TUYỆT ĐỐI KHÔNG nhắc tới các năm cũ như 2023, 2024, 2025 — nếu cần ghi năm chỉ được dùng năm ${params.eventYear}):
-
-BẢN PHÁC THẢO (STRICT SCOPE):
-- Shop: "${params.shopName}" · Ngành: "${params.catName}" · Năm sự kiện: ${params.eventYear}
-- Sản phẩm mẫu & phong cách shop: ${params.shopSampleTitles.slice(0, 4).join(' | ') || 'Chưa có'} (từ khóa phong cách: ${shopStyleStr})
-- Khung giá shop: ${priceBandStr} (trung bình ${params.priceBand.avg.toLocaleString('vi-VN')}đ)
-- Dịp mua sắm: ${params.campName} ${params.eventYear}
-- Số liệu TOÀN NGÀNH trong dịp ${params.campName}:
-  + Quy mô ngành: ${params.industryScale?.productsCount ?? 'N/A'} sản phẩm từ ${params.industryScale?.sellersCount ?? 'N/A'} gian hàng (${params.industryScale?.totalSold ?? 'N/A'} lượt bán đa sàn)
-  + Dải giá ngành dịp này: ${params.occasionIndustryPriceBand?.min ? `${Math.round(params.occasionIndustryPriceBand.min / 1000)}k–${Math.round((params.occasionIndustryPriceBand.max || 0) / 1000)}k` : priceBandStr}
-  + Nhóm sản phẩm đang bán chạy toàn ngành dịp ${params.campName}: ${(params.occasionIndustryClusters || []).slice(0, 3).map(c => `"${c.title}" (${c.sold_count ?? 0} bán, ${c.price_vnd?.toLocaleString('vi-VN') ?? ''}đ, ${c.platform})`).join('; ') || 'Đang tổng hợp'}
-- Tín hiệu thuật toán (QuantileForecaster + STL 5 năm): Cầu cao điểm +${params.ordersGrowth ?? 'N/A'}%, Giá trị đơn ngành +${params.spendingGrowth ?? 'N/A'}%, Tỷ lệ combo ngành ${params.comboInd ?? 'N/A'}%
-- Từ khóa cơ hội toàn ngành: ${params.topOppKeywords.slice(0, 5).map(k => `"${k.tag}" (nhu cầu: ${k.volume}, đối thủ: ${k.competition})`).join('; ')}
-
-Yêu cầu trả về JSON array đúng 3 phần tử:
-[
-  {
-    "title": "Tên ý tưởng sản phẩm mới hấp dẫn, kết hợp nhu cầu dịp ${params.campName} và phong cách shop (8-14 từ, không ghi năm cũ)",
-    "concept": "Mô tả cách thiết kế / đóng gói / combo cụ thể cho dịp ${params.campName} ${params.eventYear} (1-2 câu)",
-    "target_price_vnd": số nguyên VND phù hợp khung giá shop & ngành (${Math.min(params.priceBand.min, params.occasionIndustryPriceBand?.min || params.priceBand.min)}-${Math.max(Math.round(params.priceBand.max * 1.25), params.occasionIndustryPriceBand?.max || params.priceBand.max)}),
-    "tags": ["tag 1", "tag 2", "tag 3"],
-    "why_it_fits_shop": "Nêu rõ cả số liệu toàn ngành của dịp ${params.campName} lẫn sự phù hợp với phong cách shop (1 câu)"
-  }
-]`;
-            const rawText = await llmJsonText(prompt, 15000);
-            const parsed = rawText ? JSON.parse(rawText) : null;
-            if (Array.isArray(parsed) && parsed.length >= 2) {
-                const ideas: ShopSeasonalIdea[] = parsed.slice(0, 3).map((item: any, idx: number) => {
-                    const price = Math.max(50000, Math.round((Number(item.target_price_vnd) || params.priceBand.avg) / 1000) * 1000);
-                    const estCost = Math.round((price * 0.46) / 1000) * 1000;
-                    const marginPct = Math.round(((price - estCost - price * 0.1) / Math.max(1, price)) * 100);
-                    return {
-                        id: `ai_idea_${params.campId}_${idx}`,
-                        title: String(item.title || '').replace(/[*_#]/g, '').trim(),
-                        concept: String(item.concept || '').replace(/[*_#]/g, '').trim(),
-                        target_price_vnd: price,
-                        estimated_cost_vnd: estCost,
-                        expected_margin_pct: Math.max(15, marginPct),
-                        tags: Array.isArray(item.tags) ? item.tags.map((t: any) => String(t).trim()).filter(Boolean).slice(0, 5) : kwNames.slice(0, 3),
-                        why_it_fits_shop: String(item.why_it_fits_shop || '').replace(/[*_#]/g, '').trim(),
-                        source_type: 'llm_scoped' as const,
-                        draft_basis: draftBasis,
-                    };
-                }).filter(x => x.title && x.concept);
-                if (ideas.length > 0) {
-                    SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: ideas, expiresAt: Date.now() + 1800 * 1000 });
-                    await cacheService.set(redisKey, ideas, 86400).catch(() => {});
-                    await persistIdeasToMongo(ideas);
-                    return ideas;
-                }
+            const anchors = nextAnchors(anchorPool(inputs), []);
+            const rawText = await llmJsonText(ideasPrompt(inputs, anchors, []), 15000);
+            const ideas = parseLlmIdeas(rawText ? JSON.parse(rawText) : null, inputs, []);
+            if (ideas.length > 0) {
+                SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: ideas, expiresAt: Date.now() + 1800 * 1000 });
+                await cacheService.set(redisKey, ideas, 86400).catch(() => {});
+                await persistIdeasToMongo(ideas, anchors.map(a => a.key));
+                return ideas;
             }
         } catch {
             // Fallback an toàn về bản phác thảo tổng hợp từ số liệu thật
         }
-        const fb = buildFallbackIdeas();
-        SeasonalAnalyticsService.seasonalIdeasCache.set(cacheKey, { data: fb, expiresAt: Date.now() + 60 * 1000 });
-        return fb;
+        return buildFallbackIdeas();
     }
 
     static async fetchGeminiTraitActions(params: {
@@ -278,11 +348,18 @@ Yêu cầu trả về JSON array đúng 3 phần tử:
         comboInd?: number | null;
         voucherShop?: number | null;
         voucherInd?: number | null;
-    }): Promise<TraitActionItem[] | null> {
+    }, opts: { llm?: boolean } = {}): Promise<TraitActionItem[] | null> {
         const cacheKey = `ta_${params.campId}_${params.catName}_${params.ordersGrowth}_${params.spendingGrowth}_${params.comboShop}_${params.voucherShop}`;
         const cached = SeasonalAnalyticsService.traitActionsCache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) {
             return cached.data;
+        }
+        if (!opts.llm) {
+            SeasonalAnalyticsService.llmJobs.start(cacheKey, async () => {
+                const res = await SeasonalAnalyticsService.fetchGeminiTraitActions(params, { llm: true });
+                if (!res) throw new Error(SeasonalAnalyticsService.LLM_UNAVAILABLE);
+            });
+            return null; // dùng việc nên làm theo quy tắc cho tới khi LLM soạn xong
         }
 
         try {
@@ -310,7 +387,7 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
                     title: String(it.title || '').replace(/[*_#]/g, '').trim(),
                     desc: String(it.desc || '').replace(/[*_#]/g, '').trim(),
                     traitKey: String(it.traitKey || 'ordersGrowth').trim(),
-                })).filter(it => it.title && it.desc);
+                })).filter(it => it.title && it.desc && isGrounded([it.title, it.desc], params));
                 if (cleaned.length > 0) {
                     SeasonalAnalyticsService.traitActionsCache.set(cacheKey, { data: cleaned, expiresAt: Date.now() + 1800 * 1000 });
                     return cleaned;
@@ -339,19 +416,25 @@ Hãy trả về đúng 3 việc nên làm ĐẶC THÙ cho dịp ${params.campNam
         tracStr: string;
         cutStr: string;
         evStr: string;
-    }): Promise<GeminiAdvisoryResult | null> {
+    }, opts: { llm?: boolean } = {}): Promise<GeminiAdvisoryResult | null> {
         const cacheKey = `${params.campName}_${params.eventYear}_${params.catName}_${params.matchCount}_${params.campSavedCount}_${params.campOrdersCount}_${params.isUrgent ? 'urg' : params.currentPhase}`;
         const cached = SeasonalAnalyticsService.geminiAdvisoryCache.get(cacheKey);
         if (cached && cached.expiresAt > Date.now()) {
             return cached.data;
         }
+        if (!opts.llm) {
+            SeasonalAnalyticsService.llmJobs.start(`adv:${cacheKey}`, async () => {
+                await SeasonalAnalyticsService.fetchGeminiSeasonalAdvisory(params, { llm: true });
+            });
+            return null; // gợi ý theo quy tắc cho tới khi LLM soạn xong
+        }
 
         try {
             const growthLine = params.growthPct !== null
-                ? `- Sức mua & xu hướng thị trường: Tăng trưởng đơn hàng dự báo ${params.growthPct >= 0 ? '+' : ''}${params.growthPct}% so với cùng kỳ\n`
+                ? `- Lượt tìm kiếm dịp này (Google Trends, KHÔNG phải số đơn): ${params.growthPct >= 0 ? '+' : ''}${params.growthPct}% so với ngày thường\n`
                 : '';
             const growthRequirement = params.growthPct !== null
-                ? `sức mua (${params.growthPct >= 0 ? '+' : ''}${params.growthPct}%)`
+                ? `nhu cầu tìm kiếm (${params.growthPct >= 0 ? '+' : ''}${params.growthPct}% lượt tìm)`
                 : 'xu hướng tìm kiếm thực tế';
 
             const prompt = `Bạn là Giám đốc Tăng trưởng TMĐT thực chiến (Shopee, TikTok Shop, Amazon).
@@ -379,6 +462,11 @@ Yêu cầu nghiệp vụ:
                     title: String(parsed.title).replace(/[*_#]/g, '').trim(),
                     advice: String(parsed.advice).replace(/[*_#]/g, '').trim()
                 };
+                if (!isGrounded([result.title, result.advice], params)) {
+                    // Có số không lấy từ dữ liệu đầu vào → bỏ, dùng gợi ý theo quy tắc
+                    SeasonalAnalyticsService.geminiAdvisoryCache.set(cacheKey, { data: null, expiresAt: Date.now() + 3600 * 1000 });
+                    return null;
+                }
                 SeasonalAnalyticsService.geminiAdvisoryCache.set(cacheKey, { data: result, expiresAt: Date.now() + 3600 * 1000 });
                 return result;
             }
@@ -394,172 +482,81 @@ Yêu cầu nghiệp vụ:
 
         data.seller_shop_name = viewer.shop_name || 'Gian hàng của bạn';
         data.is_live_shop = Boolean(viewer.live_shop_id);
+        data.can_save_plan = writableShopId(viewer) !== null;
 
         const hasValidLiveShop = Boolean(viewer.live_shop_id && mongoose.Types.ObjectId.isValid(viewer.live_shop_id));
         const liveShopOid = hasValidLiveShop ? new mongoose.Types.ObjectId(viewer.live_shop_id!) : null;
         const hasValidAnalysedShop = Boolean(viewer.analysed_shop_id && mongoose.Types.ObjectId.isValid(viewer.analysed_shop_id));
-        const eightWeeksAgo = new Date();
-        eightWeeksAgo.setDate(eightWeeksAgo.getDate() - 56);
 
         // Chạy song song các truy vấn DB độc lập để giảm tối đa thời gian chờ roundtrip MongoDB Atlas
-        const [shopProducts, sellerBlanks, shop8WeeksOrders, initialRealOrders, shopDoc] = await Promise.all([
+        const [shopProducts, sellerBlanks, initialRealOrders, shopDoc] = await Promise.all([
             liveShopOid
                 ? Product.find({
                     shop_id: liveShopOid,
                     listing_status: { $ne: 'EXPIRED' }
                 }).select('_id title slug images categories category_ids tags product_type original_price stock_alert_threshold source_idea_id').lean().catch(() => [])
                 : Promise.resolve([] as any[]),
-            (data.events && Array.isArray(data.events))
+            (Array.isArray(data.pod_blanks) || Array.isArray(data.events))
                 ? BlankClient.listBlanks(req.user?.id).catch(() => [] as Blank[])
                 : Promise.resolve([] as Blank[]),
-            (liveShopOid && Array.isArray(data.all_campaigns))
-                ? Order.countDocuments({
-                    shop_id: liveShopOid,
-                    created_at: { $gte: eightWeeksAgo },
-                    order_status: { $in: ['DELIVERED', 'COMPLETED', 'PAID'] },
-                    is_simulated: { $ne: true }
-                }).catch(() => 0)
-                : Promise.resolve(0),
+            // ~13 tháng đơn để phủ cùng kỳ năm trước; lọc "đơn hợp lệ" bằng isValidDemandOrder bên dưới
             liveShopOid
                 ? Order.find({
                     shop_id: liveShopOid,
-                    order_status: { $in: ['DELIVERED', 'COMPLETED', 'PAID'] },
+                    created_at: { $gte: new Date(Date.now() - ORDER_LOOKBACK_DAYS * 86400000) },
+                    order_status: { $ne: 'CANCELLED' },
                     is_simulated: { $ne: true }
-                }).select('order_code items shipping_address buyer_id created_at financial_breakdown coupon_code order_type is_pod order_status notes').sort({ created_at: -1 }).limit(200).lean().catch(() => [])
+                }).select('order_code items shipping_address buyer_id created_at financial_breakdown coupon_code order_type is_pod order_status payment_method payment_status refund_status notes').sort({ created_at: -1 }).limit(ORDER_LOOKBACK_LIMIT).lean().catch(() => [])
                 : Promise.resolve([] as any[]),
             hasValidAnalysedShop
                 ? Shop.findById(viewer.analysed_shop_id).select('settings').lean().catch(() => null)
                 : Promise.resolve(null),
         ]);
 
-        // Tự động nhận diện ngành hàng chính của gian hàng (hỗ trợ đầy đủ các ngành hàng TMĐT tổng hợp)
-        let detectedSlug = 'tong-hop';
-        let detectedName = 'Thương mại điện tử tổng hợp';
+        const shopRealOrders: any[] = (initialRealOrders as any[]).filter(isValidDemandOrder);
+        const shop8WeeksOrders = shopRealOrders.filter(o => new Date(o.created_at).getTime() >= Date.now() - 56 * 86400000).length;
 
-        if (shopProducts.length > 0) {
-            // 1. Ưu tiên đối soát từ danh mục chính thức (Category Collection) nếu sản phẩm có gắn category_ids
-            const categoryIdCount: Record<string, number> = {};
-            for (const p of shopProducts) {
-                if (Array.isArray(p.category_ids)) {
-                    for (const cId of p.category_ids) {
-                        const idStr = String(cId);
-                        categoryIdCount[idStr] = (categoryIdCount[idStr] || 0) + 1;
-                    }
-                }
-            }
+        // Nhóm ngành của shop do AI xác định từ danh mục thật của sản phẩm (một bộ mã chung, app/core/category_groups.py)
+        const aiCategory = data.seller_category || {};
+        const detectedSlug: string = aiCategory.slug || data.selected_category_slug || 'tong-hop';
+        const detectedName: string = aiCategory.name || 'Toàn ngành hàng TMĐT';
+        data.seller_category = { slug: detectedSlug, name: detectedName, source: aiCategory.source || 'none' };
 
-            const sortedCatIds = Object.entries(categoryIdCount).sort((a, b) => b[1] - a[1]);
-            if (sortedCatIds.length > 0) {
-                try {
-                    const topCatDoc = await Category.findById(sortedCatIds[0][0]).lean();
-                    if (topCatDoc && topCatDoc.name) {
-                        detectedName = topCatDoc.name;
-                        detectedSlug = topCatDoc.slug || 'tong-hop';
+        // Gắn phôi của xưởng liên kết cho gợi ý phôi POD: cả danh sách chính (trang mùa vụ) lẫn events[0] (bảng điều khiển)
+        const podBlankLists: any[][] = [
+            Array.isArray(data.pod_blanks) ? data.pod_blanks : [],
+            ...((Array.isArray(data.events) ? data.events : []).map((e: any) => (Array.isArray(e.pod_blanks) ? e.pod_blanks : []))),
+        ];
+        if (podBlankLists.some(l => l.length > 0)) {
+            for (const list of podBlankLists) {
+                for (const pb of list) {
+                    const bt = (pb.blank_type || '').toLowerCase();
+                    const matched = sellerBlanks.find(b => {
+                        const bId = (b._id || '').toLowerCase();
+                        const bCat = (b.category || '').toLowerCase();
+                        if (bt.includes('tshirt') || bt.includes('áo')) return bId.includes('tshirt') || bCat.includes('thời trang');
+                        if (bt.includes('mug') || bt.includes('cốc') || bt.includes('ly')) return bId.includes('mug') || bCat.includes('gia dụng') || bCat.includes('quà');
+                        if (bt.includes('tote') || bt.includes('túi')) return bId.includes('tote') || bCat.includes('phụ kiện');
+                        if (bt.includes('canvas') || bt.includes('tranh') || bt.includes('khung')) return bId.includes('frame') || bCat.includes('trang trí');
+                        return false;
+                    });
+                    if (matched) {
+                        pb.matched_blank = {
+                            _id: matched._id,
+                            title: matched.title,
+                            category: matched.category,
+                            default_image: matched.default_image,
+                            base_cost: matched.variations?.[0]?.base_cost || 0,
+                            printer_name: matched.printer_name || 'Xưởng in liên kết',
+                            is_connected: true
+                        };
                     }
-                } catch {
-                    // Fallback sang nhận diện từ khóa đa ngành hàng bên dưới
-                }
-            }
-
-            // 2. Phân loại theo bộ từ khóa đa ngành hàng chuẩn sàn TMĐT (Shopee, Amazon, Etsy, Lazada)
-            if (detectedSlug === 'tong-hop') {
-                const catScores: Record<string, number> = {
-                    'thoi-trang': 0,
-                    'sac-dep': 0,
-                    'dien-tu': 0,
-                    'nha-cua-doi-song': 0,
-                    'me-be': 0,
-                    'bach-hoa': 0,
-                    'the-thao': 0,
-                    'van-phong-pham': 0,
-                    'phu-kien': 0,
-                    'thu-cong-qua-tang': 0
-                };
-
-                for (const p of shopProducts) {
-                    const text = `${p.title || ''} ${(p.categories || []).join(' ')} ${(p.tags || []).join(' ')}`.toLowerCase();
-                    if (/áo|quần|váy|đầm|hoodie|sweater|thời trang|tweed|nỉ|jacket|khoác|quần bò|jeans|sơ mi|blazer|giày|dép|sneaker|guốc|sandal/.test(text)) {
-                        catScores['thoi-trang'] += 2;
-                    }
-                    if (/mỹ phẩm|son|kem|serum|phấn|nước hoa|sữa rửa mặt|toner|dưỡng da|chăm sóc da|makeup|skincare|tóc|dầu gội|sữa tắm|body|mặt nạ/.test(text)) {
-                        catScores['sac-dep'] += 2;
-                    }
-                    if (/điện tử|công nghệ|điện thoại|laptop|tai nghe|sạc|cáp|pin|loa|bluetooth|ốp lưng|chuột|bàn phím|máy ảnh|cường lực|smartwatch|đồng hồ thông minh/.test(text)) {
-                        catScores['dien-tu'] += 2;
-                    }
-                    if (/gia dụng|nhà cửa|đời sống|bếp|nồi|chảo|bát|đĩa|cốc|ly|gốm|sứ|bình|thớt|chăn|ga|gối|nệm|tủ|bàn|ghế|đèn|khăn tắm|thùng rác|hút bụi|decor/.test(text)) {
-                        catScores['nha-cua-doi-song'] += 2;
-                    }
-                    if (/mẹ|bé|sơ sinh|bỉm|tã|sữa|bình sữa|đồ chơi|xe đẩy|nôi|quần áo trẻ em|đồ bầu|ăn dặm|núm ti/.test(text)) {
-                        catScores['me-be'] += 2;
-                    }
-                    if (/thực phẩm|bách hóa|đồ ăn|bánh|kẹo|snack|khô bò|hạt|mứt|trà|cà phê|gia vị|nước tương|mì|gạo|yến|ngũ cốc|đặc sản/.test(text)) {
-                        catScores['bach-hoa'] += 2;
-                    }
-                    if (/thể thao|dã ngoại|gym|yoga|bóng đá|cầu lông|vợt|lều|balo du lịch|vali|bình nước thể thao|chạy bộ|đồ bơi/.test(text)) {
-                        catScores['the-thao'] += 2;
-                    }
-                    if (/văn phòng phẩm|sách|vở|sổ|bút|thước|họa cụ|màu vẽ|giấy in|truyện|bìa/.test(text)) {
-                        catScores['van-phong-pham'] += 2;
-                    }
-                    if (/trang sức|vòng|dây chuyền|nhẫn|khuyên tai|lắc tay|đồng hồ|mắt kính|kính râm|thắt lưng|dây nịt|túi xách|ví|bóp|nón|mũ/.test(text)) {
-                        catScores['phu-kien'] += 2;
-                    }
-                    if (/thủ công|handmade|quà lưu niệm|quà tặng|mây tre|đan lát|khắc gỗ|thêu|tranh đính đá/.test(text)) {
-                        catScores['thu-cong-qua-tang'] += 2;
-                    }
-                }
-
-                const bestCat = Object.entries(catScores).sort((a, b) => b[1] - a[1])[0];
-                if (bestCat && bestCat[1] > 0) {
-                    detectedSlug = bestCat[0];
-                    const nameMap: Record<string, string> = {
-                        'thoi-trang': 'Thời trang & May mặc',
-                        'sac-dep': 'Sức khỏe & Sắc đẹp',
-                        'dien-tu': 'Thiết bị điện tử & Phụ kiện công nghệ',
-                        'nha-cua-doi-song': 'Nhà cửa & Đời sống',
-                        'me-be': 'Mẹ & Bé',
-                        'bach-hoa': 'Bách hóa & Thực phẩm',
-                        'the-thao': 'Thể thao & Dã ngoại',
-                        'van-phong-pham': 'Nhà sách & Văn phòng phẩm',
-                        'phu-kien': 'Phụ kiện & Trang sức',
-                        'thu-cong-qua-tang': 'Quà tặng & Thủ công mỹ nghệ',
-                        'tong-hop': 'Thương mại điện tử tổng hợp'
-                    };
-                    detectedName = nameMap[detectedSlug] || 'Thương mại điện tử tổng hợp';
                 }
             }
         }
-        data.seller_category = { slug: detectedSlug, name: detectedName };
 
-        if (data.events && Array.isArray(data.events)) {
+        if (Array.isArray(data.events)) {
             for (const event of data.events) {
-                if (event.pod_blanks && Array.isArray(event.pod_blanks)) {
-                    for (const pb of event.pod_blanks) {
-                        const bt = (pb.blank_type || '').toLowerCase();
-                        const matched = sellerBlanks.find(b => {
-                            const bId = (b._id || '').toLowerCase();
-                            const bCat = (b.category || '').toLowerCase();
-                            if (bt.includes('tshirt') || bt.includes('áo')) return bId.includes('tshirt') || bCat.includes('thời trang');
-                            if (bt.includes('mug') || bt.includes('cốc') || bt.includes('ly')) return bId.includes('mug') || bCat.includes('gia dụng') || bCat.includes('quà');
-                            if (bt.includes('tote') || bt.includes('túi')) return bId.includes('tote') || bCat.includes('phụ kiện');
-                            if (bt.includes('canvas') || bt.includes('tranh') || bt.includes('khung')) return bId.includes('frame') || bCat.includes('trang trí');
-                            return false;
-                        });
-                        if (matched) {
-                            pb.matched_blank = {
-                                _id: matched._id,
-                                title: matched.title,
-                                category: matched.category,
-                                default_image: matched.default_image,
-                                base_cost: matched.variations?.[0]?.base_cost || 0,
-                                printer_name: matched.printer_name || 'Xưởng in liên kết',
-                                is_connected: true
-                            };
-                        }
-                    }
-                }
-
                 const evName = (event.name || '').toLowerCase();
                 const evWords: string[] = evName.split(/\s+/).filter(Boolean);
                 event.matching_shop_products = shopProducts.filter((p: any) => {
@@ -569,7 +566,9 @@ Yêu cầu nghiệp vụ:
                     return evWords.some((w: string) => w.length > 2 && (pTitle.includes(w) || pTags.some((t: string) => t.includes(w)) || pCats.some((c: string) => c.includes(w))));
                 }).slice(0, 4);
             }
+        }
 
+        if (sellerBlanks.length > 0) {
             data.all_seller_blanks = sellerBlanks.map(b => ({
                 _id: b._id,
                 title: b.title,
@@ -626,35 +625,22 @@ Yêu cầu nghiệp vụ:
         }
 
         // 1. Phân tích lịch sử đơn hàng THẬT của gian hàng để bóc tách luồng traffic & động lực mua sắm
-        let shopRealOrders: any[] = initialRealOrders;
-        if (liveShopOid && shopRealOrders.length === 0) {
-            try {
-                shopRealOrders = await Order.find({
-                    shop_id: liveShopOid,
-                    order_status: { $ne: 'CANCELLED' },
-                    is_simulated: { $ne: true }
-                }).select('order_code items shipping_address buyer_id created_at financial_breakdown coupon_code order_type is_pod order_status notes').sort({ created_at: -1 }).limit(200).lean();
-            } catch {
-                shopRealOrders = [];
-            }
-        }
-
-        const getOrderAmount = (o: any): number => {
-            return Number(o.financial_breakdown?.seller_payout_amount || o.financial_breakdown?.subtotal || 0);
-        };
+        const getOrderAmount = orderGmv;
 
         // 2. Cá nhân hóa phễu chuyển đổi & đơn hàng thực tế theo ĐẶC THÙ CỦA TỪNG DỊP
         const campId = (data.active_campaign?.id || '').toLowerCase();
         const activeCamp = data.active_campaign;
         const launchWin = activeCamp?.launch_window || {};
 
-        let startStr = launchWin.start || launchWin.traction_start;
+        // Kỳ đo hiệu quả của dịp = từ ngày mở bán (traction_start) đến ngày lễ.
+        // Giai đoạn chuẩn bị (rd_start → traction_start) là lúc lên mẫu, đơn khi đó chưa phải đơn của dịp.
+        let startStr = launchWin.traction_start || launchWin.start;
         let endStr = launchWin.peak_date || launchWin.end;
 
         if (!startStr || !endStr) {
             const matchedInAll = (data.all_campaigns || []).find((c: any) => c.id === campId);
             if (matchedInAll?.launch_window) {
-                startStr = startStr || matchedInAll.launch_window.start || matchedInAll.launch_window.traction_start;
+                startStr = startStr || matchedInAll.launch_window.traction_start || matchedInAll.launch_window.start;
                 endStr = endStr || matchedInAll.launch_window.peak_date || matchedInAll.launch_window.end;
             }
         }
@@ -665,12 +651,12 @@ Yêu cầu nghiệp vụ:
             endStr = endStr || `${currentYear}-12-25`;
         }
 
-        const winStart = new Date(startStr + 'T00:00:00');
-        const winEnd = new Date(endStr + 'T23:59:59');
+        const winStart = vnDayStart(String(startStr).slice(0, 10));
+        const winEnd = vnDayEnd(String(endStr).slice(0, 10));
 
-        const upliftP50 = Number(data.forecast_method_info?.uplift_p50);
-        const marketOrdersGrowthPct = Number.isFinite(upliftP50) && upliftP50 > 0 ? Math.round((upliftP50 - 1) * 100) : 35;
-        const dynamicMultiplier = Math.max(1.2, Math.round((1.0 + marketOrdersGrowthPct / 100) * 10) / 10);
+        // Độ nâng LƯỢT TÌM KIẾM của dịp (Google Trends) do AI đo: chỉ để tham khảo, không nhân vào số đơn
+        const uplift = measuredUplift(data.forecast_method_info);
+        const searchUpliftPct: number | null = uplift ? Math.round((uplift.value - 1) * 100) : null;
 
         const nowTime = new Date();
         const isUpcoming = nowTime < winStart;
@@ -692,11 +678,9 @@ Yêu cầu nghiệp vụ:
             || Object.entries(OCCASION_KEYWORDS).find(([k]) => campId.includes(k))?.[1]
             || null;
 
-        // Chuẩn TMĐT quốc tế: Mọi đơn hàng phát sinh trong kỳ chiến dịch đều được tính vào hiệu quả mùa vụ (Campaign Throughput & Halo Effect)
-        const campRealOrders = shopRealOrders.filter((o: any) => {
-            const oDate = new Date(o.created_at);
-            return oDate >= winStart && oDate <= winEnd;
-        });
+        // Đơn trong kỳ dịp: mọi đơn hợp lệ của shop đặt trong kỳ đo; tách riêng đơn đúng hàng của dịp (direct) bên dưới
+        const campRealOrders = ordersInWindow(shopRealOrders, winStart, winEnd);
+        const campStatus = orderStatusBreakdown(campRealOrders);
 
         const directOrders = matchedOccasionRegex
             ? campRealOrders.filter((o: any) => {
@@ -720,23 +704,9 @@ Yêu cầu nghiệp vụ:
         const campTotalGmv = campRealOrders.reduce((sum, o) => sum + getOrderAmount(o), 0);
         const windowDays = Math.max(7, Math.round((winEnd.getTime() - winStart.getTime()) / (1000 * 60 * 60 * 24)));
 
-        // Hệ số tăng trưởng đặc thù của từng dịp bóc tách từ chu kỳ STL
-        const occasionMultiplierMap: Record<string, number> = {
-            '12/12': 1.35,
-            noel: 1.45,
-            tet: 1.65,
-            valentine: 1.30,
-            '8/3': 1.28,
-            '20/10': 1.28,
-            '20/11': 1.25,
-            trung_thu: 1.32,
-            halloween: 1.25,
-            '11/11': 1.38,
-        };
-        const dlUpliftP50 = data.forecast_method_info?.validated_deep_model && typeof data.forecast_method_info?.uplift_p50 === 'number'
-            ? Math.min(2.5, Math.max(1.15, Number(data.forecast_method_info.uplift_p50)))
-            : null;
-        const campMult = dlUpliftP50 ?? occasionMultiplierMap[campId] ?? dynamicMultiplier;
+        // Nhịp nền lấy TRƯỚC kỳ dịp để mục tiêu không bị suy ra từ chính số đơn đem so
+        const baseline = baselineDailyRate(shopRealOrders, winStart, RATE_WINDOW_DAYS);
+        const shopDailyRate = baseline.rate;
 
         // Đo đạc lượt xem (views/clicks) và thêm giỏ hàng (add_to_cart) THẬT SỰ từ bảng product_events
         let realViewsCount = 0;
@@ -773,6 +743,36 @@ Yêu cầu nghiệp vụ:
             }
         }
 
+        // Nhịp nền của lượt xem/thêm giỏ: sự kiện thật trong 60 ngày TRƯỚC ngày mở bán (cùng khoảng với nhịp đơn)
+        let baseViews = 0;
+        let baseCarts = 0;
+        let eventCoverageDays = 0;
+        if (shopProductObjectIds.length > 0) {
+            try {
+                const baseStart = new Date(winStart.getTime() - RATE_WINDOW_DAYS * 86400000);
+                const baseAgg = await ProductEvent.aggregate([
+                    { $match: { product_id: { $in: shopProductObjectIds }, created_at: { $gte: baseStart, $lt: winStart } } },
+                    { $group: { _id: '$event_type', total: { $sum: 1 }, first: { $min: '$created_at' } } },
+                ]);
+                let firstMs = Infinity;
+                for (const ev of baseAgg) {
+                    if (ev._id === 'view') baseViews = ev.total;
+                    if (ev._id === 'add_to_cart') baseCarts = ev.total;
+                    if (ev.first) firstMs = Math.min(firstMs, new Date(ev.first).getTime());
+                }
+                eventCoverageDays = Number.isFinite(firstMs) ? Math.ceil((winStart.getTime() - firstMs) / 86400000) : 0;
+            } catch {
+                baseViews = 0;
+                baseCarts = 0;
+            }
+        }
+        const viewsNormal = tierNormalLevel(baseViews, eventCoverageDays, windowDays, MIN_BASE_VIEWS);
+        const cartsNormal = tierNormalLevel(baseCarts, eventCoverageDays, windowDays, MIN_BASE_CARTS);
+        const baseOrdersSameSpan = eventCoverageDays > 0
+            ? ordersInWindow(shopRealOrders, new Date(winStart.getTime() - eventCoverageDays * 86400000), new Date(winStart.getTime() - 1)).length
+            : 0;
+        const baselineRates = conversionRates(baseViews, baseCarts, baseOrdersSameSpan);
+
         // 100% số đo THẬT từ product_events (`view`, `add_to_cart`) và bảng orders (`orders`)
         // Không chia ngược giả lập `impressions`, `views`, hay `add_to_cart` từ đơn hàng
         const actualOrders = totalReal;
@@ -780,10 +780,53 @@ Yêu cầu nghiệp vụ:
         const actualViews = realViewsCount;
         const actualReach: number | null = null;
 
-        // Mục tiêu đơn hàng dựa trên nhịp đơn thực tế của shop × hệ số mùa vụ (nếu chưa có đơn thật -> null/0)
-        const targetOrders: number = shopRealOrders.length > 0
-            ? Math.max(1, Math.round((shopRealOrders.length / 60) * windowDays * campMult))
-            : 0;
+        // Mức ngày thường = nhịp nền trước mùa × số ngày của kỳ dịp (chưa có số đo độ tăng ĐƠN của dịp nên không nhân hệ số)
+        const targetOrders: number = computeTargetOrders(shopDailyRate, windowDays, 1) ?? 0;
+        const targetBasis = {
+            daily_rate: shopDailyRate != null ? Math.round(shopDailyRate * 100) / 100 : null,
+            rate_window_days: RATE_WINDOW_DAYS,
+            baseline_orders: baseline.orders,
+            baseline_days: baseline.coverage_days,
+            baseline_end: winStart.toISOString(),
+            // khoảng nền trùng kỳ bán của dịp khác → nhịp "ngày thường" có thể bị đẩy cao
+            baseline_overlaps: overlappingCampaigns(
+                data.all_campaigns || [],
+                new Date(winStart.getTime() - baseline.coverage_days * 86400000),
+                winStart,
+                activeCamp?.id,
+            ),
+            window_days: windowDays,
+            uplift: null,
+            uplift_source: null,
+            search_uplift: uplift?.value ?? null,
+            missing: baseline.missing,
+            low_confidence: baseline.low_confidence,
+        };
+
+        // Nhật ký dự báo: trước lễ, mỗi tuần lưu một bản "nếu bán như ngày thường"; sau lễ đối chiếu với thực tế
+        const logShopId = writableShopId(viewer);
+        const logYear = eventYearOf(activeCamp);
+        const campPhase: string = activeCamp?.timing?.current_phase || activeCamp?.occasion_window?.current_phase || '';
+        if (logShopId && logYear && campId && campPhase !== 'post_event') {
+            const snap = buildForecastSnapshot(shopRealOrders, {
+                traction_start: activeCamp?.occasion_window?.traction_start || launchWin.traction_start,
+                event_date: activeCamp?.occasion_window?.event_date || launchWin.peak_date,
+            }, new Date());
+            if (snap) {
+                await SeasonalForecastLog.updateOne(
+                    { shop_id: new mongoose.Types.ObjectId(logShopId), event_key: campId, event_year: logYear, iso_week: snap.iso_week },
+                    { $setOnInsert: { ...snap, search_uplift: uplift?.value ?? null } },
+                    { upsert: true },
+                ).catch(() => null);
+            }
+        }
+        if (logShopId && logYear && campId && campPhase === 'post_event') {
+            const logs = await SeasonalForecastLog.find({
+                shop_id: new mongoose.Types.ObjectId(logShopId), event_key: campId, event_year: logYear,
+            }).select('days_to_event expected made_at').lean().catch(() => [] as any[]);
+            const review = forecastAccuracy(logs as any[], campRealOrders.length);
+            data.forecast_review = review ? { ...review, event_key: campId, event_year: logYear } : null;
+        }
 
         // Kiểm tra chiến dịch đã phát sinh lưu lượng thật từ product_events hoặc đơn hàng chưa
         const hasActualTraffic = actualViews > 0 || actualAddCart > 0 || actualOrders > 0;
@@ -800,13 +843,10 @@ Yêu cầu nghiệp vụ:
         const realOrderRatePct = actualAddCart > 0 ? Math.round((actualOrders / actualAddCart) * 1000) / 10 : null;
         const realViewToOrderPct = actualViews > 0 ? Math.round((actualOrders / actualViews) * 1000) / 10 : null;
 
-        // Mục tiêu tham chiếu cho các tầng có tracking (`view`, `add_to_cart`) chỉ tính khi đã có nhịp chuyển đổi thực tế
-        const targetAddCart = (targetOrders > 0 && realOrderRatePct && realOrderRatePct > 0)
-            ? Math.max(targetOrders, Math.round(targetOrders / (realOrderRatePct / 100)))
-            : null;
-        const targetViews = (targetAddCart && realCartRatePct && realCartRatePct > 0)
-            ? Math.max(targetAddCart, Math.round(targetAddCart / (realCartRatePct / 100)))
-            : null;
+        // Mức so sánh của từng tầng = mức ngày thường của CHÍNH tầng đó (nhịp trước mùa × số ngày kỳ dịp),
+        // không suy ngược từ tỷ lệ chuyển đổi của kỳ đang đo (sẽ luôn ra cùng một % ở mọi tầng)
+        const targetAddCart = cartsNormal?.level ?? null;
+        const targetViews = viewsNormal?.level ?? null;
 
         const buildTier = (target: number | null, actual: number) => {
             const ratePercent = (target && target > 0) ? Math.min(100, Math.round((actual / target) * 100)) : 0;
@@ -889,7 +929,7 @@ Yêu cầu nghiệp vụ:
         const scenarios = (targetOrders > 0 && actualAov > 0) ? [
             {
                 key: 'baseline',
-                name: 'Mục tiêu Cơ sở',
+                name: 'Bằng ngày thường',
                 orders: targetOrders,
                 projected_gmv: targetGmv,
                 formula_basis: `${targetOrders} đơn × ${actualAov.toLocaleString('vi-VN')}đ (AOV thực tế)`,
@@ -899,7 +939,7 @@ Yêu cầu nghiệp vụ:
             },
             {
                 key: 'breakthrough',
-                name: 'Mục tiêu Bứt phá (+30%)',
+                name: 'Hơn ngày thường 30%',
                 orders: breakthroughOrders,
                 growth_pct: 30,
                 projected_gmv: breakthroughGmv,
@@ -910,7 +950,7 @@ Yêu cầu nghiệp vụ:
             },
             {
                 key: 'peak',
-                name: 'Mục tiêu Cao điểm (+60%)',
+                name: 'Hơn ngày thường 60%',
                 orders: peakOrders,
                 growth_pct: 60,
                 projected_gmv: peakGmv,
@@ -942,6 +982,7 @@ Yêu cầu nghiệp vụ:
                 orders: actualOrders,
                 direct_orders: directOrders.length,
                 halo_orders: haloOrdersCount,
+                status_breakdown: campStatus,
                 gmv_vnd: campTotalGmv,
                 orders_progress_pct: targetOrders > 0 ? Math.min(100, Math.round((actualOrders / targetOrders) * 100)) : 0,
                 remaining_orders: Math.max(0, targetOrders - actualOrders),
@@ -957,6 +998,15 @@ Yêu cầu nghiệp vụ:
             views_tier: buildTier(targetViews, actualViews),
             add_to_cart: buildTier(targetAddCart, actualAddCart),
             orders_tier: buildTier(targetOrders || null, actualOrders),
+            target_basis: targetBasis,
+            tier_basis: {
+                window_days: windowDays,
+                views: viewsNormal,
+                cart_adds: cartsNormal,
+                baseline_rates: baselineRates,
+                baseline_orders: baseOrdersSameSpan,
+                coverage_days: eventCoverageDays,
+            },
             diagnostics,
             scenarios,
             aov: actualAov,
@@ -1187,30 +1237,96 @@ Yêu cầu nghiệp vụ:
             }));
         }
 
-        // Đọc trạng thái ý tưởng đã lưu, bản chỉnh sửa ý tưởng, đánh giá sau dịp và checklist mốc thời gian
-        let savedIdeas: string[] = [];
-        let checkedMilestones: Record<string, boolean> = {};
-        let savedIdeaDrafts: Record<string, any> = {};
-        let occasionReviews: Record<string, any> = {};
+        // Kế hoạch mùa vụ theo kỳ (dịp + năm) từ seasonal_plans. Shop demo dùng chung: không có kế hoạch riêng.
         const seasonalPrefs = (shopDoc as any)?.settings?.seasonal_preferences;
-        if (seasonalPrefs) {
-            if (Array.isArray(seasonalPrefs.saved_ideas)) {
-                savedIdeas = seasonalPrefs.saved_ideas;
-            }
-            if (seasonalPrefs.checked_milestones) {
-                checkedMilestones = seasonalPrefs.checked_milestones;
-            }
-            if (seasonalPrefs.idea_drafts) {
-                savedIdeaDrafts = seasonalPrefs.idea_drafts;
-            }
-            if (seasonalPrefs.occasion_reviews) {
-                occasionReviews = seasonalPrefs.occasion_reviews;
-            }
+        const planShopId = writableShopId(viewer);
+        const plansByKey = new Map<string, any>();
+        if (planShopId) {
+            const plans = await SeasonalPlan.find({
+                shop_id: new mongoose.Types.ObjectId(planShopId),
+                event_year: { $gte: new Date().getFullYear() - 1 },
+            }).lean().catch(() => [] as any[]);
+            for (const pl of plans) plansByKey.set(planLookupKey(pl.event_key, pl.event_year), pl);
         }
+        const legacyPrefs = planShopId ? seasonalPrefs : null;
+        const activeCampId: string = data.active_campaign?.id || '';
+        const planEventYear = eventYearOf(data.active_campaign);
+        const activePlan = planViewFor(plansByKey, activeCampId, planEventYear, legacyPrefs);
+        const savedIdeas: string[] = activePlan.saved_ideas;
+
+        // Cập nhật mốc thời gian vào các kế hoạch đã có (để job nhắc việc biết khi nào nhắc)
+        if (planShopId && plansByKey.size > 0) {
+            const ops: any[] = [];
+            for (const camp of (data.all_campaigns || []) as any[]) {
+                const year = eventYearOf(camp);
+                const ow = camp.occasion_window || {};
+                const pl = year != null ? plansByKey.get(planLookupKey(camp.id, year)) : null;
+                if (!pl || !ow.traction_start || !ow.cut_off_date || !ow.event_date) continue;
+                const milestones = {
+                    event_name: camp.name, traction_start: ow.traction_start, cut_off_date: ow.cut_off_date,
+                    event_date: ow.event_date, post_event_end: ow.post_event_end || ow.event_date,
+                };
+                if (JSON.stringify(pl.milestones || {}) !== JSON.stringify(milestones)) {
+                    ops.push({ updateOne: { filter: { _id: pl._id }, update: { $set: { milestones } } } });
+                }
+            }
+            if (ops.length) await SeasonalPlan.bulkWrite(ops).catch(() => null);
+        }
+
+        // Mốc đã tick của mọi dịp trong lịch, mỗi dịp lấy đúng kỳ (năm) của nó; khóa giữ dạng FE đang dùng `${camp}_${...}`
+        const checkedMilestones: Record<string, boolean> = {};
+        for (const camp of (data.all_campaigns || []) as any[]) {
+            const view = planViewFor(plansByKey, camp.id, eventYearOf(camp), null);
+            for (const [k, v] of Object.entries(view.checked_milestones)) checkedMilestones[`${camp.id}_${k}`] = Boolean(v);
+        }
+        // Dịp đang xem: thêm khóa không tiền tố (`${idea}_${idx}`, `${idx}`) mà thẻ Áp dụng đang đọc
+        Object.assign(checkedMilestones, activePlan.checked_milestones);
         data.saved_ideas = savedIdeas;
         data.checked_milestones = checkedMilestones;
-        data.saved_idea_drafts = savedIdeaDrafts;
-        data.occasion_reviews = occasionReviews;
+        data.saved_idea_drafts = activePlan.idea_drafts;
+        data.occasion_reviews = activePlan.review ? { [activeCampId]: activePlan.review } : {};
+        data.idea_reviews = activePlan.idea_reviews;
+        data.plan = { event_key: activeCampId, event_year: planEventYear, source: activePlan.source };
+        data.saved_idea_snapshots = activePlan.idea_snapshots;
+
+        // Ý tưởng → áp dụng (sản phẩm có source_idea_id) → thành quả (đơn hợp lệ trong kỳ dịp), đo từ dữ liệu thật
+        // Gồm cả sản phẩm đã hết hạn đăng hay đã ẩn: đơn chúng bán được trong kỳ vẫn là thành quả của ý tưởng
+        const ideaProducts = liveShopOid
+            ? await Product.find({ shop_id: liveShopOid, source_idea_id: { $exists: true, $nin: [null, ''] } })
+                .select('_id title source_idea_id').limit(2000).lean().catch(() => [] as any[])
+            : [];
+        data.idea_outcomes = ideaOutcomes({
+            campId: activeCampId,
+            savedIdeaIds: savedIdeas,
+            snapshots: activePlan.idea_snapshots,
+            drafts: activePlan.idea_drafts,
+            products: ideaProducts as any[],
+            orders: shopRealOrders,
+            window: { start: winStart, end: winEnd },
+        });
+        applyIdeaOutcomesToImpact(data.impact, data.story, data.idea_outcomes);
+
+        // Bài học mùa trước (cùng dịp, kỳ năm trước): đánh giá + ghi chú seller + kết quả thật từng ý tưởng đã chọn
+        const prevPlan = planEventYear != null ? plansByKey.get(planLookupKey(activeCampId, planEventYear - 1)) : null;
+        let previousSeasonLesson: PreviousSeasonLesson | null = null;
+        if (prevPlan) {
+            const ms = prevPlan.milestones || {};
+            const yearAgo = (d: Date) => new Date(d.getTime() - 365 * 86400000);
+            const prevWindow = ms.traction_start && (ms.post_event_end || ms.event_date)
+                ? { start: vnDayStart(String(ms.traction_start).slice(0, 10)), end: vnDayEnd(String(ms.post_event_end || ms.event_date).slice(0, 10)) }
+                : { start: yearAgo(winStart), end: yearAgo(winEnd) };
+            const prevView = planViewFor(plansByKey, activeCampId, planEventYear! - 1, null);
+            const prevOutcomes = ideaOutcomes({
+                campId: activeCampId,
+                savedIdeaIds: prevView.saved_ideas,
+                snapshots: prevView.idea_snapshots,
+                drafts: prevView.idea_drafts,
+                products: ideaProducts as any[],
+                orders: shopRealOrders,
+                window: prevWindow,
+            });
+            previousSeasonLesson = buildPreviousSeasonLesson(prevPlan, prevOutcomes);
+        }
 
         // Phân tích Shop DNA (phong cách & khung giá thật từ sản phẩm của shop) để scope chặt cho LLM sinh ý tưởng
         const tagFreq: Record<string, number> = {};
@@ -1331,6 +1447,7 @@ Yêu cầu nghiệp vụ:
                 campName: data.active_campaign.name || 'Dịp cao điểm',
                 eventYear: activeEventYear,
                 persistedIdeas,
+                persistedInputsAt: persistedEntry?.inputs_at ?? null,
                 shopStyleKeywords: bpStyleKws,
                 shopSampleTitles: bpTitles,
                 priceBand: bpPriceBand,
@@ -1341,6 +1458,7 @@ Yêu cầu nghiệp vụ:
                 occasionIndustryClusters: aiBlueprint?.occasion_industry_benchmarks?.top_selling_clusters || [],
                 occasionIndustryPriceBand: aiBlueprint?.occasion_industry_benchmarks?.price_band,
                 industryScale: aiBlueprint?.market_scale,
+                previousSeason: previousSeasonLesson,
             })
             : Promise.resolve([]);
 
@@ -1352,10 +1470,12 @@ Yêu cầu nghiệp vụ:
                 const daysToEvent = Number(camp.timing?.days_to_event ?? 15);
                 const isUrgent = daysToCutoff <= 3;
                 const currentPhase = camp.timing?.current_phase || (isUrgent ? 'cutoff' : (daysToEvent <= 10 ? 'traction' : 'prep'));
+                // Sát lễ / sau lễ: giữ nguyên gợi ý theo pha do AI tính (bán hàng có sẵn, giao nhanh / xem kết quả)
+                if (currentPhase === 'last_call' || currentPhase === 'post_event') return;
 
                 const tracStart = camp.launch_window?.traction_start ? new Date(camp.launch_window.traction_start) : null;
-                const cutEnd = camp.launch_window?.end ? new Date(camp.launch_window.end) : null;
-                const rdStart = camp.readiness_window?.start ? new Date(camp.readiness_window.start) : null;
+                const cutEnd = camp.launch_window?.end ? vnDayEnd(String(camp.launch_window.end).slice(0, 10)) : null;
+                const rdStart = camp.launch_window?.start ? vnDayStart(String(camp.launch_window.start).slice(0, 10)) : null;
                 const evDate = camp.event_date ? new Date(camp.event_date) : (camp.occasion_window?.event_date ? new Date(camp.occasion_window.event_date) : null);
 
                 const tracStr = tracStart ? formatVnDate(tracStart) : '';
@@ -1376,22 +1496,24 @@ Yêu cầu nghiệp vụ:
                 const firstMatchedTitle = matchCount > 0 ? matchedProds[0].title : '';
                 const totalStock = matchedProds.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
 
-                const campStart = camp.launch_window?.start ? new Date(camp.launch_window.start) : new Date(0);
-                const campOrdersCount = (shopRealOrders || []).filter((o: any) => {
-                    const oDate = new Date(o.created_at);
-                    return oDate >= campStart && (!cutEnd || oDate <= cutEnd);
-                }).length;
+                // Cùng kỳ đo với phễu: từ ngày mở bán; dịp chưa có lịch thì không đếm
+                const campStartStr = camp.launch_window?.traction_start || camp.launch_window?.start;
+                const campOrdersCount = campStartStr
+                    ? ordersInWindow(shopRealOrders || [], vnDayStart(String(campStartStr).slice(0, 10)), cutEnd || new Date()).length
+                    : 0;
 
                 const isCurrentActive = camp.id === (data.active_campaign?.id || '');
-                const campSavedCount = savedIdeas.filter(id => id.toLowerCase().includes(camp.id?.toLowerCase())).length
-                    || (isCurrentActive ? savedIdeas.length : 0);
+                const campSavedCount = isCurrentActive
+                    ? savedIdeas.length
+                    : planViewFor(plansByKey, camp.id, eventYearOf(camp), null).saved_ideas.length;
 
                 const evYear = evDate ? evDate.getFullYear() : (tracStart ? tracStart.getFullYear() : new Date().getFullYear());
                 const catSlug = detectedSlug || 'tong-hop';
                 const catName = detectedName || 'Ngành hàng của shop';
+                // Độ nâng lượt tìm kiếm chỉ đo cho dịp đang xem; không gán cho các dịp khác
                 const growthPct: number | null =
-                    marketOrdersGrowthPct != null && Number.isFinite(marketOrdersGrowthPct)
-                        ? Math.round(marketOrdersGrowthPct)
+                    camp.id === (data.active_campaign?.id || '') && searchUpliftPct != null
+                        ? searchUpliftPct
                         : null;
 
                 const categorySuggestions: Record<string, { winterItem: string; noelGift: string; tetSpecial: string }> = {
@@ -1508,7 +1630,7 @@ Yêu cầu nghiệp vụ:
                     recTitle = geminiRec.title;
                     recAdvice = geminiRec.advice;
                 } else if (isUrgent) {
-                    const growthPhrase = growthPct !== null ? ` Sức mua ngành ${catName} đợt ${campName} ${evYear} dự báo tăng ${growthPct >= 0 ? '+' : ''}${growthPct}%.` : '';
+                    const growthPhrase = growthPct !== null ? ` Lượt tìm kiếm dịp ${campName} thường ${growthPct >= 0 ? 'tăng' : 'giảm'} ${Math.abs(growthPct)}% so với ngày thường.` : '';
                     if (campKey.includes('tet')) {
                         recTitle = `Khóa nhận đơn Tết ${evYear}, xả toàn bộ hàng sẵn`;
                         recAdvice = `Chỉ còn ${daysToCutoff} ngày đến hạn chốt an toàn (${cutStr}). Bưu cục bắt đầu quá tải và xưởng nghỉ Tết sớm; tắt ngay phân loại đặt trước, dồn toàn lực đóng gói ${matchCount > 0 ? `${matchCount} mẫu có sẵn` : 'toàn bộ đơn hàng'} để kịp bàn giao trước hạn chốt.`;
@@ -1545,7 +1667,7 @@ Yêu cầu nghiệp vụ:
                         recAdvice = `Nhu cầu tìm "${kw}" dịp ${campName} ${evYear} đang tăng tốc. Đăng ngay sản phẩm sẵn có để bot sàn kịp nhận diện từ khóa trước tuần lễ cao điểm.`;
                     }
                 } else {
-                    const growthPhrase = growthPct !== null ? ` Sức mua ngành ${catName} đợt ${campName} ${evYear} dự báo tăng ${growthPct >= 0 ? '+' : ''}${growthPct}%.` : '';
+                    const growthPhrase = growthPct !== null ? ` Lượt tìm kiếm dịp ${campName} thường ${growthPct >= 0 ? 'tăng' : 'giảm'} ${Math.abs(growthPct)}% so với ngày thường.` : '';
                     if (campKey.includes('12/12') || campKey.includes('11/11')) {
                         if (matchCount > 0) {
                             recTitle = `Lên gói combo & deal mua kèm cho ${matchCount} mẫu sẵn có`;
@@ -1571,7 +1693,7 @@ Yêu cầu nghiệp vụ:
                     } else if (campKey.includes('tet')) {
                         if (matchCount > 0) {
                             recTitle = `Chốt nguồn hàng Tết ${evYear} & Khóa hạn giao an toàn`;
-                            recAdvice = `Đã có ${matchCount} mẫu Tết ("${firstMatchedTitle}"). Cận Tết ${evYear} các đơn vị vận chuyển và nhà cung ứng thường quá tải và ngừng nhận đơn từ 20 tháng Chạp; cần chốt lượng hàng dự phòng cho ${catSugg.tetSpecial} trước ngày mở bán (${tracStr}) để tránh đứt hàng.`;
+                            recAdvice = `Đã có ${matchCount} mẫu Tết ("${firstMatchedTitle}"). Cận Tết ${evYear} các đơn vị vận chuyển và nhà cung ứng thường quá tải và nghỉ Tết sớm; cần chốt lượng hàng dự phòng cho ${catSugg.tetSpecial} trước ngày mở bán (${tracStr}) để tránh đứt hàng.`;
                         } else if (campSavedCount > 0) {
                             recTitle = `Chuẩn bị tồn kho sớm cho mẫu Tết ${evYear} đã lưu`;
                             recAdvice = `Đã lưu ${campSavedCount} ý tưởng Tết. Nhập hàng và chuẩn bị tồn kho sớm cho mẫu ${catSugg.tetSpecial} trước ngày mở bán (${tracStr}) để đón đầu lượng tìm kiếm sắm Tết và tránh chi phí nhập hàng tăng cao cận Tết.`;
@@ -1620,11 +1742,7 @@ Yêu cầu nghiệp vụ:
                 camp.action_recommendation = {
                     title: recTitle,
                     advice: recAdvice,
-                    calculation_basis: isUrgent
-                        ? `Hạn chốt an toàn ${cutStr} = Ngày sự kiện (${evStr}) − 10 ngày (trừ hao bưu cục quá tải).`
-                        : (currentPhase === 'traction' || (tracStart && new Date() >= tracStart))
-                        ? `Mở bán gom đơn ${tracStr} = Trước cao điểm 10-15 ngày để gom đánh giá & SEO sàn.`
-                        : `Bắt đầu chuẩn bị ${rdStr} = Ngày sự kiện (${evStr}) − 38 ngày (thời gian làm phôi & ảnh mẫu).`,
+                    calculation_basis: campaignTimingBasis(camp, actionType as 'close_orders' | 'boost_traffic' | 'prepare_inventory'),
                     cta_label: ctaLabel,
                     target_tab: targetTab,
                     action_type: actionType,
@@ -1639,7 +1757,23 @@ Yêu cầu nghiệp vụ:
         if (llmTraitActions && llmTraitActions.length > 0) {
             data.trait_actions = llmTraitActions;
         }
-        data.ai_ideas = aiIdeas;
+        // Ý tưởng đã lưu trước đây còn mang biên lãi suy từ tỷ lệ chung (ý tưởng nào cũng như nhau) → bỏ
+        data.ai_ideas = aiIdeas.map((idea: any) => stripIdeaMargin(idea));
+        // Bài học mùa trước để nhắc seller; used_by_ai chỉ true khi ý tưởng đang hiện được LLM soạn kèm bài học này
+        data.previous_season_lesson = previousSeasonLesson
+            ? { ...previousSeasonLesson, used_by_ai: Boolean(persistedEntry?.lesson_used) && aiIdeas[0]?.source_type === 'llm_scoped' }
+            : null;
+        // 'ready': ý tưởng do LLM soạn riêng cho shop; 'generating': đang soạn nền, tạm hiện bản phác thảo từ số liệu
+        data.ai_ideas_status = !data.active_campaign
+            ? 'none'
+            : aiIdeas[0]?.source_type === 'llm_scoped'
+                ? 'ready'
+                : SeasonalAnalyticsService.ideasJobStatus({
+                    shopId: viewer.live_shop_id || viewer.analysed_shop_id || 'default',
+                    campId: activeCampIdForGen,
+                    eventYear: activeEventYear,
+                    catName: data.seller_category?.name || 'Thời trang & Phụ kiện',
+                }) === 'running' ? 'generating' : 'draft';
 
         return data;
     }

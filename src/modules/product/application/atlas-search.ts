@@ -37,8 +37,8 @@ export async function isAtlasSearchReady(): Promise<boolean> {
 
 function strictQuery(q: string): object {
     const should: object[] = [{ text: { query: q, path: PATHS, matchCriteria: 'all' } }];
-    // Chỉ dò kiểu gõ liền ("aothun"); có dấu cách thì ghép lại dễ khớp nhầm qua ranh giới từ ("thun nón")
-    if (!/\s/.test(q) && q.length >= 3) {
+    // Bỏ qua từ dưới 5 chữ ("ren") vì dễ khớp nhầm trong từ khác; chỉ dò kiểu gõ liền
+    if (!/\s/.test(q) && normalizeVi(q).length >= 5) {
         should.push({ text: { query: q, path: [{ value: 'title', multi: 'compact' }, { value: 'tags', multi: 'compact' }], matchCriteria: 'all' } });
     }
     return { compound: { should, minimumShouldMatch: 1 } };

@@ -24,16 +24,18 @@ export interface AnomalyEvent {
 }
 
 const METRIC_LABEL = { revenue: 'Doanh thu', views: 'Lượt xem' };
+const ZERO_LABEL = { revenue: 'đơn', views: 'lượt xem' };
 
 const fmt = (n: number) => Math.round(n).toLocaleString('vi-VN');
 const shortDate = (date: string) => date.split('-').slice(1).reverse().join('/');
+export const prevDay = (date: string) => new Date(Date.parse(`${date}T00:00:00Z`) - 864e5).toISOString().slice(0, 10);
 const absPct = (pct: number) => Math.abs(Math.round(pct));
 
 export function buildAlertMessage(e: AnomalyEvent): { title: string; content: string } {
     if (e.rule === 'zero_run') {
         return {
-            title: 'Shop không có đơn nhiều ngày liền',
-            content: `Đến ngày ${shortDate(e.date)} shop không ghi nhận đơn trong nhiều ngày liền.`,
+            title: `Shop không có ${ZERO_LABEL[e.metric]} nhiều ngày liền`,
+            content: `Đến ngày ${shortDate(e.date)} shop không ghi nhận ${ZERO_LABEL[e.metric]} trong nhiều ngày liền.`,
         };
     }
 

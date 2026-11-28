@@ -19,36 +19,13 @@ export async function getTrendingKeywords(limit = 8): Promise<string[]> {
         return cache.keywords.slice(0, limit);
     }
 
-    let keywords = await fetchFromAi();
-    if (keywords.length === 0) {
-        keywords = await fetchFromTrendCollections();
-    }
+    const keywords = await fetchFromTrendCollections();
 
     const isLive = keywords.length > 0;
     const formatted = Array.from(new Set((isLive ? keywords : FALLBACK_KEYWORDS).map(formatKw).filter(Boolean))).slice(0, POOL);
     cache = { keywords: formatted, expiresAt: now + (isLive ? LIVE_TTL_MS : FALLBACK_TTL_MS) };
 
     return formatted.slice(0, limit);
-}
-
-async function fetchFromAi(): Promise<string[]> {
-    if (!config.aiAnalyticsUrl) return [];
-    try {
-        const res = await fetch(`${config.aiAnalyticsUrl}/api/analytics/forecast/niches`, {
-            headers: {
-                Accept: 'application/json',
-                'X-Gateway-Secret': config.aiGatewaySecret || '',
-                'X-Shop-Id': 'demo',
-            },
-            signal: AbortSignal.timeout(1200),
-        });
-        if (!res.ok) return [];
-        const json: any = await res.json();
-        const niches = json?.data?.niches || json?.niches || [];
-        return Array.isArray(niches) ? niches.slice(0, POOL).map((n: any) => n.keyword).filter(Boolean) : [];
-    } catch {
-        return []; // AI offline hoặc timeout
-    }
 }
 
 async function fetchFromTrendCollections(): Promise<string[]> {
@@ -75,7 +52,7 @@ async function fetchFromTrendCollections(): Promise<string[]> {
         }
         return [];
     } catch (err: any) {
-        logger.warn(`Lỗi khi lấy trending keywords từ AI Analyst: ${err?.message}`);
+        logger.warn(`Lỗi khi lấy trending keywords từ bảng trend: ${err?.message}`);
         return [];
     }
 }
