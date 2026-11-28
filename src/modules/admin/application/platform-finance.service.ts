@@ -287,7 +287,9 @@ function summarize(groups: any[], config: FinanceConfig, platformCodes: Set<stri
             discount += g.discount || 0;
             commission += g.commission || 0;
             paymentFees += fee;
-            if (platformCodes.has(g._id.coupon)) platformVoucher += g.discount || 0;
+            // Đơn có thể dùng 2 mã: phần giảm ship và phần giảm hàng tính riêng theo mã nào do sàn chịu.
+            if (platformCodes.has(g._id.coupon)) platformVoucher += (g.discount || 0) - (g.shipDiscount || 0);
+            if (platformCodes.has(g._id.shipCoupon)) platformVoucher += g.shipDiscount || 0;
             const m = mix.get(method) ?? { method, name: feeByCode.get(method)?.name ?? method, orders: 0, amount: 0, fee: 0 };
             m.orders += g.orders;
             m.amount += amount;
@@ -345,10 +347,11 @@ export class PlatformFinanceService {
             gmv: money('subtotal'),
             shipping: money('shipping_fee'),
             discount: money('coupon_discount'),
+            shipDiscount: money('shipping_discount'),
             commission: money('platform_fee'),
         };
         const counted = { payment_status: { $in: ['PAID', 'REFUNDED'] } };
-        const groupKey = { status: '$payment_status', method: '$payment_method', coupon: '$coupon_code' };
+        const groupKey = { status: '$payment_status', method: '$payment_method', coupon: '$coupon_code', shipCoupon: '$shipping_coupon_code' };
 
         const [config, windowGroups, monthGroups, commissionPercent] = await Promise.all([
             this.getConfig(),
@@ -371,7 +374,7 @@ export class PlatformFinanceService {
             CommissionSetting.getPercent(),
         ]);
 
-        const codes = [...new Set([...windowGroups, ...monthGroups].map((g: any) => g._id.coupon).filter(Boolean))];
+        const codes = [...new Set([...windowGroups, ...monthGroups].flatMap((g: any) => [g._id.coupon, g._id.shipCoupon]).filter(Boolean))];
         const platformCodes = new Set(
             codes.length
                 ? (await Coupon.find({ code: { $in: codes }, shop_id: null }).select('code').lean()).map(c => c.code)

@@ -190,7 +190,7 @@ export class SellerFinanceService {
         const items: SellerSettlementItem[] = rows.slice(skip, skip + limit).map(({ ord, settlementStatus }) => {
             const subtotal = Number(ord.financial_breakdown?.subtotal?.toString() || 0);
             const { payout: netPayout, platformFee } = moneyOf(ord);
-            const commissionRate = subtotal > 0 ? platformFee / subtotal : 0;
+            const commissionRate = Number(ord.financial_breakdown?.commission_rate?.toString() || 0.10);
             const delivered = ord.order_status === 'DELIVERED' ? deliveredAt(ord) ?? undefined : undefined;
 
             return {
