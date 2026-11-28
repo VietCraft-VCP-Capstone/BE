@@ -17,6 +17,7 @@ import { listingImpact, recordHealthAction } from '../application/listing-impact
 import { listingRanking } from '../application/listing-ranking.service';
 import { parsePreviewBody, PreviewBodyResult } from '../application/health-preview';
 import { parseHealthDraft } from '../application/health-draft';
+import { parseHealthFeedback } from '../application/health-feedback';
 import { userRateLimit } from '../../../app/middleware/rate-limit.middleware';
 
 type Method = 'get' | 'post' | 'delete';
@@ -53,6 +54,7 @@ const ROUTES: GatewayRoute[] = [
     { method: 'get', path: '/listings/:id/timeseries', ai: p => `/api/analytics/listings/${p.id}/timeseries`, query: ['timeRange'] },
     { method: 'get', path: '/listings/:id/conversion', ai: p => `/api/analytics/listings/${p.id}/conversion` },
     { method: 'post', path: '/listings/:id/health/preview', ai: p => `/api/analytics/listings/${p.id}/health/preview`, parseBody: parsePreviewBody },
+    { method: 'post', path: '/listings/:id/health/feedback', ai: p => `/api/analytics/listings/${p.id}/health/feedback`, parseBody: parseHealthFeedback },
     { method: 'get', path: '/alerts', ai: () => '/api/notifications/alerts', query: ['period'] },
     { method: 'get', path: '/money', ai: () => '/api/analytics/shop/money', query: ['timeRange', 'from_date', 'to_date'] },
     { method: 'get', path: '/money/advice', ai: () => '/api/analytics/shop/money/advice', query: ['timeRange', 'from_date', 'to_date'] },
@@ -265,6 +267,7 @@ router.get('/listings/health/summary', async (req: AuthenticatedRequest, res: Re
 });
 
 router.post('/listings/health/draft', userRateLimit(20, 60_000, 'Bạn thử quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
+router.post('/listings/:id/health/feedback', userRateLimit(30, 60_000, 'Bạn gửi phản hồi quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 // Mỗi lần nhận diện ảnh tốn hạn mức Gemini
 router.post('/product/recognize-image', userRateLimit(10, 60_000, 'Bạn nhận diện ảnh quá nhiều lần, vui lòng đợi một phút rồi thử lại.'));
 
