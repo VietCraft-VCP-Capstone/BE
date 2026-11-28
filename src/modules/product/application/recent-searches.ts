@@ -28,3 +28,9 @@ export async function clearRecentSearches(userId: string): Promise<void> {
     if (!validId(userId)) return;
     await RecentSearch.updateOne({ user_id: userId }, { $set: { keywords: [] } });
 }
+
+export async function removeRecentSearch(userId: string, keyword: string): Promise<string[]> {
+    if (!validId(userId)) return [];
+    await RecentSearch.updateOne({ user_id: userId }, { $pull: { keywords: keyword } });
+    return getRecentSearches(userId);
+}
