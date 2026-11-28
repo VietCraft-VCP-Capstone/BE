@@ -41,7 +41,7 @@ import { cacheService } from '../../../shared/services/cache.service';
 import { ShopService } from './shop.service';
 import { R06_DELIVERED_WINDOW_HOURS } from '../../order/application/return-policy';
 import { CommissionSetting } from '../../../shared/services/commission-setting.service';
-import { commissionFromGross, withCommission } from '../../../shared/utils/commission';
+import { withCommission } from '../../../shared/utils/commission';
 import { uploadImage, isCloudinaryEnabled } from '../../../infrastructure/storage/cloudinary.service';
 import { contentModerationService } from '../../../shared/services/content-moderation.service';
 import { normalizeMaterials } from '../../../shared/utils/materials';
@@ -474,7 +474,6 @@ export class ProductsService {
             const fields = {
                 color: s.option,
                 size: s.size,
-                base_cost: mongoose.Types.Decimal128.fromString(Math.round(s.price * 0.7).toString()),
                 retail_price: mongoose.Types.Decimal128.fromString(withCommission(s.price, commissionPercent).toString()),
                 stock_quantity: s.stock,
                 is_active: true,
@@ -488,7 +487,8 @@ export class ProductsService {
                 );
             } else {
                 const sku = `${baseSku}-${optionIndex.get(s.option)}${s.size ? '-' + s.size : ''}`;
-                await MongoVariant.create({ product_id: productId, sku, mockup_image: s.image, ...fields });
+                // 0 = chưa có giá vốn: không đoán từ giá bán; dòng cũ giữ nguyên giá vốn đang có.
+                await MongoVariant.create({ product_id: productId, sku, mockup_image: s.image, base_cost: mongoose.Types.Decimal128.fromString('0'), ...fields });
             }
         }
         const removed = existing.filter(v => !kept.has(v._id.toString())).map(v => v._id);
@@ -1316,7 +1316,7 @@ export class ProductsService {
         } else {
             await ProductsService.writeVariants(
                 mp._id,
-                ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
+                ProductsService.colorsToVariants(payload.colors, baseSku, totalStock, listPrice, payload.sizes)
             );
         }
         if (tags.length) {
@@ -1330,20 +1330,16 @@ export class ProductsService {
 
 
     /**
-     * `basePrice` là giá người bán nhận (dùng để suy ra giá vốn), `listPrice` là giá niêm yết
-     * đã cộng hoa hồng sàn. Hai số khác nhau nên phải truyền riêng — lấy listPrice tính giá vốn
-     * thì giá vốn bị thổi theo hoa hồng.
+     * `listPrice` là giá niêm yết đã cộng hoa hồng sàn.
      * Hỗ trợ tạo biến thể theo bảng size cho sản phẩm áo quần/thời trang.
      */
     private static colorsToVariants(
         colors: ProductColorVariantDTO[] | undefined,
         baseSku: string,
-        basePrice: number,
         totalStock: number,
         listPrice: number,
         sizes?: string[]
     ): VariantInput[] {
-        const baseCost = Math.round(basePrice * 0.7);
         const validSizes = (sizes || []).map(s => String(s || '').trim()).filter(Boolean);
         const validColors = (colors || []).filter(c => c && c.name && c.name.trim());
 
@@ -1364,7 +1360,6 @@ export class ProductsService {
                         color: c.name,
                         size: s,
                         mockup_image: c.hex,
-                        base_cost: baseCost,
                         price: listPrice,
                         stock: isLast ? totalStock - perVariant * (totalCombos - 1) : perVariant,
                     });
@@ -1381,7 +1376,6 @@ export class ProductsService {
                 size: s,
                 color: validColors[0]?.name || 'Tiêu chuẩn',
                 mockup_image: validColors[0]?.hex || '#5C4033',
-                base_cost: baseCost,
                 price: listPrice,
                 stock: i === validSizes.length - 1 ? totalStock - perVariant * (validSizes.length - 1) : perVariant,
             }));
@@ -1394,7 +1388,6 @@ export class ProductsService {
                 sku: `${baseSku}-${i + 1}`,
                 color: c.name,
                 mockup_image: c.hex,
-                base_cost: baseCost,
                 price: listPrice,
                 stock: i === validColors.length - 1 ? totalStock - perColor * (validColors.length - 1) : perColor,
             }));
@@ -1404,7 +1397,6 @@ export class ProductsService {
         return [{
             sku: baseSku,
             color: 'Tự nhiên',
-            base_cost: baseCost,
             price: listPrice,
             stock: totalStock,
         }];
@@ -1740,19 +1732,15 @@ export class ProductsService {
                 : existing.reduce((sum, v) => sum + (Number(v.stock_quantity) || 0), 0);
 
             // `payload.price` là giá người bán NHẬN, còn giá trong DB là giá NIÊM YẾT (đã gồm
-            // hoa hồng). Sửa màu/size mà không nhập giá thì giữ nguyên giá niêm yết từng đồng, đồng
-            // thời bóc hoa hồng ra để giá vốn vẫn tính trên cùng cơ sở như lúc tạo sản phẩm.
-            const dbPrice = parseFloat(existing[0]?.retail_price?.toString() || '0');
-            const commissionPercent = await ProductsService.resolveProductCommission(mp);
-            const basePrice = payload.price !== undefined
-                ? Number(payload.price)
-                : dbPrice - commissionFromGross(dbPrice, commissionPercent);
+            // hoa hồng). Sửa màu/size mà không nhập giá thì giữ nguyên giá niêm yết từng đồng.
             const listPrice = payload.price !== undefined
-                ? withCommission(basePrice, commissionPercent)
-                : dbPrice;
+                ? withCommission(Number(payload.price), await ProductsService.resolveProductCommission(mp))
+                : parseFloat(existing[0]?.retail_price?.toString() || '0');
+            const oldCost = new Map(existing.map(v => [`${v.color}|${v.size || ''}`, Number(v.base_cost?.toString() || 0)]));
             await ProductsService.writeVariants(
-                mp._id, 
-                ProductsService.colorsToVariants(payload.colors, baseSku, basePrice, totalStock, listPrice, payload.sizes)
+                mp._id,
+                ProductsService.colorsToVariants(payload.colors, baseSku, totalStock, listPrice, payload.sizes)
+                    .map(v => ({ ...v, base_cost: oldCost.get(`${v.color}|${v.size || ''}`) ?? 0 }))
             );
         } else {
             const updates: any = {};
