@@ -99,7 +99,7 @@ export async function sendSellerApprovalEmail(to: string, shopName: string, sell
                         Truy cập Kênh Người Bán
                     </a>
                 </div>
-                <p style="color:#9ca3af;font-size:12px;margin:0;text-align:center">Cảm ơn bạn đã đồng hành cùng cộng đồng thủ công mỹ nghệ Việt Nam!</p>
+                <p style="color:#9ca3af;font-size:12px;margin:0;text-align:center">Cảm ơn bạn đã đồng hành cùng VietCraft!</p>
             </div>
         `,
     });
